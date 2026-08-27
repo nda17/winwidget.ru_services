@@ -21,8 +21,6 @@ export const BILLING_EVENT_TYPES = {
 		'notification.subscription-expiry.telegram.requested.v1',
 	paymentChanged: 'billing.payment.changed.v1',
 	subscriptionChanged: 'billing.subscription.changed.v1',
-	paymentDetailsChanged: 'billing.payment.details.changed.v1',
-	subscriptionDetailsChanged: 'billing.subscription.details.changed.v1',
 	affiliateChanged: 'billing.affiliate.changed.v1',
 	settingsChanged: 'billing.settings.changed.v1',
 	adminAudit: 'admin.audit.event.v1'

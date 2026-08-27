@@ -1813,39 +1813,20 @@ export class PaymentDomainService {
 		}
 	): Promise<void> {
 		const occurredAt = payment.updatedAt.toISOString();
-		await Promise.all([
-			this.outbox(
-				transaction,
-				BILLING_EVENT_TYPES.paymentChanged,
-				payment,
-				{
-					id: payment.id,
-					userId: payment.userId,
-					amount: payment.amount,
-					status: payment.status,
-					createdAt: payment.createdAt.toISOString(),
-					updatedAt: payment.updatedAt.toISOString()
-				},
-				occurredAt
-			),
-			this.outbox(
-				transaction,
-				BILLING_EVENT_TYPES.paymentDetailsChanged,
-				payment,
-				{
-					id: payment.id,
-					userId: payment.userId,
-					yookassaId: payment.yookassaId,
-					status: payment.status,
-					amount: payment.amount,
-					plan: payment.plan,
-					billingPeriod: payment.billingPeriod,
-					createdAt: payment.createdAt.toISOString(),
-					updatedAt: payment.updatedAt.toISOString()
-				},
-				occurredAt
-			)
-		]);
+		await this.outbox(
+			transaction,
+			BILLING_EVENT_TYPES.paymentChanged,
+			payment,
+			{
+				id: payment.id,
+				userId: payment.userId,
+				amount: payment.amount,
+				status: payment.status,
+				createdAt: payment.createdAt.toISOString(),
+				updatedAt: payment.updatedAt.toISOString()
+			},
+			occurredAt
+		);
 	}
 
 	private async outbox(

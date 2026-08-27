@@ -32,7 +32,9 @@ Webhook YooKassa обрабатывается по `POST /api/v1/payments/webhoo
 - Operations вызывает `/internal/v1/operations/billing/admin-alerts` и
   `/internal/v1/operations/billing/messaging/**` с
   `BILLING_OPERATIONS_TOKEN`; и вызывающая сторона, и сокет должны быть
-  локальными.
+  локальными. В admin alerts входят отменённые YooKassa-чеки, терминальные
+  ошибки их синхронизации и отсутствующие либо pending чеки старше 30 минут;
+  corrective receipt остаётся ручным контролируемым действием.
 - Billing вызывает introspection Identity с `IDENTITY_BILLING_TOKEN` и
   закрытый API Widgets с `WIDGETS_INTERNAL_TOKEN`.
 

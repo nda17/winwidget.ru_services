@@ -625,21 +625,6 @@ export class BillingSchedulerService
 					createdAt: payment.createdAt.toISOString(),
 					updatedAt: payment.updatedAt.toISOString()
 				}),
-				this.paymentOutbox(
-					payment,
-					BILLING_EVENT_TYPES.paymentDetailsChanged,
-					{
-						id: payment.id,
-						userId: payment.userId,
-						yookassaId: payment.yookassaId,
-						status: payment.status,
-						amount: payment.amount,
-						plan: payment.plan,
-						billingPeriod: payment.billingPeriod,
-						createdAt: payment.createdAt.toISOString(),
-						updatedAt: payment.updatedAt.toISOString()
-					}
-				),
 				{
 					eventId: chargeEventId,
 					eventType: BILLING_EVENT_TYPES.autoRenewalChargeRequested,

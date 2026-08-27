@@ -42,6 +42,15 @@ if rg -n \
 	exit 1
 fi
 
+if rg -n \
+	'paymentDetailsChanged|subscriptionDetailsChanged|billing\.payment\.details\.changed\.v1|billing\.subscription\.details\.changed\.v1' \
+	apps/billing/src \
+	--glob '!**/dist/**' \
+	--glob '!**/node_modules/**'; then
+	echo 'A retired Core-owned Billing detail projection remains.' >&2
+	exit 1
+fi
+
 if git ls-files | rg '(^|/)\.env\.production$'; then
 	echo 'A production env file is tracked by Git.' >&2
 	exit 1
@@ -261,6 +270,26 @@ const databaseActivationCleanupMigrations = {
 		'utf8'
 	)
 };
+
+const unroutableBillingEventCleanup = readFileSync(
+	'apps/billing/prisma/migrations/20260827040000_remove_unroutable_billing_detail_events/migration.sql',
+	'utf8'
+);
+for (const statement of [
+	'DELETE FROM "billing"."outbox_events"',
+	'"status" IN (',
+	"'PENDING'::\"billing\".\"OutboxStatus\"",
+	"'PROCESSING'::\"billing\".\"OutboxStatus\"",
+	"\"event_type\" = 'billing.payment.details.changed.v1'",
+	"\"routing_key\" = 'billing.payment.details.changed.v1'",
+	"\"event_type\" = 'billing.subscription.details.changed.v1'",
+	"\"routing_key\" = 'billing.subscription.details.changed.v1'"
+]) {
+	if (!unroutableBillingEventCleanup.includes(statement)) {
+		throw new Error(`Billing unroutable event cleanup drifted: ${statement}`);
+	}
+}
+
 for (const statement of [
 	'DROP TABLE "billing"."billing_ownership_marker"',
 	'DROP FUNCTION "billing"."enforce_ownership_forward_only"()',

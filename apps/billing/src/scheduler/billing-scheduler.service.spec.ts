@@ -180,13 +180,12 @@ describe('BillingSchedulerService auto-renewal safety', () => {
 		});
 		const outboxRows = transaction.outboxEvent.createMany.mock.calls[0][0]
 			.data as Array<Record<string, unknown>>;
-		expect(outboxRows).toHaveLength(3);
+		expect(outboxRows).toHaveLength(2);
 		expect(outboxRows.map(row => row.eventType)).toEqual([
 			BILLING_EVENT_TYPES.paymentChanged,
-			BILLING_EVENT_TYPES.paymentDetailsChanged,
 			BILLING_EVENT_TYPES.autoRenewalChargeRequested
 		]);
-		expect(outboxRows[2]).toEqual(
+		expect(outboxRows[1]).toEqual(
 			expect.objectContaining({ aggregateId: payment.id })
 		);
 		expect(transaction.autoRenewal.update).toHaveBeenLastCalledWith({

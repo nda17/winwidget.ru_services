@@ -70,7 +70,7 @@ describe('YooKassaService safe readiness', () => {
 	it('pins the fiscal receipt request and stored-response field contract', () => {
 		expect(YOOKASSA_RECEIPT_CONTRACT).toEqual({
 			schemaVersion: 1,
-			contractVersion: 'yookassa-receipt-create-v1',
+			contractVersion: 'yookassa-receipt-create-v2',
 			requestIncluded: true,
 			customerContactRequired: true,
 			item: {
@@ -83,11 +83,10 @@ describe('YooKassaService safe readiness', () => {
 				'id',
 				'status',
 				'type',
-				'fiscal_document.fiscal_document_number',
-				'fiscal_document.fiscal_storage_number',
-				'fiscal_document.fiscal_attribute',
-				'registered_at',
-				'receipt_url'
+				'fiscal_document_number',
+				'fiscal_storage_number',
+				'fiscal_attribute',
+				'registered_at'
 			],
 			rawProviderResponseStored: true
 		});

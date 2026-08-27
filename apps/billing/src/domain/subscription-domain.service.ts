@@ -654,7 +654,6 @@ export class SubscriptionDomainService {
 		item: any
 	) {
 		const eventId = randomUUID();
-		const detailsEventId = randomUUID();
 		const occurredAt = item.updatedAt.toISOString();
 		const base = {
 			id: item.id,
@@ -697,31 +696,6 @@ export class SubscriptionDomainService {
 										? 100
 										: null,
 							unlimited: item.plan === Plan.HARD
-						}
-					}
-				},
-				{
-					eventId: detailsEventId,
-					eventType: BILLING_EVENT_TYPES.subscriptionDetailsChanged,
-					aggregateType: 'billing.subscription.details',
-					aggregateId: item.id,
-					aggregateVersion: item.aggregateVersion,
-					sourceSequence: item.sourceSequence,
-					exchange: BILLING_EVENTS_EXCHANGE,
-					routingKey: BILLING_EVENT_TYPES.subscriptionDetailsChanged,
-					payload: {
-						schemaVersion: 1,
-						eventType: BILLING_EVENT_TYPES.subscriptionDetailsChanged,
-						eventId: detailsEventId,
-						aggregateId: item.id,
-						aggregateVersion: item.aggregateVersion.toString(),
-						sourceSequence: item.sourceSequence.toString(),
-						occurredAt,
-						tombstone: false,
-						state: {
-							...base,
-							leadsThisPeriod: item.leadsThisPeriod,
-							updatedAt: item.updatedAt.toISOString()
 						}
 					}
 				}
@@ -841,58 +815,38 @@ export class SubscriptionDomainService {
 		item: any
 	) {
 		const occurredAt = item.updatedAt.toISOString();
-		for (const [eventType, state] of [
-			[
-				BILLING_EVENT_TYPES.paymentChanged,
-				{
-					id: item.id,
-					userId: item.userId,
-					amount: item.amount,
-					status: item.status,
-					createdAt: item.createdAt.toISOString(),
-					updatedAt: occurredAt
-				}
-			],
-			[
-				BILLING_EVENT_TYPES.paymentDetailsChanged,
-				{
-					id: item.id,
-					userId: item.userId,
-					yookassaId: item.yookassaId,
-					status: item.status,
-					amount: item.amount,
-					plan: item.plan,
-					billingPeriod: item.billingPeriod,
-					createdAt: item.createdAt.toISOString(),
-					updatedAt: occurredAt
-				}
-			]
-		] as const) {
-			const eventId = randomUUID();
-			await transaction.outboxEvent.create({
-				data: {
-					eventId,
+		const eventType = BILLING_EVENT_TYPES.paymentChanged;
+		const eventId = randomUUID();
+		await transaction.outboxEvent.create({
+			data: {
+				eventId,
+				eventType,
+				aggregateType: 'billing.payment',
+				aggregateId: item.id,
+				aggregateVersion: item.aggregateVersion,
+				sourceSequence: item.sourceSequence,
+				exchange: BILLING_EVENTS_EXCHANGE,
+				routingKey: eventType,
+				payload: {
+					schemaVersion: 1,
 					eventType,
-					aggregateType: 'billing.payment',
+					eventId,
 					aggregateId: item.id,
-					aggregateVersion: item.aggregateVersion,
-					sourceSequence: item.sourceSequence,
-					exchange: BILLING_EVENTS_EXCHANGE,
-					routingKey: eventType,
-					payload: {
-						schemaVersion: 1,
-						eventType,
-						eventId,
-						aggregateId: item.id,
-						aggregateVersion: item.aggregateVersion.toString(),
-						sourceSequence: item.sourceSequence.toString(),
-						occurredAt,
-						tombstone: false,
-						state
-					} as Prisma.InputJsonValue
-				}
-			});
-		}
+					aggregateVersion: item.aggregateVersion.toString(),
+					sourceSequence: item.sourceSequence.toString(),
+					occurredAt,
+					tombstone: false,
+					state: {
+						id: item.id,
+						userId: item.userId,
+						amount: item.amount,
+						status: item.status,
+						createdAt: item.createdAt.toISOString(),
+						updatedAt: occurredAt
+					}
+				} as Prisma.InputJsonValue
+			}
+		});
 	}
 
 	private async audit(

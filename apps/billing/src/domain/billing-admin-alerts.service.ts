@@ -8,6 +8,9 @@ export const BILLING_ADMIN_ALERT_TYPES = [
 	'PENDING_PAYMENT',
 	'SUCCEEDED_PAYMENT_WITHOUT_ACCESS',
 	'MULTIPLE_PENDING_PAYMENTS',
+	'PAYMENT_RECEIPT_CANCELLED',
+	'PAYMENT_RECEIPT_SYNC_FAILED',
+	'PAYMENT_RECEIPT_STALE',
 	'AFFILIATE_REWARD_STALE',
 	'AFFILIATE_REWARD_PAYMENT_CANCELLED'
 ] as const;
@@ -116,6 +119,102 @@ export class BillingAdminAlertsService {
 						GROUP BY user_id
 						HAVING COUNT(*) > 1
 					) pending_payments
+
+					UNION ALL
+
+					SELECT
+						'PAYMENT_RECEIPT_CANCELLED'::text,
+						'HIGH'::text,
+						pr.id,
+						p.user_id,
+						'Чек отменён провайдером'::text,
+						concat(
+							'Чек ',
+							pr.provider_receipt_id,
+							' для платежа ',
+							COALESCE(p.yookassa_id, p.id),
+							' отменён; проверьте причину и необходимость корректирующего чека'
+						),
+						pr.updated_at
+					FROM billing.payment_receipts pr
+					JOIN billing.payments p ON p.id = pr.payment_id
+					WHERE lower(pr.status) = 'canceled'
+						AND NOT EXISTS (
+							SELECT 1
+							FROM billing.payment_receipts replacement
+							WHERE replacement.payment_id = pr.payment_id
+								AND replacement.type IS NOT DISTINCT FROM pr.type
+								AND lower(replacement.status) = 'succeeded'
+								AND replacement.created_at > pr.created_at
+						)
+
+					UNION ALL
+
+					SELECT
+						'PAYMENT_RECEIPT_SYNC_FAILED'::text,
+						'HIGH'::text,
+						po.id,
+						p.user_id,
+						'Синхронизация чека требует внимания'::text,
+						concat(
+							'Чек платежа ',
+							COALESCE(p.yookassa_id, p.id),
+							' не синхронизирован: ',
+							po.status::text,
+							', код ',
+							COALESCE(po.last_error_code, 'не указан')
+						),
+						po.updated_at
+					FROM billing.provider_operations po
+					JOIN billing.payments p ON p.id = po.payment_id
+					WHERE po.kind::text = 'SYNC_RECEIPT'
+						AND po.status::text IN ('FAILED', 'UNKNOWN')
+
+					UNION ALL
+
+					SELECT
+						'PAYMENT_RECEIPT_STALE'::text,
+						'HIGH'::text,
+						p.id,
+						p.user_id,
+						'У успешного платежа нет чека'::text,
+						concat(
+							'Для платежа ',
+							p.yookassa_id,
+							' чек не появился больше 30 минут'
+						),
+						COALESCE(p.succeeded_at, p.updated_at)
+					FROM billing.payments p
+					WHERE p.status::text = 'SUCCEEDED'
+						AND p.receipt_sync_eligible = TRUE
+						AND p.yookassa_id IS NOT NULL
+						AND COALESCE(p.succeeded_at, p.updated_at) <= NOW() - INTERVAL '30 minutes'
+						AND NOT EXISTS (
+							SELECT 1
+							FROM billing.payment_receipts pr
+							WHERE pr.payment_id = p.id
+						)
+
+					UNION ALL
+
+					SELECT
+						'PAYMENT_RECEIPT_STALE'::text,
+						'HIGH'::text,
+						pr.id,
+						p.user_id,
+						'Регистрация чека зависла'::text,
+						concat(
+							'Чек ',
+							pr.provider_receipt_id,
+							' для платежа ',
+							COALESCE(p.yookassa_id, p.id),
+							' остаётся pending больше 30 минут'
+						),
+						pr.created_at
+					FROM billing.payment_receipts pr
+					JOIN billing.payments p ON p.id = pr.payment_id
+					WHERE lower(pr.status) = 'pending'
+						AND pr.created_at <= NOW() - INTERVAL '30 minutes'
 
 					UNION ALL
 

@@ -9,7 +9,7 @@ export const isYooKassaObjectId = (value: unknown): value is string =>
 
 export const YOOKASSA_RECEIPT_CONTRACT = {
 	schemaVersion: 1,
-	contractVersion: 'yookassa-receipt-create-v1',
+	contractVersion: 'yookassa-receipt-create-v2',
 	requestIncluded: true,
 	customerContactRequired: true,
 	item: {
@@ -22,11 +22,10 @@ export const YOOKASSA_RECEIPT_CONTRACT = {
 		'id',
 		'status',
 		'type',
-		'fiscal_document.fiscal_document_number',
-		'fiscal_document.fiscal_storage_number',
-		'fiscal_document.fiscal_attribute',
-		'registered_at',
-		'receipt_url'
+		'fiscal_document_number',
+		'fiscal_storage_number',
+		'fiscal_attribute',
+		'registered_at'
 	],
 	rawProviderResponseStored: true
 } as const;

@@ -488,31 +488,12 @@ export class PaymentSuccessTransaction {
 				payload: this.paymentProjection(updatedPayment, occurredAt)
 			}),
 			this.createOutbox(transaction, {
-				eventType: BILLING_EVENT_TYPES.paymentDetailsChanged,
-				aggregateType: 'billing.payment',
-				aggregateId: payment.id,
-				aggregateVersion: paymentVersion,
-				sourceSequence: paymentSequence,
-				payload: this.paymentDetailsProjection(updatedPayment, occurredAt)
-			}),
-			this.createOutbox(transaction, {
 				eventType: BILLING_EVENT_TYPES.subscriptionChanged,
 				aggregateType: 'billing.subscription',
 				aggregateId: subscription.id,
 				aggregateVersion: subscriptionVersion,
 				sourceSequence: subscriptionSequence,
 				payload: this.subscriptionProjection(subscription, occurredAt)
-			}),
-			this.createOutbox(transaction, {
-				eventType: BILLING_EVENT_TYPES.subscriptionDetailsChanged,
-				aggregateType: 'billing.subscription',
-				aggregateId: subscription.id,
-				aggregateVersion: subscriptionVersion,
-				sourceSequence: subscriptionSequence,
-				payload: this.subscriptionDetailsProjection(
-					subscription,
-					occurredAt
-				)
 			}),
 			...(affiliate
 				? [
@@ -786,72 +767,6 @@ export class PaymentSuccessTransaction {
 							: null,
 				unlimited: subscription.plan === Plan.HARD,
 				createdAt: subscription.createdAt.toISOString()
-			}
-		};
-	}
-
-	private paymentDetailsProjection(
-		payment: {
-			id: string;
-			userId: string;
-			yookassaId: string | null;
-			status: PaymentStatus;
-			amount: string;
-			plan: Plan | null;
-			billingPeriod: BillingPeriod | null;
-			createdAt: Date;
-			updatedAt: Date;
-		},
-		occurredAt: string
-	): Record<string, unknown> {
-		return {
-			schemaVersion: 1,
-			occurredAt,
-			state: {
-				id: payment.id,
-				userId: payment.userId,
-				yookassaId: payment.yookassaId,
-				status: payment.status,
-				amount: payment.amount,
-				plan: payment.plan,
-				billingPeriod: payment.billingPeriod,
-				createdAt: payment.createdAt.toISOString(),
-				updatedAt: payment.updatedAt.toISOString()
-			}
-		};
-	}
-
-	private subscriptionDetailsProjection(
-		subscription: {
-			id: string;
-			userId: string;
-			plan: Plan;
-			billingPeriod: BillingPeriod | null;
-			status: SubscriptionStatus;
-			startsAt: Date;
-			expiresAt: Date | null;
-			leadsThisPeriod: number;
-			periodResetsAt: Date | null;
-			createdAt: Date;
-			updatedAt: Date;
-		},
-		occurredAt: string
-	): Record<string, unknown> {
-		return {
-			schemaVersion: 1,
-			occurredAt,
-			state: {
-				id: subscription.id,
-				userId: subscription.userId,
-				plan: subscription.plan,
-				billingPeriod: subscription.billingPeriod,
-				status: subscription.status,
-				startsAt: subscription.startsAt.toISOString(),
-				expiresAt: subscription.expiresAt?.toISOString() || null,
-				leadsThisPeriod: subscription.leadsThisPeriod,
-				periodResetsAt: subscription.periodResetsAt?.toISOString() || null,
-				createdAt: subscription.createdAt.toISOString(),
-				updatedAt: subscription.updatedAt.toISOString()
 			}
 		};
 	}

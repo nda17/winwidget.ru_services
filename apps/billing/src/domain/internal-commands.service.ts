@@ -179,7 +179,7 @@ export class InternalCommandsService {
 							sourceSequence: sequence
 						}
 					});
-					await this.emitPaymentDetails(transaction, updated);
+					await this.emitPaymentState(transaction, updated);
 				}
 				const result = {
 					revoked: true,
@@ -269,62 +269,42 @@ export class InternalCommandsService {
 		};
 	}
 
-	private async emitPaymentDetails(
+	private async emitPaymentState(
 		transaction: Prisma.TransactionClient,
 		item: any
 	) {
-		for (const [eventType, state] of [
-			[
-				BILLING_EVENT_TYPES.paymentChanged,
-				{
-					id: item.id,
-					userId: item.userId,
-					amount: item.amount,
-					status: item.status,
-					createdAt: item.createdAt.toISOString(),
-					updatedAt: item.updatedAt.toISOString()
-				}
-			],
-			[
-				BILLING_EVENT_TYPES.paymentDetailsChanged,
-				{
-					id: item.id,
-					userId: item.userId,
-					yookassaId: item.yookassaId,
-					status: item.status,
-					amount: item.amount,
-					plan: item.plan,
-					billingPeriod: item.billingPeriod,
-					createdAt: item.createdAt.toISOString(),
-					updatedAt: item.updatedAt.toISOString()
-				}
-			]
-		] as const) {
-			const eventId = randomUUID();
-			await transaction.outboxEvent.create({
-				data: {
-					eventId,
+		const eventType = BILLING_EVENT_TYPES.paymentChanged;
+		const eventId = randomUUID();
+		await transaction.outboxEvent.create({
+			data: {
+				eventId,
+				eventType,
+				aggregateType: 'billing.payment',
+				aggregateId: item.id,
+				aggregateVersion: item.aggregateVersion,
+				sourceSequence: item.sourceSequence,
+				exchange: BILLING_EVENTS_EXCHANGE,
+				routingKey: eventType,
+				payload: {
+					schemaVersion: 1,
 					eventType,
-					aggregateType: eventType.replace('.changed.v1', ''),
+					eventId,
 					aggregateId: item.id,
-					aggregateVersion: item.aggregateVersion,
-					sourceSequence: item.sourceSequence,
-					exchange: BILLING_EVENTS_EXCHANGE,
-					routingKey: eventType,
-					payload: {
-						schemaVersion: 1,
-						eventType,
-						eventId,
-						aggregateId: item.id,
-						aggregateVersion: item.aggregateVersion.toString(),
-						sourceSequence: item.sourceSequence.toString(),
-						occurredAt: item.updatedAt.toISOString(),
-						tombstone: false,
-						state
+					aggregateVersion: item.aggregateVersion.toString(),
+					sourceSequence: item.sourceSequence.toString(),
+					occurredAt: item.updatedAt.toISOString(),
+					tombstone: false,
+					state: {
+						id: item.id,
+						userId: item.userId,
+						amount: item.amount,
+						status: item.status,
+						createdAt: item.createdAt.toISOString(),
+						updatedAt: item.updatedAt.toISOString()
 					}
 				}
-			});
-		}
+			}
+		});
 	}
 
 	private async executeCommand<T extends Record<string, unknown>>(

@@ -304,7 +304,7 @@ describe('PaymentDomainService unknown provider resolution', () => {
 				cancellationReason: 'MANUAL_PROVIDER_NOT_FOUND'
 			})
 		});
-		expect(transaction.outboxEvent.create).toHaveBeenCalledTimes(3);
+		expect(transaction.outboxEvent.create).toHaveBeenCalledTimes(2);
 		const audit = transaction.outboxEvent.create.mock.calls.find(
 			([input]: any[]) =>
 				input.data.payload.action === 'PAYMENT_UNKNOWN_PROVIDER_RESOLVED'
@@ -346,7 +346,7 @@ describe('PaymentDomainService unknown provider resolution', () => {
 		expect(transaction.providerOperation.updateMany).toHaveBeenCalledTimes(
 			1
 		);
-		expect(transaction.outboxEvent.create).toHaveBeenCalledTimes(3);
+		expect(transaction.outboxEvent.create).toHaveBeenCalledTimes(2);
 
 		await expect(
 			service.resolveUnknownProviderPayment(
@@ -751,7 +751,7 @@ describe('PaymentSuccessTransaction late manual-resolution recovery', () => {
 		expect(transaction.payment.update).toHaveBeenCalledTimes(1);
 		expect(transaction.subscription.upsert).toHaveBeenCalledTimes(1);
 		expect(transaction.providerOperation.upsert).toHaveBeenCalledTimes(1);
-		expect(transaction.outboxEvent.create).toHaveBeenCalledTimes(6);
+		expect(transaction.outboxEvent.create).toHaveBeenCalledTimes(4);
 		expect(payment).toMatchObject({
 			yookassaId: 'provider-payment-1',
 			status: PaymentStatus.SUCCEEDED,

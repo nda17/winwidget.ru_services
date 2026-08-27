@@ -498,7 +498,6 @@ export class BillingProviderWorkerService
 		for (const raw of items) {
 			const receipt = this.record(raw);
 			const receiptId = this.providerObjectId(receipt, 'id');
-			const fiscal = this.record(receipt.fiscal_document);
 			await this.prisma.paymentReceipt.upsert({
 				where: { providerReceiptId: receiptId },
 				create: {
@@ -507,32 +506,38 @@ export class BillingProviderWorkerService
 					status: this.requiredString(receipt, 'status'),
 					type: typeof receipt.type === 'string' ? receipt.type : null,
 					fiscalDocumentNumber: this.optionalString(
-						fiscal,
+						receipt,
 						'fiscal_document_number'
 					),
 					fiscalStorageNumber: this.optionalString(
-						fiscal,
+						receipt,
 						'fiscal_storage_number'
 					),
-					fiscalAttribute: this.optionalString(fiscal, 'fiscal_attribute'),
+					fiscalAttribute: this.optionalString(
+						receipt,
+						'fiscal_attribute'
+					),
 					registeredAt: this.dateField(receipt, 'registered_at'),
-					publicUrl: this.optionalString(receipt, 'receipt_url'),
+					publicUrl: null,
 					raw: receipt
 				},
 				update: {
 					status: this.requiredString(receipt, 'status'),
 					type: typeof receipt.type === 'string' ? receipt.type : null,
 					fiscalDocumentNumber: this.optionalString(
-						fiscal,
+						receipt,
 						'fiscal_document_number'
 					),
 					fiscalStorageNumber: this.optionalString(
-						fiscal,
+						receipt,
 						'fiscal_storage_number'
 					),
-					fiscalAttribute: this.optionalString(fiscal, 'fiscal_attribute'),
+					fiscalAttribute: this.optionalString(
+						receipt,
+						'fiscal_attribute'
+					),
 					registeredAt: this.dateField(receipt, 'registered_at'),
-					publicUrl: this.optionalString(receipt, 'receipt_url'),
+					publicUrl: null,
 					raw: receipt
 				}
 			});

@@ -582,4 +582,68 @@ describe('BillingProviderWorkerService webhook re-verification', () => {
 		});
 		expect(prisma.paymentReceipt.upsert).not.toHaveBeenCalled();
 	});
+
+	it('normalizes official top-level fiscal fields and ignores undocumented lookalikes', async () => {
+		const upsert = jest.fn().mockResolvedValue({});
+		const prisma = {
+			paymentReceipt: { upsert }
+		};
+		const receipt = {
+			id: 'provider-receipt-1',
+			status: 'succeeded',
+			type: 'payment',
+			fiscal_document_number: 'fiscal-document-1',
+			fiscal_storage_number: 'fiscal-storage-1',
+			fiscal_attribute: 'fiscal-attribute-1',
+			registered_at: '2026-08-27T10:00:00.000Z',
+			receipt_url: 'https://undocumented.example.test/receipt-1',
+			fiscal_document: {
+				fiscal_document_number: 'wrong-nested-document',
+				fiscal_storage_number: 'wrong-nested-storage',
+				fiscal_attribute: 'wrong-nested-attribute'
+			}
+		};
+		const provider = {
+			getReceipts: jest.fn().mockResolvedValue({ items: [receipt] })
+		};
+		const service = new BillingProviderWorkerService(
+			prisma as never,
+			{} as never,
+			provider as never,
+			{} as never,
+			{} as never,
+			{} as never
+		);
+
+		await expect(
+			(
+				service as unknown as {
+					syncReceipt(value: Record<string, unknown>): Promise<void>;
+				}
+			).syncReceipt({
+				paymentId: 'payment-1',
+				providerPaymentId: 'provider-payment-1'
+			})
+		).resolves.toBeUndefined();
+
+		const normalized = {
+			status: 'succeeded',
+			type: 'payment',
+			fiscalDocumentNumber: 'fiscal-document-1',
+			fiscalStorageNumber: 'fiscal-storage-1',
+			fiscalAttribute: 'fiscal-attribute-1',
+			registeredAt: new Date('2026-08-27T10:00:00.000Z'),
+			publicUrl: null,
+			raw: receipt
+		};
+		expect(upsert).toHaveBeenCalledWith({
+			where: { providerReceiptId: 'provider-receipt-1' },
+			create: {
+				paymentId: 'payment-1',
+				providerReceiptId: 'provider-receipt-1',
+				...normalized
+			},
+			update: normalized
+		});
+	});
 });
