@@ -23,6 +23,14 @@ const aiConsultantContentMigration = readFileSync(
 	'utf8'
 );
 
+const aiConsultantHomeCardMigration = readFileSync(
+	resolve(
+		__dirname,
+		'../../prisma/migrations/20260828010000_publish_ai_consultant_home_card/migration.sql'
+	),
+	'utf8'
+);
+
 describe('Platform content validation', () => {
 	it('removes executable legal markup and every dangerous URL form', () => {
 		const sanitized = sanitizeLegalHtml(
@@ -225,6 +233,37 @@ describe('Platform content validation', () => {
 		expect(aiConsultantContentMigration).toContain('/page-ai-consultant/');
 		expect(aiConsultantContentMigration).toContain(
 			'"platform"."refresh_current_semantic_fingerprint"('
+		);
+	});
+
+	it('publishes the persisted AI consultant home card', () => {
+		expect(aiConsultantHomeCardMigration.trimStart()).toMatch(/^BEGIN;/);
+		expect(aiConsultantHomeCardMigration.trimEnd()).toMatch(/COMMIT;$/);
+		expect(aiConsultantHomeCardMigration).toContain(
+			"item.value ->> 'previewType' = 'aiConsultant'"
+		);
+		expect(aiConsultantHomeCardMigration).toContain("'{comingSoon}'");
+		expect(aiConsultantHomeCardMigration).toContain("'false'::JSONB");
+		expect(aiConsultantHomeCardMigration).toContain(
+			'ORDER BY item.ordinality'
+		);
+		expect(aiConsultantHomeCardMigration).toContain(
+			"tools_content := pg_catalog.jsonb_set(\n        tools_content,\n        '{items}',\n        transformed_items,\n        false\n    );"
+		);
+		expect(aiConsultantHomeCardMigration).toContain(
+			'AND "content" IS DISTINCT FROM current_content'
+		);
+		expect(aiConsultantHomeCardMigration).toContain(
+			'IF ai_consultant_items = 0 THEN'
+		);
+		expect(aiConsultantHomeCardMigration).toContain(
+			'Platform tools must not contain duplicate AI consultant cards'
+		);
+		expect(aiConsultantHomeCardMigration).toContain(
+			'"platform"."refresh_current_semantic_fingerprint"('
+		);
+		expect(aiConsultantHomeCardMigration).toMatch(
+			/IF updated_rows = 1 THEN\s+PERFORM "platform"\."refresh_current_semantic_fingerprint"/
 		);
 	});
 });
