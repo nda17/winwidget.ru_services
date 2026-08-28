@@ -1,10 +1,12 @@
 BEGIN;
 
-CREATE TEMPORARY TABLE "retired_online_consultant_reporting_aggregates" (
+-- The production migration role intentionally has no database TEMP privilege.
+-- Use transaction-scoped staging tables in the service-owned schema instead.
+CREATE TABLE "reporting"."retired_online_consultant_reporting_aggregates" (
     "aggregate_id" TEXT PRIMARY KEY
-) ON COMMIT DROP;
+);
 
-INSERT INTO "retired_online_consultant_reporting_aggregates" ("aggregate_id")
+INSERT INTO "reporting"."retired_online_consultant_reporting_aggregates" ("aggregate_id")
 SELECT candidate."aggregate_id"
 FROM (
     SELECT receipt."aggregate_id"
@@ -40,18 +42,18 @@ FROM (
 WHERE candidate."aggregate_id" LIKE 'onlineConsultant:%'
 ON CONFLICT ("aggregate_id") DO NOTHING;
 
-CREATE TEMPORARY TABLE "retired_online_consultant_reporting_events" (
+CREATE TABLE "reporting"."retired_online_consultant_reporting_events" (
     "event_id" UUID PRIMARY KEY
-) ON COMMIT DROP;
+);
 
-INSERT INTO "retired_online_consultant_reporting_events" ("event_id")
+INSERT INTO "reporting"."retired_online_consultant_reporting_events" ("event_id")
 SELECT candidate."event_id"
 FROM (
     SELECT receipt."event_id"
     FROM "reporting"."projection_receipts" AS receipt
     WHERE receipt."aggregate_id" IN (
         SELECT retired."aggregate_id"
-        FROM "retired_online_consultant_reporting_aggregates" AS retired
+        FROM "reporting"."retired_online_consultant_reporting_aggregates" AS retired
     )
 
     UNION
@@ -60,7 +62,7 @@ FROM (
     FROM "reporting"."consumer_failures" AS failure
     WHERE failure."payload" ->> 'aggregateId' IN (
         SELECT retired."aggregate_id"
-        FROM "retired_online_consultant_reporting_aggregates" AS retired
+        FROM "reporting"."retired_online_consultant_reporting_aggregates" AS retired
     )
 
     UNION
@@ -69,7 +71,7 @@ FROM (
     FROM "reporting"."outbox_events" AS event
     WHERE event."payload" ->> 'aggregateId' IN (
         SELECT retired."aggregate_id"
-        FROM "retired_online_consultant_reporting_aggregates" AS retired
+        FROM "reporting"."retired_online_consultant_reporting_aggregates" AS retired
     )
 ) AS candidate
 ON CONFLICT ("event_id") DO NOTHING;
@@ -83,52 +85,55 @@ WHERE (
         )
         AND event."message_id" IN (
             SELECT retired."event_id"
-            FROM "retired_online_consultant_reporting_events" AS retired
+            FROM "reporting"."retired_online_consultant_reporting_events" AS retired
         )
     )
     OR (
         event."event_type" = 'admin.audit.event.v1'
         AND event."payload" #>> '{target,eventId}' IN (
             SELECT retired."event_id"::TEXT
-            FROM "retired_online_consultant_reporting_events" AS retired
+            FROM "reporting"."retired_online_consultant_reporting_events" AS retired
         )
     );
 
 DELETE FROM "reporting"."consumer_failures" AS failure
 WHERE failure."event_id" IN (
     SELECT retired."event_id"
-    FROM "retired_online_consultant_reporting_events" AS retired
+    FROM "reporting"."retired_online_consultant_reporting_events" AS retired
 );
 
 DELETE FROM "reporting"."consumer_receipts" AS receipt
 WHERE receipt."event_id" IN (
     SELECT retired."event_id"
-    FROM "retired_online_consultant_reporting_events" AS retired
+    FROM "reporting"."retired_online_consultant_reporting_events" AS retired
 );
 
 DELETE FROM "reporting"."projection_receipts"
 WHERE "aggregate_id" IN (
         SELECT retired."aggregate_id"
-        FROM "retired_online_consultant_reporting_aggregates" AS retired
+        FROM "reporting"."retired_online_consultant_reporting_aggregates" AS retired
     )
     OR "event_id" IN (
         SELECT retired."event_id"
-        FROM "retired_online_consultant_reporting_events" AS retired
+        FROM "reporting"."retired_online_consultant_reporting_events" AS retired
     );
 
 DELETE FROM "reporting"."lead_facts"
 WHERE "widget_type" = 'onlineConsultant'
     OR "source_aggregate_id" IN (
         SELECT retired."aggregate_id"
-        FROM "retired_online_consultant_reporting_aggregates" AS retired
+        FROM "reporting"."retired_online_consultant_reporting_aggregates" AS retired
     );
 
 DELETE FROM "reporting"."widget_projections"
 WHERE "widget_type" = 'onlineConsultant'
     OR "source_aggregate_id" IN (
         SELECT retired."aggregate_id"
-        FROM "retired_online_consultant_reporting_aggregates" AS retired
+        FROM "reporting"."retired_online_consultant_reporting_aggregates" AS retired
     );
+
+DROP TABLE "reporting"."retired_online_consultant_reporting_events";
+DROP TABLE "reporting"."retired_online_consultant_reporting_aggregates";
 
 ALTER TABLE "reporting"."widget_projections"
     DROP CONSTRAINT "widgets_state_check",

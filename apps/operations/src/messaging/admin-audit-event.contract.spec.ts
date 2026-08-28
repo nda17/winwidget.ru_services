@@ -256,6 +256,12 @@ describe('admin audit event contract', () => {
 		expect(onlineConsultantAuditCleanupMigration.trimEnd()).toMatch(
 			/COMMIT;$/
 		);
+		expect(onlineConsultantAuditCleanupMigration).not.toMatch(
+			/\bCREATE\s+(?:LOCAL\s+|GLOBAL\s+)?TEMP(?:ORARY)?\s+TABLE\b/i
+		);
+		expect(onlineConsultantAuditCleanupMigration).toContain(
+			'CREATE TABLE "operations"."retired_online_consultant_audit_events"'
+		);
 		expect(onlineConsultantAuditCleanupMigration).toContain(
 			"\"entity_label\" IN ('ONLINE_CONSULTANT', 'Онлайн-консультант')"
 		);
@@ -267,6 +273,15 @@ describe('admin audit event contract', () => {
 		);
 		expect(onlineConsultantAuditCleanupMigration).toContain(
 			'"aggregate_type" = \'operations.admin-audit-retry\''
+		);
+		expect(
+			onlineConsultantAuditCleanupMigration.indexOf(
+				'DROP TABLE "operations"."retired_online_consultant_audit_events"'
+			)
+		).toBeGreaterThan(
+			onlineConsultantAuditCleanupMigration.indexOf(
+				'DELETE FROM "operations"."admin_event_logs"'
+			)
 		);
 	});
 

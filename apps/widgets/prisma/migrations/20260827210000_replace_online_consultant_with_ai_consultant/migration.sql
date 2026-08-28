@@ -134,11 +134,13 @@ WHERE "aggregate_type" IN (
 	'widgets.lead.onlineConsultant'
 );
 
-CREATE TEMPORARY TABLE "retired_online_consultant_event_ids" (
+-- The production migration role intentionally has no database TEMP privilege.
+-- Use a transaction-scoped staging table in the service-owned schema instead.
+CREATE TABLE "widgets"."retired_online_consultant_event_ids" (
 	"event_id" UUID PRIMARY KEY
-) ON COMMIT DROP;
+);
 
-INSERT INTO "retired_online_consultant_event_ids" ("event_id")
+INSERT INTO "widgets"."retired_online_consultant_event_ids" ("event_id")
 SELECT "message_id"
 FROM "widgets"."outbox_events"
 WHERE
@@ -151,13 +153,13 @@ WHERE
 	OR "payload" #>> '{target,widgetType}' = 'ONLINE_CONSULTANT'
 ON CONFLICT ("event_id") DO NOTHING;
 
-INSERT INTO "retired_online_consultant_event_ids" ("event_id")
+INSERT INTO "widgets"."retired_online_consultant_event_ids" ("event_id")
 SELECT "event_id"
 FROM "widgets"."integration_credential_snapshots"
 WHERE "source" = 'online-consultant'
 ON CONFLICT ("event_id") DO NOTHING;
 
-INSERT INTO "retired_online_consultant_event_ids" ("event_id")
+INSERT INTO "widgets"."retired_online_consultant_event_ids" ("event_id")
 SELECT "event_id"
 FROM "widgets"."integration_delivery_failures"
 WHERE
@@ -165,7 +167,7 @@ WHERE
 	OR "payload" #>> '{entity,type}' = 'online-consultant'
 ON CONFLICT ("event_id") DO NOTHING;
 
-INSERT INTO "retired_online_consultant_event_ids" ("event_id")
+INSERT INTO "widgets"."retired_online_consultant_event_ids" ("event_id")
 SELECT "event_id"
 FROM "widgets"."consumer_failures"
 WHERE
@@ -175,28 +177,30 @@ WHERE
 ON CONFLICT ("event_id") DO NOTHING;
 
 DELETE FROM "widgets"."integration_delivery_failures" AS failure
-USING "retired_online_consultant_event_ids" AS retired
+USING "widgets"."retired_online_consultant_event_ids" AS retired
 WHERE failure."event_id" = retired."event_id";
 
 DELETE FROM "widgets"."integration_delivery_receipts" AS receipt
-USING "retired_online_consultant_event_ids" AS retired
+USING "widgets"."retired_online_consultant_event_ids" AS retired
 WHERE receipt."event_id" = retired."event_id";
 
 DELETE FROM "widgets"."integration_credential_snapshots" AS snapshot
-USING "retired_online_consultant_event_ids" AS retired
+USING "widgets"."retired_online_consultant_event_ids" AS retired
 WHERE snapshot."event_id" = retired."event_id";
 
 DELETE FROM "widgets"."consumer_failures" AS failure
-USING "retired_online_consultant_event_ids" AS retired
+USING "widgets"."retired_online_consultant_event_ids" AS retired
 WHERE failure."event_id" = retired."event_id";
 
 DELETE FROM "widgets"."consumer_receipts" AS receipt
-USING "retired_online_consultant_event_ids" AS retired
+USING "widgets"."retired_online_consultant_event_ids" AS retired
 WHERE receipt."event_id" = retired."event_id";
 
 DELETE FROM "widgets"."outbox_events" AS event
-USING "retired_online_consultant_event_ids" AS retired
+USING "widgets"."retired_online_consultant_event_ids" AS retired
 WHERE event."message_id" = retired."event_id";
+
+DROP TABLE "widgets"."retired_online_consultant_event_ids";
 
 ALTER TABLE "widgets"."integration_credential_snapshots"
 	DROP CONSTRAINT "integration_credential_snapshots_identity_check";

@@ -371,7 +371,7 @@ describe('notification delivery messaging contracts', () => {
 
 	it('removes only provably linked retired lead delivery state in FK-safe order', () => {
 		const collectEvents = onlineConsultantCleanupMigration.indexOf(
-			'INSERT INTO "retired_online_consultant_delivery_events"'
+			'INSERT INTO "notification_delivery"."retired_online_consultant_delivery_events"'
 		);
 		const deleteOutbox = onlineConsultantCleanupMigration.indexOf(
 			'DELETE FROM "notification_delivery"."outbox_events"'
@@ -390,6 +390,12 @@ describe('notification delivery messaging contracts', () => {
 			/^--[\s\S]*BEGIN;/
 		);
 		expect(onlineConsultantCleanupMigration.trimEnd()).toMatch(/COMMIT;$/);
+		expect(onlineConsultantCleanupMigration).not.toMatch(
+			/\bCREATE\s+(?:LOCAL\s+|GLOBAL\s+)?TEMP(?:ORARY)?\s+TABLE\b/i
+		);
+		expect(onlineConsultantCleanupMigration).toContain(
+			'CREATE TABLE "notification_delivery"."retired_online_consultant_delivery_events"'
+		);
 		expect(onlineConsultantCleanupMigration).toContain(
 			"\"payload\" ->> 'source' = 'online-consultant'"
 		);
@@ -407,5 +413,10 @@ describe('notification delivery messaging contracts', () => {
 		expect(deleteOutbox).toBeLessThan(deleteActions);
 		expect(deleteActions).toBeLessThan(deleteFailures);
 		expect(deleteFailures).toBeLessThan(deleteReceipts);
+		expect(
+			onlineConsultantCleanupMigration.indexOf(
+				'DROP TABLE "notification_delivery"."retired_online_consultant_delivery_events"'
+			)
+		).toBeGreaterThan(deleteReceipts);
 	});
 });

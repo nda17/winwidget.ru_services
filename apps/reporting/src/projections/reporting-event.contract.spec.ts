@@ -262,7 +262,7 @@ describe('reporting source event contract', () => {
 
 	it('removes retired reporting receipts and retries before their projections', () => {
 		const collectEvents = onlineConsultantCleanupMigration.indexOf(
-			'INSERT INTO "retired_online_consultant_reporting_events"'
+			'INSERT INTO "reporting"."retired_online_consultant_reporting_events"'
 		);
 		const deleteOutbox = onlineConsultantCleanupMigration.indexOf(
 			'DELETE FROM "reporting"."outbox_events"'
@@ -282,6 +282,12 @@ describe('reporting source event contract', () => {
 			/^BEGIN;/
 		);
 		expect(onlineConsultantCleanupMigration.trimEnd()).toMatch(/COMMIT;$/);
+		expect(onlineConsultantCleanupMigration).not.toMatch(
+			/\bCREATE\s+(?:LOCAL\s+|GLOBAL\s+)?TEMP(?:ORARY)?\s+TABLE\b/i
+		);
+		expect(onlineConsultantCleanupMigration).toContain(
+			'CREATE TABLE "reporting"."retired_online_consultant_reporting_events"'
+		);
 		expect(collectEvents).toBeGreaterThan(-1);
 		expect(onlineConsultantCleanupMigration).toContain(
 			"\"payload\" ->> 'aggregateId' LIKE 'onlineConsultant:%'"
@@ -296,6 +302,15 @@ describe('reporting source event contract', () => {
 		expect(deleteOutbox).toBeLessThan(deleteFailures);
 		expect(deleteFailures).toBeLessThan(deleteReceipts);
 		expect(deleteReceipts).toBeLessThan(deleteProjectionReceipts);
+		expect(
+			onlineConsultantCleanupMigration.indexOf(
+				'DROP TABLE "reporting"."retired_online_consultant_reporting_events"'
+			)
+		).toBeGreaterThan(
+			onlineConsultantCleanupMigration.indexOf(
+				'DELETE FROM "reporting"."widget_projections"'
+			)
+		);
 	});
 
 	it('accepts only the exact Operations notification-routing payload and headers', () => {

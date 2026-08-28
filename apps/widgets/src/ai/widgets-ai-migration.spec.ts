@@ -66,8 +66,18 @@ describe('AI consultant forward-only migration', () => {
 		).toBeLessThan(
 			migration.indexOf('DROP TABLE "widgets"."online_consultants"')
 		);
+		expect(migration).not.toMatch(
+			/\bCREATE\s+(?:LOCAL\s+|GLOBAL\s+)?TEMP(?:ORARY)?\s+TABLE\b/i
+		);
 		expect(migration).toContain(
-			'CREATE TEMPORARY TABLE "retired_online_consultant_event_ids"'
+			'CREATE TABLE "widgets"."retired_online_consultant_event_ids"'
+		);
+		expect(
+			migration.indexOf(
+				'DROP TABLE "widgets"."retired_online_consultant_event_ids"'
+			)
+		).toBeGreaterThan(
+			migration.indexOf('DELETE FROM "widgets"."outbox_events"')
 		);
 		expect(migration).toContain(
 			"\"payload\" ->> 'source' = 'online-consultant'"

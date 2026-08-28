@@ -56,6 +56,13 @@ if git ls-files | rg '(^|/)\.env\.production$'; then
 	exit 1
 fi
 
+if rg -n -i \
+	'CREATE[[:space:]]+(LOCAL[[:space:]]+|GLOBAL[[:space:]]+)?TEMP(ORARY)?[[:space:]]+TABLE' \
+	apps/*/prisma/migrations/*/migration.sql; then
+	echo 'A Prisma migration requires the intentionally revoked database TEMP privilege.' >&2
+	exit 1
+fi
+
 node - <<'NODE'
 const {
 	existsSync,
