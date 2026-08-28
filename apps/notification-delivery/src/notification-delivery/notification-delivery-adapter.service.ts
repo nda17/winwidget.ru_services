@@ -699,7 +699,6 @@ export class NotificationDeliveryAdapterService {
 			callback: 'Обратный звонок',
 			'countdown-timer': 'Таймер',
 			'stop-offer': 'Стоп-оффер',
-			'online-consultant': 'Онлайн-консультант',
 			calculator: 'Калькулятор стоимости'
 		};
 		return labels[event.source];

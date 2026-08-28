@@ -27,7 +27,6 @@ export const LEAD_SOURCES = [
 	'callback',
 	'countdown-timer',
 	'stop-offer',
-	'online-consultant',
 	'calculator'
 ] as const;
 

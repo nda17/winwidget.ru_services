@@ -26,7 +26,10 @@ import {
 } from '../auth/widgets-auth.guard';
 import type { IntrospectedWidgetsActor } from '../internal/widgets-identity.client';
 import { WidgetsDomainService } from '../domain/widgets-domain.service';
-import { WIDGET_DEFINITIONS } from '../domain/widgets-domain.types';
+import {
+	WidgetType,
+	WIDGET_DEFINITIONS
+} from '../domain/widgets-domain.types';
 import { WIDGET_BUTTON_IMAGE_MAX_SIZE_BYTES } from '../domain/widgets-image.service';
 import { CreateWidgetDto, UpdateWidgetDto } from './widgets.dto';
 import {
@@ -40,13 +43,18 @@ const ITEM_PATHS = COLLECTIONS.map(path => `${path}/:id`);
 const IMAGE_PATHS = COLLECTIONS.filter(path => path !== 'stop-offers').map(
 	path => `${path}/:id/button-image`
 );
-const LEADS_PATHS = COLLECTIONS.map(path => `${path}/:id/leads`);
+const LEAD_COLLECTIONS = WIDGET_DEFINITIONS.filter(
+	item => item.type !== WidgetType.AI_CONSULTANT
+).map(item => item.collection);
+const LEADS_PATHS = LEAD_COLLECTIONS.map(path => `${path}/:id/leads`);
 const STATS_PATHS = [
 	'widgets/:id/leads/stats',
 	'quizzes/:id/leads/stats',
 	'calculators/:id/leads/stats'
 ];
-const EXPORT_PATHS = COLLECTIONS.map(path => `${path}/:id/leads/export`);
+const EXPORT_PATHS = LEAD_COLLECTIONS.map(
+	path => `${path}/:id/leads/export`
+);
 
 @Controller()
 @UseGuards(WidgetsApiGuard, WidgetsAuthGuard)

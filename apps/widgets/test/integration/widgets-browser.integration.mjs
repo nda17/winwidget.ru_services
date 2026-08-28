@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
@@ -52,12 +52,12 @@ const BROWSER_CASES = [
 		expectsPhoneHelper: true
 	},
 	{
-		key: 'onlineConsultant',
-		type: 'online-consultant',
-		pagePath: 'page-online-consultant',
-		asset: 'online-consultant.js',
-		hostId: 'online-consultant-widget-host',
-		buttonAsset: 'online-consultant-button.png',
+		key: 'aiConsultant',
+		type: 'ai-consultant',
+		pagePath: 'page-ai-consultant',
+		asset: 'ai-consultant.js',
+		hostId: 'ai-consultant-widget-host',
+		buttonAsset: 'ai-consultant-button.png',
 		expectsPhoneHelper: false
 	},
 	{
@@ -106,7 +106,7 @@ export async function runWidgetsBrowserIntegration({
 		pendingResults
 	);
 	const harnessPort = await listenLoopback(server);
-	const harnessOrigin = `http://127.0.0.1:${harnessPort}`;
+	const harnessOrigin = `http://localhost:${harnessPort}`;
 	if (corsAllowedOrigins.includes(harnessOrigin)) {
 		throw new Error(
 			`Widgets browser harness origin must be outside the CORS allowlist: ${harnessOrigin}`
@@ -129,7 +129,11 @@ export async function runWidgetsBrowserIntegration({
 				publicKey: widget.publicKey,
 				phone: `+79991110${String(index + 1).padStart(3, '0')}`,
 				serviceOrigin: `http://127.0.0.1:${appPort}`,
-				nonce
+				nonce,
+				cspNonce:
+					definition.type === 'ai-consultant'
+						? randomBytes(18).toString('base64')
+						: ''
 			};
 			pages.set(pagePath, browserCase);
 			const pageLoadPromise = waitForBrowserPageLoad(
@@ -181,10 +185,24 @@ function createHarnessServer(pages, pendingPageLoads, pendingResults) {
 			if (request.method === 'GET' && browserCase) {
 				const pendingPageLoad = pendingPageLoads.get(browserCase.nonce);
 				pendingPageLoads.delete(browserCase.nonce);
-				response.writeHead(200, {
+				const headers = {
 					'cache-control': 'no-store',
 					'content-type': 'text/html; charset=utf-8'
-				});
+				};
+				if (browserCase.type === 'ai-consultant') {
+					headers['content-security-policy'] = [
+						"default-src 'none'",
+						`script-src 'nonce-${browserCase.cspNonce}' ${browserCase.serviceOrigin} https://challenges.cloudflare.com`,
+						`connect-src 'self' ${browserCase.serviceOrigin} https://challenges.cloudflare.com`,
+						`img-src ${browserCase.serviceOrigin}`,
+						`style-src 'nonce-${browserCase.cspNonce}'`,
+						"style-src-attr 'none'",
+						'frame-src https://challenges.cloudflare.com',
+						"base-uri 'none'",
+						"form-action 'none'"
+					].join('; ');
+				}
+				response.writeHead(200, headers);
 				response.end(browserPage(browserCase));
 				pendingPageLoad?.resolve();
 				return;
@@ -230,7 +248,7 @@ function browserPage(browserCase) {
 </head>
 <body>
   <main>Widgets browser integration</main>
-  <script>
+  <script${browserCase.cspNonce ? ` nonce="${browserCase.cspNonce}"` : ''}>
     (function () {
       'use strict';
       var testCase = ${serialized};
@@ -250,6 +268,9 @@ function browserPage(browserCase) {
       }, true);
       window.addEventListener('unhandledrejection', function (event) {
         runtimeErrors.push(String(event.reason && event.reason.message || event.reason || 'unhandled rejection'));
+      });
+      window.addEventListener('securitypolicyviolation', function (event) {
+        runtimeErrors.push('CSP blocked ' + String(event.violatedDirective || event.effectiveDirective || 'resource'));
       });
 
       window.fetch = function (input, options) {
@@ -291,9 +312,23 @@ function browserPage(browserCase) {
         window.wintimerAutoOpen = true;
       } else if (testCase.type === 'stop-offer') {
         window.winstopofferAutoOpen = true;
-      } else if (testCase.type === 'online-consultant') {
-        window.winonlineconsultantAutoOpen = true;
-        window.winonlineconsultant = testCase.publicKey;
+      } else if (testCase.type === 'ai-consultant') {
+        window.winAiConsultantAutoOpen = true;
+        window.winAiConsultant = testCase.publicKey;
+        var turnstileOptions = null;
+        window.turnstile = {
+          render: function (_container, options) {
+            turnstileOptions = options;
+            return 'browser-turnstile-widget';
+          },
+          reset: function () {},
+          execute: function () {
+            setTimeout(function () {
+              turnstileOptions.callback('turnstile-browser-' + testCase.publicKey);
+            }, 0);
+          },
+          remove: function () {}
+        };
       } else if (testCase.type === 'calculator') {
         window.wincalculatorAutoOpen = true;
         window.wincalculator = testCase.publicKey;
@@ -387,10 +422,33 @@ function browserPage(browserCase) {
           click(await waitFor(function () { return findButton(shadow, /Забрать скидку|Отправить/); }, 'stop-offer submit'), 'stop-offer submit');
           return;
         }
-        if (testCase.type === 'online-consultant') {
-          click(await waitFor(function () { return shadow.querySelector('.woc-action'); }, 'consultant action'), 'consultant action');
-          fill(await waitFor(function () { return shadow.getElementById('woc-phone'); }, 'consultant phone'), testCase.phone);
-          click(await waitFor(function () { return shadow.getElementById('woc-submit'); }, 'consultant submit'), 'consultant submit');
+		if (testCase.type === 'ai-consultant') {
+			var styleNodes = Array.prototype.slice.call(
+				shadow.querySelectorAll('style')
+			);
+			if (
+				styleNodes.length !== 2 ||
+				styleNodes.some(function (node) {
+					return node.nonce !== testCase.cspNonce;
+				}) ||
+				shadow.host.hasAttribute('style') ||
+				shadow.querySelector('[style]')
+			) {
+				throw new Error('AI consultant strict CSP style contract drifted');
+			}
+			var privacyLink = await waitFor(function () {
+				return shadow.querySelector('.waic-privacy a');
+			}, 'consultant privacy policy');
+			if (
+				!shadow.querySelector('.waic-privacy').textContent.includes(
+					'Не указывайте персональные данные'
+				) ||
+				!/^https?:\/\//.test(privacyLink.href)
+			) {
+				throw new Error('AI consultant privacy notice drifted');
+			}
+			fill(await waitFor(function () { return shadow.querySelector('.waic-input'); }, 'consultant question'), 'Сколько стоит товар?');
+          click(await waitFor(function () { return shadow.querySelector('.waic-send'); }, 'consultant send'), 'consultant send');
           return;
         }
         if (testCase.type === 'calculator') {
@@ -476,12 +534,14 @@ function browserPage(browserCase) {
           await loadImage(testCase.serviceOrigin + '/widgets/' + testCase.buttonAsset);
         }
         await interact(shadow);
-        var lead = await waitFor(function () {
-          return observedRequest('/lead', 'POST');
-        }, testCase.type + ' lead request', 15000);
-        if (lead.status !== 201) {
-          throw new Error(testCase.type + ' lead returned ' + lead.status + ', expected 201' +
-            (lead.responseBody ? ': ' + lead.responseBody : ''));
+        var completionSuffix = testCase.type === 'ai-consultant' ? '/messages' : '/lead';
+        var completionStatus = testCase.type === 'ai-consultant' ? 200 : 201;
+        var completion = await waitFor(function () {
+          return observedRequest(completionSuffix, 'POST');
+        }, testCase.type + ' completion request', 15000);
+        if (completion.status !== completionStatus) {
+          throw new Error(testCase.type + ' completion returned ' + completion.status + ', expected ' + completionStatus +
+            (completion.responseBody ? ': ' + completion.responseBody : ''));
         }
         var telemetry = await waitFor(function () {
           return requiredTelemetrySequence();
@@ -508,7 +568,7 @@ function browserPage(browserCase) {
       });
     })();
   </script>
-  <script src="${browserCase.serviceOrigin}/widgets/${browserCase.asset}" data-key="${browserCase.publicKey}" async></script>
+  <script src="${browserCase.serviceOrigin}/widgets/${browserCase.asset}" data-key="${browserCase.publicKey}"${browserCase.cspNonce ? ` nonce="${browserCase.cspNonce}"` : ''} async></script>
 </body>
 </html>`;
 }
@@ -625,28 +685,81 @@ function assertBrowserResult(result, expectedType, expectedPublicKey) {
 			request.method === 'GET' &&
 			new URL(request.url).pathname.endsWith('/config')
 	);
-	const lead = result.requests.find(
-		request =>
-			request.method === 'POST' &&
-			new URL(request.url).pathname.endsWith('/lead')
-	);
-	if (config?.status !== 200 || lead?.status !== 201) {
-		throw new Error(
-			`Widgets ${expectedType} browser HTTP contract drifted`
-		);
-	}
-	if (expectedType === 'online-consultant') {
-		let leadPayload;
-		try {
-			leadPayload = JSON.parse(lead.body || '{}');
-		} catch {
+	if (expectedType === 'ai-consultant') {
+		const session = result.requests.find(request => {
+			const pathname = new URL(request.url).pathname;
+			return (
+				request.method === 'POST' &&
+				pathname.endsWith(`/ai-consultant/${expectedPublicKey}/session`)
+			);
+		});
+		const message = result.requests.find(request => {
+			const pathname = new URL(request.url).pathname;
+			return (
+				request.method === 'POST' &&
+				pathname.endsWith(`/ai-consultant/${expectedPublicKey}/messages`)
+			);
+		});
+		if (
+			config?.status !== 200 ||
+			session?.status !== 200 ||
+			message?.status !== 200
+		) {
 			throw new Error(
-				'Widgets online-consultant lead payload is not JSON'
+				'Widgets ai-consultant browser HTTP contract drifted'
 			);
 		}
-		if (leadPayload.key !== expectedPublicKey) {
+		if (
+			result.requests.some(
+				request =>
+					request.method === 'POST' &&
+					new URL(request.url).pathname.endsWith('/lead')
+			)
+		) {
 			throw new Error(
-				'Widgets online-consultant lead payload lost the cached-client key field'
+				'Widgets ai-consultant sent a forbidden lead request'
+			);
+		}
+		let sessionPayload;
+		let messagePayload;
+		try {
+			sessionPayload = JSON.parse(session.body || '{}');
+			messagePayload = JSON.parse(message.body || '{}');
+		} catch {
+			throw new Error(
+				'Widgets ai-consultant session/message payload is not JSON'
+			);
+		}
+		const requestIdPattern =
+			/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+		if (
+			!/^[A-Za-z0-9_-]{16,128}$/.test(sessionPayload.sessionId) ||
+			sessionPayload.turnstileToken !==
+				`turnstile-browser-${expectedPublicKey}` ||
+			Object.keys(sessionPayload).sort().join(',') !==
+				'sessionId,turnstileToken' ||
+			!requestIdPattern.test(messagePayload.requestId) ||
+			!/^[A-Za-z0-9_-]{16,128}$/.test(messagePayload.sessionId) ||
+			messagePayload.sessionId !== sessionPayload.sessionId ||
+			typeof messagePayload.sessionToken !== 'string' ||
+			messagePayload.sessionToken.length < 80 ||
+			messagePayload.message !== 'Сколько стоит товар?' ||
+			!Array.isArray(messagePayload.history) ||
+			messagePayload.history.length !== 0 ||
+			Object.keys(messagePayload).sort().join(',') !==
+				'history,message,requestId,sessionId,sessionToken'
+		) {
+			throw new Error('Widgets ai-consultant message payload drifted');
+		}
+	} else {
+		const lead = result.requests.find(
+			request =>
+				request.method === 'POST' &&
+				new URL(request.url).pathname.endsWith('/lead')
+		);
+		if (config?.status !== 200 || lead?.status !== 201) {
+			throw new Error(
+				`Widgets ${expectedType} browser HTTP contract drifted`
 			);
 		}
 	}

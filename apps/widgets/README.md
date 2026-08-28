@@ -1,9 +1,10 @@
 # Сервис Widgets
 
 Widgets владеет определениями виджетов, черновыми и опубликованными версиями,
-заявками, телеметрией, ошибками доставки, проекциями Identity/Billing,
-изображениями кнопок и схемой PostgreSQL `widgets`. Браузерные assets виджетов
-также собираются из `widgets-src/` и упаковываются внутри этого сервиса.
+заявками контактных виджетов, AI-ответами без хранения переписки, телеметрией,
+ошибками доставки, проекциями Identity/Billing, изображениями кнопок и схемой
+PostgreSQL `widgets`. Браузерные assets виджетов также собираются из
+`widgets-src/` и упаковываются внутри этого сервиса.
 
 ## Роли процессов
 
@@ -24,9 +25,12 @@ Widgets владеет определениями виджетов, чернов
 Публичные и аутентифицированные маршруты под `/api/v1` включают:
 
 - коллекции виджетов (`/widgets`, `/quizzes`, `/callbacks`,
-  `/countdown-timers`, `/stop-offers`, `/online-consultants`, `/calculators`)
+  `/countdown-timers`, `/stop-offers`, `/ai-consultants`, `/calculators`)
 - `/widget-settings/**`, `/widgets/admin/**` и управление ошибками доставки
 - публичные endpoints конфигурации/заявок виджетов и `/widget-events/**`
+- `GET /ai-consultant/:key/config`, `POST /ai-consultant/:key/session` и
+  `POST /ai-consultant/:key/messages`
+- `POST /ai-consultants/:id/test-message` для проверки сохранённого draft
 
 Собранные assets обслуживаются по `/widgets/**`. Identity вызывает
 `/internal/v1/identity/widgets/admin-owner-overview` с
@@ -38,6 +42,14 @@ Widgets вызывает Identity с `IDENTITY_WIDGETS_TOKEN`.
 Более старый общий внутренний интерфейс по-прежнему использует
 `WIDGETS_INTERNAL_TOKEN`; не используйте эти учётные данные повторно для
 Identity или Operations.
+
+AI Consultant использует только текстовый `instructionsPrompt`. Публичный
+config этот prompt не возвращает. Клиентская история передаётся как
+недоверенные данные, сообщения и ответы не сохраняются, заявки не создаются;
+файлов, RAG и отдельной базы знаний нет. В runtime оператор всегда явно
+обозначен как AI. Для публикации обязательна HTTP(S)-ссылка на политику
+обработки персональных данных; runtime показывает её рядом с предупреждением
+не вводить персональные данные.
 
 ## Ресурсы и хранилище
 
@@ -57,6 +69,12 @@ pnpm run build:widgets:check
 VPS. Замените все шаблоны и передавайте только переменные, необходимые каждой
 роли. Граница устаревания entitlement обязательна и должна оставаться в
 проверяемом диапазоне.
+
+Для Workers AI задайте `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN`,
+`CLOUDFLARE_AI_GATEWAY_ID`, `CLOUDFLARE_AI_MODEL`, Turnstile-пару
+`CLOUDFLARE_TURNSTILE_SITE_KEY` / `CLOUDFLARE_TURNSTILE_SECRET_KEY` и отдельный
+`WIDGETS_AI_SESSION_SECRET`. API token должен иметь Workers AI и Turnstile Sites
+Write, хранится только в production secret env и не передаётся во frontend.
 
 ```bash
 pnpm install --frozen-lockfile

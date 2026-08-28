@@ -36,7 +36,7 @@ const PUBLIC_WIDGET_API_PREFIXES = [
 	'/api/v1/callback',
 	'/api/v1/countdown-timer',
 	'/api/v1/stop-offer',
-	'/api/v1/online-consultant',
+	'/api/v1/ai-consultant',
 	'/api/v1/calculator',
 	'/api/v1/widget-events'
 ] as const;
@@ -56,6 +56,7 @@ interface GatewayOptions {
 	logger?: StructuredLogger;
 	fetch?: FetchLike;
 	now?: () => number;
+	aiConsultantRateLimiterOptions?: AiConsultantPublicRateLimiterOptions;
 }
 
 interface JsonErrorBody {
@@ -86,6 +87,41 @@ interface WidgetEventRateLimitResult {
 	retryAfterSeconds: number;
 }
 
+type AiConsultantPublicOperation = 'config' | 'session' | 'messages';
+
+interface AiConsultantPublicRateLimitEntry {
+	count: number;
+	expiresAt: number;
+}
+
+interface AiConsultantPublicRateLimiterOptions {
+	now?: () => number;
+	windowMs?: number;
+	globalLimit?: number;
+	perIpLimit?: number;
+	perWidgetLimit?: number;
+	perIpWidgetLimit?: number;
+	operationLimits?: Partial<Record<AiConsultantPublicOperation, number>>;
+	maxEntries?: number;
+}
+
+interface AiConsultantPublicRateLimitResult {
+	allowed: boolean;
+	retryAfterSeconds: number;
+	operation: AiConsultantPublicOperation;
+}
+
+const AI_CONSULTANT_PUBLIC_PATH_PATTERN =
+	/^\/api\/v1\/ai-consultant\/([^/]{1,128})\/(config|session|messages)\/?$/i;
+const AI_CONSULTANT_PUBLIC_OPERATION_LIMITS: Readonly<
+	Record<AiConsultantPublicOperation, number>
+> = {
+	config: 300,
+	session: 120,
+	messages: 120
+};
+const AI_CONSULTANT_PUBLIC_MIN_ENTRIES = 7;
+
 const WIDGET_EVENT_PATH_PATTERN =
 	/^\/api\/v1\/widget-events\/([^/]{1,64})\/([^/]{1,128})\/?$/i;
 
@@ -96,7 +132,7 @@ const normalizeWidgetEventType = (value: string): string | null => {
 		case 'quiz':
 		case 'callback':
 		case 'stop-offer':
-		case 'online-consultant':
+		case 'ai-consultant':
 		case 'calculator':
 			return normalized;
 		case 'timer':
@@ -225,6 +261,179 @@ export class WidgetEventRateLimiter {
 		for (const [key, entry] of this.entries) {
 			if (entry.expiresAt <= now) this.entries.delete(key);
 		}
+	}
+}
+
+export class AiConsultantPublicRateLimiter {
+	private readonly entries = new Map<
+		string,
+		AiConsultantPublicRateLimitEntry
+	>();
+	private readonly now: () => number;
+	private readonly windowMs: number;
+	private readonly globalLimit: number;
+	private readonly perIpLimit: number;
+	private readonly perWidgetLimit: number;
+	private readonly perIpWidgetLimit: number;
+	private readonly operationLimits: Readonly<
+		Record<AiConsultantPublicOperation, number>
+	>;
+	private readonly maxEntries: number;
+	private operations = 0;
+
+	constructor(options: AiConsultantPublicRateLimiterOptions = {}) {
+		this.now = options.now ?? Date.now;
+		this.windowMs = this.positiveInteger(options.windowMs, 60_000);
+		this.globalLimit = this.positiveInteger(options.globalLimit, 600);
+		this.perIpLimit = this.positiveInteger(options.perIpLimit, 60);
+		this.perWidgetLimit = this.positiveInteger(
+			options.perWidgetLimit,
+			120
+		);
+		this.perIpWidgetLimit = this.positiveInteger(
+			options.perIpWidgetLimit,
+			30
+		);
+		this.operationLimits = {
+			config: this.positiveInteger(
+				options.operationLimits?.config,
+				AI_CONSULTANT_PUBLIC_OPERATION_LIMITS.config
+			),
+			session: this.positiveInteger(
+				options.operationLimits?.session,
+				AI_CONSULTANT_PUBLIC_OPERATION_LIMITS.session
+			),
+			messages: this.positiveInteger(
+				options.operationLimits?.messages,
+				AI_CONSULTANT_PUBLIC_OPERATION_LIMITS.messages
+			)
+		};
+		this.maxEntries = Math.max(
+			AI_CONSULTANT_PUBLIC_MIN_ENTRIES,
+			this.positiveInteger(options.maxEntries, 50_000)
+		);
+	}
+
+	consume(
+		method: string | undefined,
+		pathname: string,
+		clientIp: string
+	): AiConsultantPublicRateLimitResult | null {
+		const match = AI_CONSULTANT_PUBLIC_PATH_PATTERN.exec(pathname);
+		if (!match) return null;
+
+		const operation =
+			match[2].toLowerCase() as AiConsultantPublicOperation;
+		const expectedMethod = operation === 'config' ? 'GET' : 'POST';
+		if ((method || '').toUpperCase() !== expectedMethod) return null;
+
+		const now = this.now();
+		this.operations += 1;
+		if (this.operations % 256 === 0) this.cleanup(now);
+
+		const widget = match[1].toLowerCase();
+		const ip = clientIp || 'unknown';
+		const scopes: ReadonlyArray<readonly [string, number]> = [
+			['global', this.globalLimit],
+			[`ip:${ip}`, this.perIpLimit],
+			[`widget:${widget}`, this.perWidgetLimit],
+			[`ip-widget:${ip}:${widget}`, this.perIpWidgetLimit],
+			[`operation:${operation}`, this.operationLimits[operation]]
+		];
+		const protectedKeys = new Set(scopes.map(([key]) => key));
+		let missingEntries = 0;
+		for (const [key, limit] of scopes) {
+			const current = this.entries.get(key);
+			if (!current || current.expiresAt <= now) {
+				if (current) this.entries.delete(key);
+				missingEntries += 1;
+				continue;
+			}
+			if (current.count >= limit) {
+				return {
+					allowed: false,
+					retryAfterSeconds: Math.max(
+						1,
+						Math.ceil((current.expiresAt - now) / 1000)
+					),
+					operation
+				};
+			}
+		}
+		if (!this.ensureCapacity(now, protectedKeys, missingEntries)) {
+			return {
+				allowed: false,
+				retryAfterSeconds: Math.ceil(this.windowMs / 1000),
+				operation
+			};
+		}
+		for (const [key] of scopes) {
+			const current = this.entries.get(key);
+			if (!current || current.expiresAt <= now) {
+				this.entries.set(key, {
+					count: 1,
+					expiresAt: now + this.windowMs
+				});
+			} else {
+				current.count += 1;
+				this.entries.delete(key);
+				this.entries.set(key, current);
+			}
+		}
+
+		return {
+			allowed: true,
+			retryAfterSeconds: Math.ceil(this.windowMs / 1000),
+			operation
+		};
+	}
+
+	private ensureCapacity(
+		now: number,
+		protectedKeys: ReadonlySet<string>,
+		requiredSlots: number
+	): boolean {
+		if (this.entries.size + requiredSlots <= this.maxEntries) return true;
+		this.cleanup(now);
+
+		while (this.entries.size + requiredSlots > this.maxEntries) {
+			let evictionKey: string | undefined;
+			let evictionPriority = Number.POSITIVE_INFINITY;
+			for (const key of this.entries.keys()) {
+				if (protectedKeys.has(key)) continue;
+				const priority = this.evictionPriority(key);
+				if (priority < evictionPriority) {
+					evictionKey = key;
+					evictionPriority = priority;
+				}
+			}
+			if (!evictionKey) return false;
+			this.entries.delete(evictionKey);
+		}
+		return true;
+	}
+
+	private evictionPriority(key: string): number {
+		if (key.startsWith('ip-widget:')) return 0;
+		if (key.startsWith('widget:')) return 1;
+		if (key.startsWith('ip:')) return 2;
+		if (key.startsWith('operation:')) return 3;
+		return 4;
+	}
+
+	private cleanup(now: number): void {
+		for (const [key, entry] of this.entries) {
+			if (entry.expiresAt <= now) this.entries.delete(key);
+		}
+	}
+
+	private positiveInteger(
+		value: number | undefined,
+		fallback: number
+	): number {
+		return Number.isSafeInteger(value) && Number(value) > 0
+			? Number(value)
+			: fallback;
 	}
 }
 
@@ -588,6 +797,10 @@ export const createGateway = (
 	const widgetEventRateLimiter = new WidgetEventRateLimiter({
 		now: options.now
 	});
+	const aiConsultantRateLimiter = new AiConsultantPublicRateLimiter({
+		...options.aiConsultantRateLimiterOptions,
+		now: options.aiConsultantRateLimiterOptions?.now ?? options.now
+	});
 
 	const server = createServer((request, response) => {
 		const { requestId, correlationId } = createRequestContext();
@@ -728,6 +941,37 @@ export const createGateway = (
 				return;
 			}
 			routeId = route.id;
+
+			const aiConsultantRateLimit = aiConsultantRateLimiter.consume(
+				request.method,
+				target.routingPathname,
+				resolveClientIp(request.socket.remoteAddress, request.headers)
+			);
+			if (aiConsultantRateLimit && !aiConsultantRateLimit.allowed) {
+				log.log('warn', 'ai_consultant_rate_limited', {
+					requestId,
+					correlationId,
+					routeId,
+					operation: aiConsultantRateLimit.operation
+				});
+				sendError(
+					request,
+					response,
+					429,
+					'Too Many Requests',
+					'AI consultant request rate limit exceeded',
+					'ai_consultant_rate_limited',
+					requestId,
+					correlationId,
+					{
+						...corsHeaders,
+						'access-control-expose-headers':
+							'x-request-id, x-correlation-id, retry-after',
+						'retry-after': String(aiConsultantRateLimit.retryAfterSeconds)
+					}
+				);
+				return;
+			}
 
 			if (request.method === 'POST') {
 				const rateLimit = widgetEventRateLimiter.consume(

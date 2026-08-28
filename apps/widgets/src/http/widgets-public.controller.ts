@@ -11,16 +11,20 @@ import {
 	UsePipes,
 	ValidationPipe
 } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import type { Request, Response } from 'express';
 import { WidgetsApiGuard } from '../auth/widgets-auth.guard';
 import { WidgetsDomainService } from '../domain/widgets-domain.service';
 import {
 	getWidgetDefinition,
+	WidgetType,
 	WIDGET_DEFINITIONS
 } from '../domain/widgets-domain.types';
 import {
 	getClientIp,
 	getRequestDomain,
+	getRequestHostname,
+	isAiDirectPageRequest,
 	isDirectPageRequest,
 	safePublicKey
 } from '../domain/widgets-domain.util';
@@ -33,15 +37,18 @@ import {
 const CONFIG_PATHS = WIDGET_DEFINITIONS.map(
 	item => `${item.publicApi}/:key/config`
 );
-const LEAD_PATHS = WIDGET_DEFINITIONS.map(
-	item => `${item.publicApi}/:key/lead`
-);
+const LEAD_PATHS = WIDGET_DEFINITIONS.filter(
+	item => item.type !== WidgetType.AI_CONSULTANT
+).map(item => `${item.publicApi}/:key/lead`);
 
 @Controller()
 @UseGuards(WidgetsApiGuard)
 @UsePipes(new ValidationPipe({ whitelist: true, transform: true }))
 export class WidgetsPublicController {
-	constructor(private readonly widgets: WidgetsDomainService) {}
+	constructor(
+		private readonly widgets: WidgetsDomainService,
+		private readonly configService: ConfigService
+	) {}
 
 	@Get(CONFIG_PATHS)
 	async config(
@@ -60,8 +67,17 @@ export class WidgetsPublicController {
 		const result = await this.widgets.publicConfig(
 			type,
 			key,
-			getRequestDomain(request),
-			isDirectPageRequest(request, definition.pagePath, key),
+			type === WidgetType.AI_CONSULTANT
+				? getRequestHostname(request)
+				: getRequestDomain(request),
+			type === WidgetType.AI_CONSULTANT
+				? isAiDirectPageRequest(
+						request,
+						definition.pagePath,
+						key,
+						this.configService.get<string>('NODE_ENV')
+					)
+				: isDirectPageRequest(request, definition.pagePath, key),
 			getClientIp(request)
 		);
 		if (result === null) throw new NotFoundException('Виджет не найден');

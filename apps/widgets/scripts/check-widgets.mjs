@@ -13,7 +13,7 @@ const files = [
 	'callback.js',
 	'timer.js',
 	'stop-offer.js',
-	'online-consultant.js',
+	'ai-consultant.js',
 	'calculator.js',
 	'helpers/winwidget-phone.js'
 ];
@@ -23,14 +23,13 @@ const externalUrlRuntimeFiles = [
 	'callback.js',
 	'timer.js',
 	'stop-offer.js',
-	'online-consultant.js',
+	'ai-consultant.js',
 	'calculator.js'
 ];
 const contactLinkRuntimeFiles = new Set([
 	'quiz.js',
 	'timer.js',
-	'stop-offer.js',
-	'online-consultant.js'
+	'stop-offer.js'
 ]);
 
 for (const file of files) {
@@ -151,6 +150,12 @@ const requireRuntimeSource = (file, source, label) => {
 	process.exit(1);
 };
 
+const requireRuntimePattern = (file, pattern, label) => {
+	if (pattern.test(runtimeSources[file])) return;
+	console.error(`widgets: ${file} is missing ${label}`);
+	process.exit(1);
+};
+
 const requireOrderedRuntimeSource = (file, functionName, sources) => {
 	const functionSource = getNamedFunctionSource(
 		runtimeSources[file],
@@ -176,7 +181,7 @@ const telemetryRuntimeTypes = {
 	'callback.js': 'callback',
 	'timer.js': 'countdown-timer',
 	'stop-offer.js': 'stop-offer',
-	'online-consultant.js': 'online-consultant',
+	'ai-consultant.js': 'ai-consultant',
 	'calculator.js': 'calculator'
 };
 
@@ -190,19 +195,41 @@ for (const [file, runtimeType] of Object.entries(telemetryRuntimeTypes)) {
 		process.exit(1);
 	}
 
-	const createTelemetry = fetchStub =>
+	const telemetryHelpers =
+		file === 'ai-consultant.js'
+			? [
+					getNamedFunctionSource(
+						runtimeSources[file],
+						'isDirectPreviewPage'
+					),
+					getNamedFunctionSource(
+						runtimeSources[file],
+						'getWidgetFetchOptions'
+					)
+				]
+			: [];
+	const createTelemetry = (fetchStub, directPage = false) =>
 		new Function(
 			'fetch',
 			'API_BASE',
 			'KEY',
+			'window',
 			[
 				"var RUNTIME_VERSION = '2026.08';",
 				'var PUBLISHED_VERSION = 1;',
 				'var telemetryEventsSent = Object.create(null);',
+				...telemetryHelpers,
 				telemetryFunctionSource,
 				'return sendTelemetryEvent;'
 			].join('\n')
-		)(fetchStub, 'https://api.example/api/v1', 'public-key');
+		)(fetchStub, 'https://api.example/api/v1', 'public-key', {
+			location: directPage
+				? {
+						hostname: 'winwidget.ru',
+						pathname: '/page-ai-consultant/public-key'
+					}
+				: { hostname: 'shop.example.test', pathname: '/catalog' }
+		});
 
 	const requests = [];
 	const sendTelemetryEvent = createTelemetry((url, options) => {
@@ -255,6 +282,23 @@ for (const [file, runtimeType] of Object.entries(telemetryRuntimeTypes)) {
 			process.exit(1);
 		}
 	});
+	if (file === 'ai-consultant.js') {
+		const directRequests = [];
+		const directTelemetry = createTelemetry((url, options) => {
+			directRequests.push({ url, options });
+			return Promise.resolve();
+		}, true);
+		directTelemetry('IMPRESSION');
+		if (
+			directRequests.length !== 1 ||
+			directRequests[0].options.referrerPolicy !== 'unsafe-url'
+		) {
+			console.error(
+				'widgets: ai-consultant.js direct telemetry must expose only its direct-page URL'
+			);
+			process.exit(1);
+		}
+	}
 
 	const failOpenTelemetry = createTelemetry(() => {
 		throw new Error('network unavailable');
@@ -280,7 +324,6 @@ for (const [file, runtimeType] of Object.entries(telemetryRuntimeTypes)) {
 for (const [file, eventFunction, openGoal, submitGoal] of [
 	['callback.js', 'firePixelEvent', 'wcb_open', 'wcb_send'],
 	['timer.js', 'firePixelEvent', 'wt_open', 'wt_send'],
-	['online-consultant.js', 'firePixelEvent', 'woc_open', 'woc_send'],
 	['quiz.js', 'firePixel', 'wq_open', 'wq_send']
 ]) {
 	requireRuntimeSource(file, `${eventFunction}('${openGoal}')`, openGoal);
@@ -402,8 +445,171 @@ if (
 	process.exit(1);
 }
 
-requireRuntimeSource(
-	'online-consultant.js',
-	"button.style.display = 'none';",
-	'successful-submit launcher cleanup'
+requireRuntimePattern(
+	'ai-consultant.js',
+	/['"]\/ai-consultant\/['"]\s*\+\s*encodeURIComponent\(KEY\)\s*\+\s*['"]\/session['"]/,
+	'AI session endpoint'
 );
+requireRuntimePattern(
+	'ai-consultant.js',
+	/['"]\/ai-consultant\/['"]\s*\+\s*encodeURIComponent\(KEY\)\s*\+\s*['"]\/messages['"]/,
+	'AI message endpoint'
+);
+
+for (const [source, label] of [
+	["button.id = 'waic-button'", 'canonical launcher selector'],
+	["overlay.id = 'waic-overlay'", 'canonical overlay selector'],
+	["modal.id = 'waic-modal'", 'canonical chat selector'],
+	['requestId: uuid()', 'request idempotency key'],
+	['sessionId: sessionId', 'chat session identifier'],
+	['sessionToken: sessionToken', 'signed chat session token'],
+	['turnstileToken: turnstileToken', 'one-time Turnstile token'],
+	['fetchWithRequestTimeout', 'request-only timeout phase'],
+	['SESSION_REQUEST_TIMEOUT_MS = 30000', 'bounded session request phase'],
+	['MESSAGE_REQUEST_TIMEOUT_MS = 55000', 'bounded two-call AI phase'],
+	['TURNSTILE_CHALLENGE_TIMEOUT_MS = 120000', 'bounded challenge phase'],
+	['cData: KEY', 'Turnstile widget binding'],
+	[
+		'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit',
+		'exact Turnstile runtime URL'
+	],
+	['history: previousHistory', 'bounded in-memory history'],
+	[
+		"document.createTextNode('Не указывайте персональные данные. ')",
+		'personal-data warning'
+	],
+	[
+		'getSafeExternalUrl(config.privacyUrl, false)',
+		'validated public privacy policy URL'
+	],
+	["aiBadge.textContent = 'AI-оператор'", 'explicit AI operator badge'],
+	[
+		"statusText.textContent = 'Отвечает по инструкциям'",
+		'neutral instruction-bound status'
+	],
+	["? 'Формирует ответ…'", 'neutral AI generation state'],
+	["+ ' присоединился к чату'", 'operator join event'],
+	["+ ' покинул чат'", 'operator leave event'],
+	["+ ' печатает'", 'operator typing state']
+]) {
+	requireRuntimeSource('ai-consultant.js', source, label);
+}
+
+for (const forbidden of ['waic-status-dot', 'Готов ответить']) {
+	if (!runtimeSources['ai-consultant.js'].includes(forbidden)) continue;
+	console.error(
+		`widgets: ai-consultant.js contains human-like status source ${forbidden}`
+	);
+	process.exit(1);
+}
+
+if (
+	!runtimeSources['ai-consultant.js'].includes('currentScript.nonce') ||
+	!runtimeSources['ai-consultant.js'].includes(
+		'style.nonce = STYLE_NONCE'
+	) ||
+	!runtimeSources['ai-consultant.js'].includes(
+		'dynamicStyle.nonce = STYLE_NONCE'
+	) ||
+	/\.style\s*(?:\.|\[)/.test(runtimeSources['ai-consultant.js'])
+) {
+	console.error(
+		'widgets: ai-consultant.js must propagate a CSP nonce and avoid inline style attributes'
+	);
+	process.exit(1);
+}
+
+const assistantReplyAppends =
+	runtimeSources['ai-consultant.js'].match(
+		/appendMessage\('assistant', payload\.reply\.trim\(\)\)/g
+	) || [];
+if (assistantReplyAppends.length !== 1) {
+	console.error(
+		'widgets: ai-consultant.js must append exactly one assistant reply per request'
+	);
+	process.exit(1);
+}
+
+const ensureAiSessionSource = getNamedFunctionSource(
+	runtimeSources['ai-consultant.js'],
+	'ensureSessionToken'
+);
+const turnstileTokenSource = getNamedFunctionSource(
+	runtimeSources['ai-consultant.js'],
+	'getTurnstileToken'
+);
+const turnstileLoaderSource = getNamedFunctionSource(
+	runtimeSources['ai-consultant.js'],
+	'loadTurnstile'
+);
+if (
+	ensureAiSessionSource.indexOf('getTurnstileToken(flowController)') ===
+		-1 ||
+	ensureAiSessionSource.indexOf('fetchWithRequestTimeout(') === -1 ||
+	ensureAiSessionSource.indexOf('getTurnstileToken(flowController)') >
+		ensureAiSessionSource.indexOf('fetchWithRequestTimeout(') ||
+	getNamedFunctionSource(
+		runtimeSources['ai-consultant.js'],
+		'sendMessage'
+	).includes('30000') ||
+	!turnstileTokenSource.includes('TURNSTILE_CHALLENGE_TIMEOUT_MS') ||
+	!turnstileTokenSource.includes(
+		'window.clearTimeout(challengeTimeout)'
+	) ||
+	!ensureAiSessionSource.includes('SESSION_REQUEST_TIMEOUT_MS') ||
+	!getNamedFunctionSource(
+		runtimeSources['ai-consultant.js'],
+		'requestAnswer'
+	).includes('MESSAGE_REQUEST_TIMEOUT_MS')
+) {
+	console.error(
+		'widgets: ai-consultant.js starts the request timeout before Turnstile completes'
+	);
+	process.exit(1);
+}
+
+if (
+	!turnstileLoaderSource.includes('loader.catch') ||
+	!turnstileLoaderSource.includes(
+		'window.__winAiTurnstileLoader = null'
+	) ||
+	!turnstileLoaderSource.includes('script.parentNode.removeChild(script)')
+) {
+	console.error(
+		'widgets: ai-consultant.js must reset a failed Turnstile loader so a later send can retry'
+	);
+	process.exit(1);
+}
+
+for (const forbidden of [
+	'/lead',
+	'instructionsPrompt',
+	'CLOUDFLARE_TURNSTILE_SECRET_KEY',
+	'localStorage',
+	'sessionStorage',
+	'indexedDB',
+	'winwidgetAiConsultant',
+	'winaiconsultant'
+]) {
+	if (!runtimeSources['ai-consultant.js'].includes(forbidden)) continue;
+	console.error(
+		`widgets: ai-consultant.js contains forbidden legacy or persistence source ${forbidden}`
+	);
+	process.exit(1);
+}
+
+const aiFetchOptions = getNamedFunctionSource(
+	runtimeSources['ai-consultant.js'],
+	'getWidgetFetchOptions'
+);
+if (
+	!aiFetchOptions.includes('if (isDirectPreviewPage())') ||
+	runtimeSources['ai-consultant.js'].includes(
+		'if (AUTO_OPEN) result.referrerPolicy'
+	)
+) {
+	console.error(
+		'widgets: ai-consultant.js can disclose a customer page URL through unsafe referrer'
+	);
+	process.exit(1);
+}

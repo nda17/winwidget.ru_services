@@ -1,5 +1,15 @@
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { parseAdminAuditEvent } from './admin-audit-event.contract';
 import { OPERATIONS_AUDIT_SOURCES } from './operations-messaging.constants';
+
+const onlineConsultantAuditCleanupMigration = readFileSync(
+	resolve(
+		__dirname,
+		'../../prisma/migrations/20260827230000_remove_online_consultant_audit_data/migration.sql'
+	),
+	'utf8'
+);
 
 describe('admin audit event contract', () => {
 	const eventId = '3ad36f14-550c-47bd-8f69-2c913cdb83ee';
@@ -190,7 +200,7 @@ describe('admin audit event contract', () => {
 				action: 'WIDGET_PUBLISH',
 				target: {
 					widgetId: 'widget-1',
-					widgetType: 'WHEEL',
+					widgetType: 'AI_CONSULTANT',
 					ownerId: 'owner-1'
 				},
 				metadata: { version: 2 }
@@ -221,6 +231,42 @@ describe('admin audit event contract', () => {
 		);
 		expect(result.record).toEqual(
 			expect.objectContaining({ id: eventId, section: fixture.section })
+		);
+	});
+
+	it('rejects the removed online consultant widget type', () => {
+		expect(() =>
+			parseAdminAuditEvent(source('widgets'), {
+				...common,
+				action: 'WIDGET_PUBLISH',
+				target: {
+					widgetId: 'widget-1',
+					widgetType: 'ONLINE_CONSULTANT',
+					ownerId: 'owner-1'
+				},
+				metadata: { version: 2 }
+			})
+		).toThrow('Widget audit type is invalid');
+	});
+
+	it('removes only persisted audit data for the retired widget type', () => {
+		expect(onlineConsultantAuditCleanupMigration.trimStart()).toMatch(
+			/^BEGIN;/
+		);
+		expect(onlineConsultantAuditCleanupMigration.trimEnd()).toMatch(
+			/COMMIT;$/
+		);
+		expect(onlineConsultantAuditCleanupMigration).toContain(
+			"\"entity_label\" IN ('ONLINE_CONSULTANT', 'Онлайн-консультант')"
+		);
+		expect(onlineConsultantAuditCleanupMigration).toContain(
+			"\"metadata\" ->> 'widgetType' = 'ONLINE_CONSULTANT'"
+		);
+		expect(onlineConsultantAuditCleanupMigration).toContain(
+			'"dead_letter_payload" #>> \'{payload,target,widgetType}\''
+		);
+		expect(onlineConsultantAuditCleanupMigration).toContain(
+			'"aggregate_type" = \'operations.admin-audit-retry\''
 		);
 	});
 

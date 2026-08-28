@@ -9,12 +9,15 @@ import {
 	IsObject,
 	IsOptional,
 	IsString,
+	IsUUID,
 	Matches,
 	MaxLength,
 	MinLength,
 	Min,
-	ValidateIf
+	ValidateIf,
+	ValidateNested
 } from 'class-validator';
+import { Type } from 'class-transformer';
 
 export class CreateWidgetDto {
 	@IsOptional()
@@ -135,6 +138,59 @@ export class SubmitWidgetLeadDto {
 	@IsArray()
 	@ArrayMaxSize(20)
 	answers?: unknown[];
+}
+
+export class AiConsultantHistoryMessageDto {
+	@IsIn(['user', 'assistant'])
+	role: 'user' | 'assistant';
+
+	@IsString()
+	@MinLength(1)
+	@MaxLength(2000)
+	@Matches(/\S/, { message: 'Сообщение истории не должно быть пустым' })
+	content: string;
+}
+
+export class AiConsultantMessageDto {
+	@IsUUID('4')
+	requestId: string;
+
+	@IsString()
+	@Matches(/^[A-Za-z0-9_-]{16,128}$/)
+	sessionId: string;
+
+	@IsString()
+	@MinLength(1)
+	@MaxLength(1000)
+	@Matches(/\S/, { message: 'Вопрос не должен быть пустым' })
+	message: string;
+
+	@IsOptional()
+	@IsArray()
+	@ArrayMaxSize(12)
+	@ValidateNested({ each: true })
+	@Type(() => AiConsultantHistoryMessageDto)
+	history?: AiConsultantHistoryMessageDto[];
+}
+
+export class AiConsultantPublicMessageDto extends AiConsultantMessageDto {
+	@IsString()
+	@MinLength(80)
+	@MaxLength(2048)
+	@Matches(/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/)
+	sessionToken: string;
+}
+
+export class AiConsultantSessionDto {
+	@IsString()
+	@Matches(/^[A-Za-z0-9_-]{16,128}$/)
+	sessionId: string;
+
+	@IsString()
+	@MinLength(1)
+	@MaxLength(2048)
+	@Matches(/^[^\s\u0000-\u001f\u007f]+$/)
+	turnstileToken: string;
 }
 
 export const WIDGET_RUNTIME_EVENTS = [

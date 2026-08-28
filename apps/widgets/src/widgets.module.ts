@@ -56,6 +56,15 @@ import { WidgetsReportingSequenceService } from './reporting/widgets-reporting-s
 import { WidgetsRetentionService } from './retention/widgets-retention.service';
 import { WidgetsRuntimeModule } from './runtime/widgets-runtime.module';
 import { WidgetsTelemetryService } from './telemetry/widgets-telemetry.service';
+import { WidgetsAiConsultantService } from './ai/widgets-ai-consultant.service';
+import { WidgetsCloudflareAiProvider } from './ai/widgets-cloudflare-ai.provider';
+import { WIDGETS_AI_PROVIDER } from './ai/widgets-ai-provider';
+import { WidgetsAiSessionTokenService } from './ai/widgets-ai-session-token.service';
+import { WidgetsCloudflareTurnstileService } from './ai/widgets-cloudflare-turnstile.service';
+import {
+	WidgetsAiConsultantManagementController,
+	WidgetsAiConsultantPublicController
+} from './http/widgets-ai-consultant.controller';
 
 @Module({
 	imports: [
@@ -73,6 +82,8 @@ import { WidgetsTelemetryService } from './telemetry/widgets-telemetry.service';
 		WidgetsManagementController,
 		WidgetsSettingsController,
 		WidgetsAdminController,
+		WidgetsAiConsultantPublicController,
+		WidgetsAiConsultantManagementController,
 		WidgetsPublicController,
 		WidgetsTelemetryController
 	],
@@ -83,6 +94,14 @@ import { WidgetsTelemetryService } from './telemetry/widgets-telemetry.service';
 		WidgetsIdentityGuard,
 		WidgetsApiGuard,
 		WidgetsAuthGuard,
+		WidgetsAiConsultantService,
+		WidgetsAiSessionTokenService,
+		WidgetsCloudflareTurnstileService,
+		WidgetsCloudflareAiProvider,
+		{
+			provide: WIDGETS_AI_PROVIDER,
+			useExisting: WidgetsCloudflareAiProvider
+		},
 		WidgetsDomainRepository,
 		WidgetsAccessService,
 		WidgetsConfigurationService,

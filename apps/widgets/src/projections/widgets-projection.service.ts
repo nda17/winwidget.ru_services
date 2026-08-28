@@ -180,7 +180,7 @@ export class WidgetsProjectionService {
 				transaction.stopOffer.findMany({
 					where: { userId: event.aggregateId, isActive: true }
 				}),
-				transaction.onlineConsultant.findMany({
+				transaction.aiConsultant.findMany({
 					where: { userId: event.aggregateId, isActive: true }
 				}),
 				transaction.calculator.findMany({
@@ -208,7 +208,7 @@ export class WidgetsProjectionService {
 					where: { userId: event.aggregateId, isActive: true },
 					data: { isActive: false }
 				}),
-				transaction.onlineConsultant.updateMany({
+				transaction.aiConsultant.updateMany({
 					where: { userId: event.aggregateId, isActive: true },
 					data: { isActive: false }
 				}),
@@ -223,7 +223,7 @@ export class WidgetsProjectionService {
 				'callback',
 				'countdownTimer',
 				'stopOffer',
-				'onlineConsultant',
+				'aiConsultant',
 				'calculator'
 			] as const;
 			for (let index = 0; index < active.length; index += 1) {

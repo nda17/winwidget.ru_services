@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { BadRequestException, Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/widgets-client';
 import {
 	WIDGET_LEAD_CHANGED_EVENT_TYPE,
@@ -50,6 +50,7 @@ export class WidgetsReportingService {
 		tombstone = false,
 		correlationId?: string
 	): Promise<void> {
+		this.assertLeadType(type);
 		const widgetType = this.wireType(type);
 		await this.reporting.createEventInTransaction(transaction, {
 			eventType: WIDGET_LEAD_CHANGED_EVENT_TYPE,
@@ -77,7 +78,14 @@ export class WidgetsReportingService {
 	}
 
 	leadAggregateType(type: WidgetType): string {
+		this.assertLeadType(type);
 		return `widgets.lead.${this.wireType(type)}`;
+	}
+
+	private assertLeadType(type: WidgetType): void {
+		if (type === WidgetType.AI_CONSULTANT) {
+			throw new BadRequestException('AI-консультант не создаёт заявки');
+		}
 	}
 
 	private wireType(type: WidgetType): string {
@@ -88,7 +96,7 @@ export class WidgetsReportingService {
 				[WidgetType.CALLBACK]: 'callback',
 				[WidgetType.TIMER]: 'countdownTimer',
 				[WidgetType.STOP_OFFER]: 'stopOffer',
-				[WidgetType.ONLINE_CONSULTANT]: 'onlineConsultant',
+				[WidgetType.AI_CONSULTANT]: 'aiConsultant',
 				[WidgetType.CALCULATOR]: 'calculator'
 			} as Record<WidgetType, string>
 		)[type];

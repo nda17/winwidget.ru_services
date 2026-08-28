@@ -34,11 +34,23 @@ export const REPORTING_WIDGET_TYPES = [
 	'callback',
 	'countdownTimer',
 	'stopOffer',
-	'onlineConsultant',
+	'aiConsultant',
 	'calculator'
 ] as const;
 
 export type ReportingWidgetType = (typeof REPORTING_WIDGET_TYPES)[number];
+
+export const REPORTING_LEAD_WIDGET_TYPES = [
+	'wheel',
+	'quiz',
+	'callback',
+	'countdownTimer',
+	'stopOffer',
+	'calculator'
+] as const;
+
+export type ReportingLeadWidgetType =
+	(typeof REPORTING_LEAD_WIDGET_TYPES)[number];
 
 export interface IdentityUserState {
 	id: string;
@@ -89,7 +101,7 @@ export interface WidgetState {
 export interface LeadState {
 	id: string;
 	widgetId: string;
-	widgetType: ReportingWidgetType;
+	widgetType: ReportingLeadWidgetType;
 	createdAt: string;
 }
 
@@ -239,12 +251,20 @@ export function parseReportingSourceEvent(
 		record.eventType === 'widgets.widget.changed.v1' ||
 		record.eventType === 'widgets.lead.changed.v1'
 	) {
-		parseWidgetAggregateId(record.aggregateId);
+		parseWidgetAggregateId(
+			record.aggregateId,
+			record.eventType === 'widgets.lead.changed.v1'
+				? REPORTING_LEAD_WIDGET_TYPES
+				: REPORTING_WIDGET_TYPES
+		);
 	}
 	return record as unknown as ReportingSourceEvent;
 }
 
-export function parseWidgetAggregateId(value: string): {
+export function parseWidgetAggregateId(
+	value: string,
+	allowedTypes: readonly ReportingWidgetType[] = REPORTING_WIDGET_TYPES
+): {
 	widgetType: ReportingWidgetType;
 	id: string;
 } {
@@ -256,11 +276,7 @@ export function parseWidgetAggregateId(value: string): {
 	}
 	const widgetType = value.slice(0, separator);
 	const id = value.slice(separator + 1);
-	assertOneOf(
-		widgetType,
-		REPORTING_WIDGET_TYPES,
-		'aggregateId.widgetType'
-	);
+	assertOneOf(widgetType, allowedTypes, 'aggregateId.widgetType');
 	assertBoundedString(id, 'aggregateId.id', 255);
 	return { widgetType, id };
 }

@@ -131,7 +131,7 @@ const WIDGET_TYPES = [
 	'CALLBACK',
 	'TIMER',
 	'STOP_OFFER',
-	'ONLINE_CONSULTANT',
+	'AI_CONSULTANT',
 	'CALCULATOR'
 ] as const;
 const WIDGET_INTEGRATIONS = ['webhook', 'bitrix24', 'amo-crm'] as const;

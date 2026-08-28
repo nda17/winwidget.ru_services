@@ -84,11 +84,6 @@ const NON_EMPTY_GOLDEN = Object.freeze({
 			{ type: 'countdownTimer', label: 'Таймеры', count: 0 },
 			{ type: 'stopOffer', label: 'Стоп-офферы', count: 0 },
 			{
-				type: 'onlineConsultant',
-				label: 'Онлайн-консультанты',
-				count: 0
-			},
-			{
 				type: 'calculator',
 				label: 'Калькуляторы стоимости',
 				count: 0
@@ -127,7 +122,7 @@ const NON_EMPTY_GOLDEN = Object.freeze({
 				['callback', 'Обратный звонок'],
 				['countdownTimer', 'Таймеры'],
 				['stopOffer', 'Стоп-офферы'],
-				['onlineConsultant', 'Онлайн-консультанты'],
+				['aiConsultant', 'AI-консультанты'],
 				['calculator', 'Калькуляторы стоимости']
 			].map(([type, label]) => ({
 				type,

@@ -15,7 +15,6 @@ const LEAD_SOURCES = [
 	'callback',
 	'countdown-timer',
 	'stop-offer',
-	'online-consultant',
 	'calculator'
 ] as const;
 const OPTIONAL_LEAD_FIELDS = [
@@ -432,7 +431,6 @@ export class WidgetsIntegrationDeliveryService {
 			callback: 'Обратный звонок',
 			'countdown-timer': 'Таймер',
 			'stop-offer': 'Стоп-оффер',
-			'online-consultant': 'Онлайн-консультант',
 			calculator: 'Калькулятор стоимости'
 		};
 		return labels[source];

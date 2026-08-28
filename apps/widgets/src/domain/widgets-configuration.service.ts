@@ -27,7 +27,10 @@ import {
 	normalizeWidgetConfig,
 	prepareWidgetConfigPatch
 } from './widgets-config-normalizer';
-import { normalizeInstallDomain } from './widgets-domain.util';
+import {
+	normalizeExactInstallDomain,
+	normalizeInstallDomain
+} from './widgets-domain.util';
 import { WidgetsImageLifecycleService } from './widgets-image-lifecycle.service';
 import {
 	WIDGET_BUTTON_IMAGE_MAX_SIZE_BYTES,
@@ -224,7 +227,10 @@ export class WidgetsConfigurationService {
 						...(dto.name !== undefined && { name: dto.name.trim() }),
 						...(dto.isActive !== undefined && { isActive: dto.isActive }),
 						...(dto.installDomain !== undefined && {
-							draftInstallDomain: normalizeInstallDomain(dto.installDomain)
+							draftInstallDomain:
+								type === WidgetType.AI_CONSULTANT
+									? normalizeExactInstallDomain(dto.installDomain)
+									: normalizeInstallDomain(dto.installDomain)
 						}),
 						...(nextConfig && { draftConfig: nextConfig }),
 						...(draftChanged && { draftRevision: { increment: 1 } })
@@ -324,11 +330,14 @@ export class WidgetsConfigurationService {
 						where: { widgetType: type, widgetId }
 					})
 				]);
-				const removedLeads = await this.repository.allLeadsInTransaction(
-					type,
-					widgetId,
-					transaction
-				);
+				const removedLeads =
+					type === WidgetType.AI_CONSULTANT
+						? []
+						: await this.repository.allLeadsInTransaction(
+								type,
+								widgetId,
+								transaction
+							);
 				for (const lead of removedLeads) {
 					await this.reporting.enqueueLead(
 						transaction,

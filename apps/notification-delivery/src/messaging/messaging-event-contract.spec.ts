@@ -1,5 +1,15 @@
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { assertMessagingEventContract } from './messaging-event-contract';
 import type { NotificationDeliveryKind } from './messaging.constants';
+
+const onlineConsultantCleanupMigration = readFileSync(
+	resolve(
+		__dirname,
+		'../../prisma/migrations/20260828000000_remove_online_consultant_delivery_data/migration.sql'
+	),
+	'utf8'
+);
 
 describe('notification delivery messaging contracts', () => {
 	const messageId = '11111111-1111-4111-8111-111111111111';
@@ -357,5 +367,45 @@ describe('notification delivery messaging contracts', () => {
 				}
 			)
 		).toThrow();
+	});
+
+	it('removes only provably linked retired lead delivery state in FK-safe order', () => {
+		const collectEvents = onlineConsultantCleanupMigration.indexOf(
+			'INSERT INTO "retired_online_consultant_delivery_events"'
+		);
+		const deleteOutbox = onlineConsultantCleanupMigration.indexOf(
+			'DELETE FROM "notification_delivery"."outbox_events"'
+		);
+		const deleteActions = onlineConsultantCleanupMigration.indexOf(
+			'DELETE FROM "notification_delivery"."control_actions"'
+		);
+		const deleteFailures = onlineConsultantCleanupMigration.indexOf(
+			'DELETE FROM "notification_delivery"."delivery_failures"'
+		);
+		const deleteReceipts = onlineConsultantCleanupMigration.indexOf(
+			'DELETE FROM "notification_delivery"."delivery_receipts"'
+		);
+
+		expect(onlineConsultantCleanupMigration.trimStart()).toMatch(
+			/^--[\s\S]*BEGIN;/
+		);
+		expect(onlineConsultantCleanupMigration.trimEnd()).toMatch(/COMMIT;$/);
+		expect(onlineConsultantCleanupMigration).toContain(
+			"\"payload\" ->> 'source' = 'online-consultant'"
+		);
+		expect(onlineConsultantCleanupMigration).toContain(
+			'"payload" ->> \'sourceEventId\''
+		);
+		expect(onlineConsultantCleanupMigration).toContain(
+			'"headers" ->> \'x-causation-id\''
+		);
+		expect(onlineConsultantCleanupMigration).toContain(
+			'A DELIVERED receipt has no source payload'
+		);
+		expect(collectEvents).toBeGreaterThan(-1);
+		expect(collectEvents).toBeLessThan(deleteOutbox);
+		expect(deleteOutbox).toBeLessThan(deleteActions);
+		expect(deleteActions).toBeLessThan(deleteFailures);
+		expect(deleteFailures).toBeLessThan(deleteReceipts);
 	});
 });

@@ -14,7 +14,9 @@ import {
 } from '../domain/widgets-domain.types';
 import {
 	getRequestDomain,
-	isDomainAllowed
+	getRequestHostname,
+	isDomainAllowed,
+	isExactHostnameAllowed
 } from '../domain/widgets-domain.util';
 import { WidgetsQuotaService } from '../quota/widgets-quota.service';
 import type { RecordWidgetRuntimeEventDto } from '../http/widgets.dto';
@@ -29,6 +31,32 @@ const key = (date: Date) => date.toISOString().slice(0, 10);
 const percentage = (value: number, total: number) =>
 	total > 0 ? Math.round((value / total) * 1000) / 10 : null;
 
+export const isRuntimeEventDomainAllowed = (
+	type: WidgetType,
+	installDomain: string,
+	request: Request,
+	directPageAccessAllowed = false
+): boolean =>
+	type === WidgetType.AI_CONSULTANT && directPageAccessAllowed
+		? true
+		: type === WidgetType.AI_CONSULTANT
+			? isExactHostnameAllowed(installDomain, getRequestHostname(request))
+			: isDomainAllowed(installDomain, getRequestDomain(request));
+
+export const runtimeCompletionMetadata = (
+	type: WidgetType,
+	config: unknown
+): { submitAvailable: boolean; completionLabel: string } => {
+	const submitAvailable =
+		type !== WidgetType.AI_CONSULTANT &&
+		(type === WidgetType.CALLBACK ||
+			asJsonObject(config).dataType !== 'NONE');
+	return {
+		submitAvailable,
+		completionLabel: submitAvailable ? 'Заявки' : 'Завершения'
+	};
+};
+
 @Injectable()
 export class WidgetsTelemetryService {
 	constructor(
@@ -40,7 +68,8 @@ export class WidgetsTelemetryService {
 		type: WidgetType,
 		publicKey: string,
 		dto: RecordWidgetRuntimeEventDto,
-		request: Request
+		request: Request,
+		directPageAccessAllowed = false
 	): Promise<void> {
 		if (dto.event !== 'STEP' && dto.stepKey !== undefined)
 			throw new BadRequestException(
@@ -67,7 +96,12 @@ export class WidgetsTelemetryService {
 				!widget.isActive ||
 				!widget.publishedAt ||
 				widget.publishedVersion !== dto.publishedVersion ||
-				!isDomainAllowed(widget.installDomain, getRequestDomain(request))
+				!isRuntimeEventDomainAllowed(
+					type,
+					widget.installDomain,
+					request,
+					directPageAccessAllowed
+				)
 			)
 				return;
 			if (
@@ -283,9 +317,7 @@ export class WidgetsTelemetryService {
 			if (type === WidgetType.QUIZ) previous = count;
 			return result;
 		});
-		const submitAvailable =
-			type === WidgetType.CALLBACK ||
-			asJsonObject(widget.config).dataType !== 'NONE';
+		const completion = runtimeCompletionMetadata(type, widget.config);
 		const tracking =
 			presence?.publishedVersion === widget.publishedVersion
 				? presence.firstSeenAt
@@ -296,8 +328,7 @@ export class WidgetsTelemetryService {
 			days,
 			trackingStartedAt: tracking?.toISOString() || null,
 			isPartialPeriod: !tracking || tracking > from,
-			submitAvailable,
-			completionLabel: submitAvailable ? 'Заявки' : 'Завершения',
+			...completion,
 			stepRateBasis:
 				type === WidgetType.CALCULATOR
 					? 'START'

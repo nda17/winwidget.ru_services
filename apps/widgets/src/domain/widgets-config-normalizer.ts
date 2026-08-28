@@ -1,5 +1,6 @@
 import { BadRequestException } from '@nestjs/common';
 import type { Prisma } from '@prisma/widgets-client';
+import { Buffer } from 'node:buffer';
 import {
 	asJsonObject,
 	getWidgetDefinition,
@@ -43,6 +44,63 @@ const shortString = (
 	fallback: string,
 	max = 200
 ): string => (typeof value === 'string' ? value.slice(0, max) : fallback);
+
+const operatorName = (value: unknown, fallback: string): string =>
+	stringValue(value)
+		.normalize('NFKC')
+		.replace(/[^\p{L}\p{N} .'-]/gu, ' ')
+		.replace(/\s+/g, ' ')
+		.trim()
+		.slice(0, 40) || fallback;
+
+const AI_SECRET_PATTERNS = [
+	/-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/i,
+	/\bsk-(?:proj-|live-|test-)?[A-Za-z0-9_-]{16,}\b/,
+	/\bgh[pousr]_[A-Za-z0-9]{20,}\b/i,
+	/\bxox[baprs]-[A-Za-z0-9-]{16,}\b/i,
+	/\bAKIA[0-9A-Z]{16}\b/,
+	/(?:^|[\r\n])\s*(?:api[_ -]?key|authorization|access[_ -]?token|secret|token|password|парол[ья])\s*[:=]\s*["']?[^\s"']{8,}/imu
+] as const;
+
+const AI_PRIVACY_URL_MAX_LENGTH = 500;
+const AI_INSTRUCTIONS_PROMPT_MAX_BYTES = 16_000;
+
+const aiInstructionsPrompt = (value: unknown): string => {
+	const prompt = stringValue(value).trim();
+	if (
+		prompt.length > AI_INSTRUCTIONS_PROMPT_MAX_BYTES ||
+		Buffer.byteLength(prompt, 'utf8') > AI_INSTRUCTIONS_PROMPT_MAX_BYTES
+	) {
+		throw new BadRequestException(
+			`Инструкции AI-консультанта не должны превышать ${AI_INSTRUCTIONS_PROMPT_MAX_BYTES} байт`
+		);
+	}
+	if (AI_SECRET_PATTERNS.some(pattern => pattern.test(prompt))) {
+		throw new BadRequestException(
+			'Инструкции AI-консультанта не должны содержать пароли, токены или закрытые ключи'
+		);
+	}
+	return prompt;
+};
+
+const requiredHttpUrl = (value: unknown, fallback: string): string => {
+	if (value === undefined || value === null) return fallback;
+	const normalized = stringValue(value, fallback).trim();
+	if (normalized.length > AI_PRIVACY_URL_MAX_LENGTH) {
+		throw new BadRequestException(
+			`Ссылка на политику не должна превышать ${AI_PRIVACY_URL_MAX_LENGTH} символов`
+		);
+	}
+	if (!normalized) return '';
+	try {
+		const parsed = new URL(normalized);
+		return ['http:', 'https:'].includes(parsed.protocol)
+			? parsed.toString()
+			: normalized;
+	} catch {
+		return normalized;
+	}
+};
 
 const baseConfig = (type: WidgetType, raw: unknown) => {
 	const defaults = asJsonObject(getWidgetDefinition(type).defaultConfig());
@@ -290,51 +348,57 @@ const normalizeStopOffer = (raw: unknown): Prisma.InputJsonObject => {
 	return toInputJson(result);
 };
 
-const normalizeQuickActions = (value: unknown): Prisma.InputJsonArray => {
-	if (!Array.isArray(value)) {
-		throw new BadRequestException('Добавьте от 2 до 10 вопросов');
-	}
-	if (value.length < 2 || value.length > 10) {
-		throw new BadRequestException('Должно быть от 2 до 10 вопросов');
-	}
-	return value.map((action, index) => {
-		const item = asJsonObject(action);
-		const label = stringValue(item.label).trim().slice(0, 40);
-		const answer = stringValue(item.answer).trim().slice(0, 1_200);
-		if (!label || !answer) {
-			throw new BadRequestException(
-				`Заполните вопрос и ответ ${index + 1}`
-			);
-		}
-		const buttonText = stringValue(item.buttonText).trim().slice(0, 80);
-		const buttonUrl = stringValue(item.buttonUrl).trim().slice(0, 500);
-		if (buttonUrl && !buttonText) {
-			throw new BadRequestException(
-				`Вопрос ${index + 1}: заполните текст кнопки перехода или уберите ссылку`
-			);
-		}
-		const id =
-			stringValue(item.id).trim().slice(0, 60) || `action-${index + 1}`;
-		return { id, label, answer, buttonText, buttonUrl };
-	});
-};
-
-const normalizeOnlineConsultant = (
-	raw: unknown
-): Prisma.InputJsonObject => {
+const normalizeAiConsultant = (raw: unknown): Prisma.InputJsonObject => {
 	const { defaults, value, result } = baseConfig(
-		WidgetType.ONLINE_CONSULTANT,
+		WidgetType.AI_CONSULTANT,
 		raw
 	);
 	normalizeButtonLayout(result, defaults);
-	const normalizedType = stringValue(value.dataType).toUpperCase();
-	result.dataType = CONTACT_DATA_TYPES.has(normalizedType)
-		? normalizedType
-		: 'PHONE';
-	result.quickActions = Array.isArray(value.quickActions)
-		? value.quickActions
-		: defaults.quickActions;
-	return toInputJson(result);
+	const defaultOperator = stringValue(defaults.operatorName, 'Alex');
+	const defaultGreeting = stringValue(defaults.greeting);
+	const defaultFarewell = stringValue(defaults.farewellMessage);
+	const defaultPlaceholder = stringValue(
+		defaults.inputPlaceholder,
+		'Задайте вопрос...'
+	);
+	return toInputJson({
+		color: hexColor(value.color, stringValue(defaults.color, '#4705fb')),
+		bgColor: hexColor(
+			value.bgColor,
+			stringValue(defaults.bgColor, '#ffffff')
+		),
+		textColor: hexColor(
+			value.textColor,
+			stringValue(defaults.textColor, '#1f2937')
+		),
+		buttonColor: hexColor(value.buttonColor, '', true),
+		openButtonColor: hexColor(value.openButtonColor, '', true),
+		buttonSide: value.buttonSide === 'left' ? 'left' : 'right',
+		buttonPulse: booleanValue(value.buttonPulse, true),
+		buttonBottom: result.buttonBottom,
+		buttonOffset: result.buttonOffset,
+		buttonSize: result.buttonSize,
+		buttonImageUrl: shortString(value.buttonImageUrl, '', 2_000),
+		autoOpenDelay: result.autoOpenDelay,
+		operatorName: operatorName(value.operatorName, defaultOperator),
+		greeting:
+			stringValue(value.greeting).trim().slice(0, 500) || defaultGreeting,
+		instructionsPrompt: aiInstructionsPrompt(value.instructionsPrompt),
+		privacyUrl: requiredHttpUrl(
+			value.privacyUrl,
+			stringValue(defaults.privacyUrl)
+		),
+		inactivityTimeoutMinutes: Math.round(
+			clamp(value.inactivityTimeoutMinutes, 1, 60, 10)
+		),
+		farewellMessage:
+			stringValue(value.farewellMessage).trim().slice(0, 500) ||
+			defaultFarewell,
+		inputPlaceholder:
+			stringValue(value.inputPlaceholder).trim().slice(0, 120) ||
+			defaultPlaceholder,
+		developInfoActive: booleanValue(value.developInfoActive, true)
+	});
 };
 
 export const prepareWidgetConfigPatch = (
@@ -370,12 +434,6 @@ export const prepareWidgetConfigPatch = (
 			throw new BadRequestException('Слоты времени не должны повторяться');
 		}
 		patch.timeSlots = slots;
-	}
-	if (
-		type === WidgetType.ONLINE_CONSULTANT &&
-		Object.hasOwn(patch, 'quickActions')
-	) {
-		patch.quickActions = normalizeQuickActions(patch.quickActions);
 	}
 	return toInputJson(patch);
 };
@@ -638,8 +696,8 @@ export const normalizeWidgetConfig = (
 			return normalizeTimer(raw);
 		case WidgetType.STOP_OFFER:
 			return normalizeStopOffer(raw);
-		case WidgetType.ONLINE_CONSULTANT:
-			return normalizeOnlineConsultant(raw);
+		case WidgetType.AI_CONSULTANT:
+			return normalizeAiConsultant(raw);
 		case WidgetType.CALCULATOR:
 			return normalizeCalculator(raw);
 	}

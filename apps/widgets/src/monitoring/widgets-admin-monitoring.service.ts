@@ -742,11 +742,13 @@ export class WidgetsAdminMonitoringService {
 
 	private completeLeadOverview(rows: LeadOverviewRow[]) {
 		const byType = new Map(rows.map(row => [row.type, row.count]));
-		return Object.values(WidgetType).map(type => ({
-			type: this.overviewType(type),
-			label: getWidgetDefinition(type).label,
-			count: byType.get(type) || 0
-		}));
+		return Object.values(WidgetType)
+			.filter(type => type !== WidgetType.AI_CONSULTANT)
+			.map(type => ({
+				type: this.overviewType(type),
+				label: getWidgetDefinition(type).label,
+				count: byType.get(type) || 0
+			}));
 	}
 
 	private overviewType(
@@ -757,7 +759,7 @@ export class WidgetsAdminMonitoringService {
 		| 'CALLBACK'
 		| 'COUNTDOWN_TIMER'
 		| 'STOP_OFFER'
-		| 'ONLINE_CONSULTANT'
+		| 'AI_CONSULTANT'
 		| 'CALCULATOR' {
 		return type === WidgetType.TIMER ? 'COUNTDOWN_TIMER' : type;
 	}
@@ -818,8 +820,8 @@ export class WidgetsAdminMonitoringService {
 				return 'Таймер';
 			case WidgetType.STOP_OFFER:
 				return 'Стоп-оффер';
-			case WidgetType.ONLINE_CONSULTANT:
-				return 'Онлайн-консультант';
+			case WidgetType.AI_CONSULTANT:
+				return 'AI-консультант';
 			case WidgetType.CALCULATOR:
 				return 'Калькулятор стоимости';
 		}
@@ -843,9 +845,9 @@ export class WidgetsAdminMonitoringService {
 			SELECT 'STOP_OFFER', id, user_id, name, is_active, install_domain, updated_at
 			FROM widgets.stop_offers
 			UNION ALL
-			SELECT 'ONLINE_CONSULTANT', id, user_id, name, is_active,
+			SELECT 'AI_CONSULTANT', id, user_id, name, is_active,
 				install_domain, updated_at
-			FROM widgets.online_consultants
+			FROM widgets.ai_consultants
 			UNION ALL
 			SELECT 'CALCULATOR', id, user_id, name, is_active,
 				install_domain, updated_at
@@ -888,11 +890,10 @@ export class WidgetsAdminMonitoringService {
 			FROM widgets.stop_offers w LEFT JOIN widgets.stop_offer_leads l ON l.stop_offer_id = w.id
 			GROUP BY w.id
 			UNION ALL
-			SELECT 'ONLINE_CONSULTANT', w.id, w.name, w.public_key, w.is_active,
-				w.install_domain, w.user_id, COUNT(l.id)::int, ${date},
+			SELECT 'AI_CONSULTANT', w.id, w.name, w.public_key, w.is_active,
+				w.install_domain, w.user_id, 0::int, NULL::timestamptz,
 				w.created_at, w.updated_at
-			FROM widgets.online_consultants w LEFT JOIN widgets.online_consultant_leads l ON l.online_consultant_id = w.id
-			GROUP BY w.id
+			FROM widgets.ai_consultants w
 			UNION ALL
 			SELECT 'CALCULATOR', w.id, w.name, w.public_key, w.is_active,
 				w.install_domain, w.user_id, COUNT(l.id)::int, ${date},
@@ -923,10 +924,6 @@ export class WidgetsAdminMonitoringService {
 			SELECT 'STOP_OFFER', l.id, w.user_id, w.name, NULL::text, l.phone,
 				l.email, l.url, NULL::text, l.created_at
 			FROM widgets.stop_offer_leads l JOIN widgets.stop_offers w ON w.id = l.stop_offer_id
-			UNION ALL
-			SELECT 'ONLINE_CONSULTANT', l.id, w.user_id, w.name, NULL::text,
-				l.phone, l.email, l.url, l.action_label, l.created_at
-			FROM widgets.online_consultant_leads l JOIN widgets.online_consultants w ON w.id = l.online_consultant_id
 			UNION ALL
 			SELECT 'CALCULATOR', l.id, w.user_id, w.name, l.contact, l.phone,
 				l.email, l.url, l.calculated_price::text, l.created_at

@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import {
 	InvalidReportingEventError,
 	parseNotificationDeliveryOutcome,
@@ -5,6 +7,14 @@ import {
 	parseReportingSourceEvent,
 	reportingPayloadHash
 } from './reporting-event.contract';
+
+const onlineConsultantCleanupMigration = readFileSync(
+	resolve(
+		__dirname,
+		'../../prisma/migrations/20260827030000_replace_online_consultant_with_ai_consultant/migration.sql'
+	),
+	'utf8'
+);
 
 const identityEvent = {
 	schemaVersion: 1,
@@ -209,6 +219,83 @@ describe('reporting source event contract', () => {
 				state: null
 			})
 		).toThrow('namespaced');
+	});
+
+	it('accepts AI consultant widgets but rejects AI consultant lead facts', () => {
+		expect(
+			parseReportingSourceEvent({
+				schemaVersion: 1,
+				eventType: 'widgets.widget.changed.v1',
+				eventId: '99999999-9999-4999-8999-999999999999',
+				aggregateId: 'aiConsultant:widget-1',
+				aggregateVersion: '1',
+				sourceSequence: '14',
+				occurredAt: '2026-08-27T00:00:00.000Z',
+				tombstone: false,
+				state: {
+					id: 'widget-1',
+					userId: 'user-1',
+					widgetType: 'aiConsultant',
+					isActive: true,
+					hasInstallDomain: true,
+					createdAt: '2026-08-27T00:00:00.000Z'
+				}
+			})
+		).toEqual(
+			expect.objectContaining({ aggregateId: 'aiConsultant:widget-1' })
+		);
+
+		expect(() =>
+			parseReportingSourceEvent({
+				schemaVersion: 1,
+				eventType: 'widgets.lead.changed.v1',
+				eventId: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
+				aggregateId: 'aiConsultant:lead-1',
+				aggregateVersion: '1',
+				sourceSequence: '15',
+				occurredAt: '2026-08-27T00:00:00.000Z',
+				tombstone: true,
+				state: null
+			})
+		).toThrow('aggregateId.widgetType');
+	});
+
+	it('removes retired reporting receipts and retries before their projections', () => {
+		const collectEvents = onlineConsultantCleanupMigration.indexOf(
+			'INSERT INTO "retired_online_consultant_reporting_events"'
+		);
+		const deleteOutbox = onlineConsultantCleanupMigration.indexOf(
+			'DELETE FROM "reporting"."outbox_events"'
+		);
+		const deleteFailures = onlineConsultantCleanupMigration.indexOf(
+			'DELETE FROM "reporting"."consumer_failures"'
+		);
+		const deleteReceipts = onlineConsultantCleanupMigration.indexOf(
+			'DELETE FROM "reporting"."consumer_receipts"'
+		);
+		const deleteProjectionReceipts =
+			onlineConsultantCleanupMigration.indexOf(
+				'DELETE FROM "reporting"."projection_receipts"'
+			);
+
+		expect(onlineConsultantCleanupMigration.trimStart()).toMatch(
+			/^BEGIN;/
+		);
+		expect(onlineConsultantCleanupMigration.trimEnd()).toMatch(/COMMIT;$/);
+		expect(collectEvents).toBeGreaterThan(-1);
+		expect(onlineConsultantCleanupMigration).toContain(
+			"\"payload\" ->> 'aggregateId' LIKE 'onlineConsultant:%'"
+		);
+		expect(onlineConsultantCleanupMigration).toContain(
+			'\'MANUAL_RETRY\'::"reporting"."ReportingOutboxExchange"'
+		);
+		expect(onlineConsultantCleanupMigration).toContain(
+			'"payload" #>> \'{target,eventId}\''
+		);
+		expect(collectEvents).toBeLessThan(deleteOutbox);
+		expect(deleteOutbox).toBeLessThan(deleteFailures);
+		expect(deleteFailures).toBeLessThan(deleteReceipts);
+		expect(deleteReceipts).toBeLessThan(deleteProjectionReceipts);
 	});
 
 	it('accepts only the exact Operations notification-routing payload and headers', () => {

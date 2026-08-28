@@ -1,9 +1,13 @@
 import { ReportingPrismaService } from '../prisma/reporting-prisma.service';
-import { REPORTING_WIDGET_TYPES } from '../projections/reporting-event.contract';
+import {
+	REPORTING_LEAD_WIDGET_TYPES,
+	REPORTING_WIDGET_TYPES
+} from '../projections/reporting-event.contract';
 import { Injectable } from '@nestjs/common';
 import dayjs from 'dayjs';
 
 type WidgetType = (typeof REPORTING_WIDGET_TYPES)[number];
+type LeadWidgetType = (typeof REPORTING_LEAD_WIDGET_TYPES)[number];
 type SqlNumberish = bigint | number | string | null;
 
 interface FinanceRow {
@@ -46,7 +50,7 @@ interface SubscriptionStatsRow {
 }
 
 interface LeadStatsRow {
-	widgetType: WidgetType;
+	widgetType: LeadWidgetType;
 	total30d: SqlNumberish;
 	previous30d: SqlNumberish;
 	today: SqlNumberish;
@@ -54,7 +58,7 @@ interface LeadStatsRow {
 }
 
 interface LeadDayRow {
-	widgetType: WidgetType;
+	widgetType: LeadWidgetType;
 	date: string;
 	count: SqlNumberish;
 }
@@ -296,23 +300,23 @@ export class ReportingAnalyticsService {
 				growth30d: this.growthPercent(totalLeads30d, previousLeads30d),
 				today: this.sumByWidget(leadStats, 'today'),
 				allTime: this.sumByWidget(leadStats, 'allTime'),
-				byType30d: REPORTING_WIDGET_TYPES.map(type => ({
+				byType30d: REPORTING_LEAD_WIDGET_TYPES.map(type => ({
 					type,
 					label: this.widgetLabel(type),
 					count: this.number(leadStats.get(type)?.total30d)
 				})),
 				byDay: leadDayPeriods.map(period => {
 					const counts = Object.fromEntries(
-						REPORTING_WIDGET_TYPES.map(type => [
+						REPORTING_LEAD_WIDGET_TYPES.map(type => [
 							type,
 							leadDays.get(`${period.date}:${type}`) || 0
 						])
-					) as Record<WidgetType, number>;
+					) as Record<LeadWidgetType, number>;
 					return {
 						date: period.date,
 						label: period.label,
 						...counts,
-						total: REPORTING_WIDGET_TYPES.reduce(
+						total: REPORTING_LEAD_WIDGET_TYPES.reduce(
 							(sum, type) => sum + counts[type],
 							0
 						)
@@ -447,10 +451,10 @@ export class ReportingAnalyticsService {
 	}
 
 	private sumByWidget<K extends keyof LeadStatsRow>(
-		rows: Map<WidgetType, LeadStatsRow>,
+		rows: Map<LeadWidgetType, LeadStatsRow>,
 		key: K
 	): number {
-		return REPORTING_WIDGET_TYPES.reduce(
+		return REPORTING_LEAD_WIDGET_TYPES.reduce(
 			(sum, type) =>
 				sum + this.number(rows.get(type)?.[key] as SqlNumberish),
 			0
@@ -550,7 +554,7 @@ export class ReportingAnalyticsService {
 			callback: 'Обратный звонок',
 			countdownTimer: 'Таймеры',
 			stopOffer: 'Стоп-офферы',
-			onlineConsultant: 'Онлайн-консультанты',
+			aiConsultant: 'AI-консультанты',
 			calculator: 'Калькуляторы стоимости'
 		}[type];
 	}

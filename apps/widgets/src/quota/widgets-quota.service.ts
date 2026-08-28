@@ -246,6 +246,46 @@ export class WidgetsQuotaService {
 		}, TRANSACTION_OPTIONS);
 	}
 
+	async aiSnapshot(userId: string): Promise<WidgetsQuotaSnapshot> {
+		const [owner, entitlement, counter] = await this.prisma.$transaction([
+			this.prisma.widgetOwnerProjection.findUnique({ where: { userId } }),
+			this.prisma.widgetEntitlementProjection.findUnique({
+				where: { userId }
+			}),
+			this.prisma.widgetUsageCounter.findUnique({ where: { userId } })
+		]);
+		if (
+			!owner ||
+			owner.status !== OwnerStatus.ACTIVE ||
+			owner.tombstoned ||
+			owner.deletedAt
+		) {
+			throw new ForbiddenException('Операция недоступна для пользователя');
+		}
+		if (!entitlement || !counter) {
+			this.unavailable('Entitlement projection is missing');
+		}
+		if (
+			entitlement.tombstoned ||
+			entitlement.status !== EntitlementStatus.ACTIVE ||
+			entitlement.plan === null ||
+			entitlement.startsAt === null ||
+			entitlement.maxWidgets === null ||
+			entitlement.unlimited === null
+		) {
+			throw new ForbiddenException('Ваша подписка неактивна');
+		}
+		const now = Date.now();
+		if (
+			(entitlement.expiresAt && entitlement.expiresAt.getTime() <= now) ||
+			now - entitlement.sourceOccurredAt.getTime() > this.maxStalenessMs ||
+			counter.entitlementVersion !== entitlement.aggregateVersion
+		) {
+			this.unavailable('Entitlement projection is stale');
+		}
+		return { entitlement, counter };
+	}
+
 	async readSnapshot(userId: string): Promise<WidgetsQuotaReadSnapshot> {
 		const [entitlement, counter] = await this.prisma.$transaction([
 			this.prisma.widgetEntitlementProjection.findUnique({

@@ -4,6 +4,7 @@ import type { AddressInfo } from 'node:net';
 import { after, before, describe, it } from 'node:test';
 import { loadConfig } from '../src/config';
 import {
+	AiConsultantPublicRateLimiter,
 	createGateway,
 	matchGatewayRoute,
 	normalizeGatewayRoutingPathname,
@@ -191,6 +192,283 @@ describe('Widget event rate limiter', () => {
 	});
 });
 
+describe('AI consultant public rate limiter', () => {
+	it('matches only the canonical method and public operation pairs', () => {
+		const limiter = new AiConsultantPublicRateLimiter({
+			globalLimit: 100,
+			perIpLimit: 100,
+			perWidgetLimit: 100,
+			perIpWidgetLimit: 100,
+			operationLimits: { config: 100, session: 100, messages: 100 }
+		});
+		const ip = '203.0.113.1';
+		const prefix = '/api/v1/ai-consultant/abcdef123456';
+
+		assert.equal(
+			limiter.consume('GET', `${prefix}/config`, ip)?.allowed,
+			true
+		);
+		assert.equal(
+			limiter.consume('POST', `${prefix}/session`, ip)?.allowed,
+			true
+		);
+		assert.equal(
+			limiter.consume('POST', `${prefix}/messages/`, ip)?.allowed,
+			true
+		);
+		assert.equal(
+			limiter.consume('GET', `${prefix}/CONFIG`, ip)?.operation,
+			'config'
+		);
+		assert.equal(limiter.consume('POST', `${prefix}/config`, ip), null);
+		assert.equal(limiter.consume('GET', `${prefix}/session`, ip), null);
+		assert.equal(
+			limiter.consume('OPTIONS', `${prefix}/messages`, ip),
+			null
+		);
+		assert.equal(
+			limiter.consume(
+				'POST',
+				'/api/v1/ai-consultants/widget-1/test-message',
+				ip
+			),
+			null
+		);
+		assert.equal(limiter.consume('POST', `${prefix}/lead`, ip), null);
+	});
+
+	it('enforces global, IP, widget, IP-and-widget and operation scopes', () => {
+		const common = {
+			globalLimit: 100,
+			perIpLimit: 100,
+			perWidgetLimit: 100,
+			perIpWidgetLimit: 100,
+			operationLimits: { config: 100, session: 100, messages: 100 }
+		};
+		const path = (widget: string, operation: string) =>
+			`/api/v1/ai-consultant/${widget}/${operation}`;
+
+		const global = new AiConsultantPublicRateLimiter({
+			...common,
+			globalLimit: 2
+		});
+		assert.equal(
+			global.consume('GET', path('widget-1', 'config'), '203.0.113.1')
+				?.allowed,
+			true
+		);
+		assert.equal(
+			global.consume('POST', path('widget-2', 'session'), '203.0.113.2')
+				?.allowed,
+			true
+		);
+		assert.equal(
+			global.consume('POST', path('widget-3', 'messages'), '203.0.113.3')
+				?.allowed,
+			false
+		);
+
+		const perIp = new AiConsultantPublicRateLimiter({
+			...common,
+			perIpLimit: 2
+		});
+		assert.equal(
+			perIp.consume('GET', path('widget-1', 'config'), '203.0.113.1')
+				?.allowed,
+			true
+		);
+		assert.equal(
+			perIp.consume('POST', path('widget-2', 'session'), '203.0.113.1')
+				?.allowed,
+			true
+		);
+		assert.equal(
+			perIp.consume('POST', path('widget-3', 'messages'), '203.0.113.1')
+				?.allowed,
+			false
+		);
+
+		const perWidget = new AiConsultantPublicRateLimiter({
+			...common,
+			perWidgetLimit: 2
+		});
+		assert.equal(
+			perWidget.consume('GET', path('widget-1', 'config'), '203.0.113.1')
+				?.allowed,
+			true
+		);
+		assert.equal(
+			perWidget.consume('POST', path('widget-1', 'session'), '203.0.113.2')
+				?.allowed,
+			true
+		);
+		assert.equal(
+			perWidget.consume(
+				'POST',
+				path('widget-1', 'messages'),
+				'203.0.113.3'
+			)?.allowed,
+			false
+		);
+
+		const perIpWidget = new AiConsultantPublicRateLimiter({
+			...common,
+			perIpWidgetLimit: 2
+		});
+		assert.equal(
+			perIpWidget.consume('GET', path('widget-1', 'config'), '203.0.113.1')
+				?.allowed,
+			true
+		);
+		assert.equal(
+			perIpWidget.consume(
+				'POST',
+				path('widget-1', 'session'),
+				'203.0.113.1'
+			)?.allowed,
+			true
+		);
+		assert.equal(
+			perIpWidget.consume(
+				'POST',
+				path('widget-1', 'messages'),
+				'203.0.113.1'
+			)?.allowed,
+			false
+		);
+
+		const perOperation = new AiConsultantPublicRateLimiter({
+			...common,
+			operationLimits: { config: 100, session: 100, messages: 2 }
+		});
+		assert.equal(
+			perOperation.consume(
+				'POST',
+				path('widget-1', 'messages'),
+				'203.0.113.1'
+			)?.allowed,
+			true
+		);
+		assert.equal(
+			perOperation.consume(
+				'POST',
+				path('widget-2', 'messages'),
+				'203.0.113.2'
+			)?.allowed,
+			true
+		);
+		assert.equal(
+			perOperation.consume(
+				'POST',
+				path('widget-3', 'messages'),
+				'203.0.113.3'
+			)?.allowed,
+			false
+		);
+	});
+
+	it('returns a bounded retry delay and resets the fixed window', () => {
+		let now = 1_000;
+		const limiter = new AiConsultantPublicRateLimiter({
+			now: () => now,
+			windowMs: 10_000,
+			globalLimit: 1,
+			perIpLimit: 10,
+			perWidgetLimit: 10,
+			perIpWidgetLimit: 10,
+			operationLimits: { config: 10, session: 10, messages: 10 }
+		});
+		const path = '/api/v1/ai-consultant/abcdef123456/messages';
+
+		assert.equal(
+			limiter.consume('POST', path, '203.0.113.1')?.allowed,
+			true
+		);
+		assert.deepEqual(limiter.consume('POST', path, '203.0.113.1'), {
+			allowed: false,
+			retryAfterSeconds: 10,
+			operation: 'messages'
+		});
+		now += 5_500;
+		assert.equal(
+			limiter.consume('POST', path, '203.0.113.1')?.retryAfterSeconds,
+			5
+		);
+		now += 4_500;
+		assert.equal(
+			limiter.consume('POST', path, '203.0.113.1')?.allowed,
+			true
+		);
+	});
+
+	it('does not poison broader buckets with repeated requests from an exhausted IP', () => {
+		const limiter = new AiConsultantPublicRateLimiter({
+			globalLimit: 3,
+			perIpLimit: 1,
+			perWidgetLimit: 3,
+			perIpWidgetLimit: 3,
+			operationLimits: { config: 3, session: 3, messages: 3 }
+		});
+		const path = '/api/v1/ai-consultant/abcdef123456/messages';
+
+		assert.equal(
+			limiter.consume('POST', path, '203.0.113.1')?.allowed,
+			true
+		);
+		for (let attempt = 0; attempt < 10; attempt += 1) {
+			assert.equal(
+				limiter.consume('POST', path, '203.0.113.1')?.allowed,
+				false
+			);
+		}
+		assert.equal(
+			limiter.consume('POST', path, '203.0.113.2')?.allowed,
+			true
+		);
+		assert.equal(
+			limiter.consume('POST', path, '203.0.113.3')?.allowed,
+			true
+		);
+		assert.equal(
+			limiter.consume('POST', path, '203.0.113.4')?.allowed,
+			false
+		);
+	});
+
+	it('keeps state bounded while preserving shared scopes', () => {
+		const limiter = new AiConsultantPublicRateLimiter({
+			globalLimit: 10_000,
+			perIpLimit: 10_000,
+			perWidgetLimit: 10_000,
+			perIpWidgetLimit: 10_000,
+			operationLimits: {
+				config: 10_000,
+				session: 10_000,
+				messages: 10_000
+			},
+			maxEntries: 7
+		});
+
+		for (let index = 0; index < 100; index += 1) {
+			assert.equal(
+				limiter.consume(
+					'POST',
+					`/api/v1/ai-consultant/fake-${index}/messages`,
+					`203.0.113.${(index % 200) + 1}`
+				)?.allowed,
+				true
+			);
+		}
+
+		const entries = (
+			limiter as unknown as { entries: Map<string, unknown> }
+		).entries;
+		assert.equal(entries.size, 7);
+		assert.equal(entries.has('global'), true);
+		assert.equal(entries.has('operation:messages'), true);
+	});
+});
+
 describe('API Gateway config', () => {
 	const baseEnv = {
 		PORT: '4299',
@@ -321,7 +599,7 @@ describe('API Gateway config', () => {
 			['callbacks-management', '/api/v1/callbacks'],
 			['countdown-timers-management', '/api/v1/countdown-timers'],
 			['stop-offers-management', '/api/v1/stop-offers'],
-			['online-consultants-management', '/api/v1/online-consultants'],
+			['ai-consultants-management', '/api/v1/ai-consultants'],
 			['calculators-management', '/api/v1/calculators'],
 			['widget-settings', '/api/v1/widget-settings'],
 			['widget-runtime', '/api/v1/widget-runtime']
@@ -332,7 +610,7 @@ describe('API Gateway config', () => {
 			['callback-public', '/api/v1/callback'],
 			['countdown-timer-public', '/api/v1/countdown-timer'],
 			['stop-offer-public', '/api/v1/stop-offer'],
-			['online-consultant-public', '/api/v1/online-consultant'],
+			['ai-consultant-public', '/api/v1/ai-consultant'],
 			['calculator-public', '/api/v1/calculator'],
 			['widget-events', '/api/v1/widget-events']
 		] as const;
@@ -364,8 +642,8 @@ describe('API Gateway config', () => {
 			routeIndex('widgets-admin') < routeIndex('widgets-management')
 		);
 		assert.ok(
-			routeIndex('online-consultants-management') <
-				routeIndex('online-consultant-public')
+			routeIndex('ai-consultants-management') <
+				routeIndex('ai-consultant-public')
 		);
 		for (const [id, pathPrefix] of protectedRoutes) {
 			const route = matchGatewayRoute(
@@ -387,6 +665,34 @@ describe('API Gateway config', () => {
 		}
 		assert.equal(
 			matchGatewayRoute('/api/v1/widgets-admin', config.routes)?.id,
+			undefined
+		);
+		assert.equal(
+			matchGatewayRoute(
+				'/api/v1/ai-consultants/widget-1/test-message',
+				config.routes
+			)?.authPolicy,
+			'required'
+		);
+		assert.equal(
+			matchGatewayRoute(
+				'/api/v1/ai-consultant/abcdef123456/messages',
+				config.routes
+			)?.authPolicy,
+			'optional'
+		);
+		assert.equal(
+			matchGatewayRoute(
+				'/api/v1/online-consultant/abcdef123456/config',
+				config.routes
+			),
+			undefined
+		);
+		assert.equal(
+			matchGatewayRoute(
+				'/api/v1/online-consultants/widget-1',
+				config.routes
+			),
 			undefined
 		);
 	});
@@ -667,6 +973,11 @@ describe('API Gateway proxy', () => {
 						upstreamUrl
 					}),
 					createTestRoute({
+						id: 'ai-consultant',
+						pathPrefix: '/api/v1/ai-consultant',
+						upstreamUrl
+					}),
+					createTestRoute({
 						id: 'auth',
 						pathPrefix: '/api/v1/auth',
 						upstreamUrl
@@ -684,7 +995,18 @@ describe('API Gateway proxy', () => {
 						capturedLogs.push({ event, fields });
 					}
 				},
-				fetch: createJwksFetch(() => [signingKey.publicJwk])
+				fetch: createJwksFetch(() => [signingKey.publicJwk]),
+				aiConsultantRateLimiterOptions: {
+					globalLimit: 3,
+					perIpLimit: 100,
+					perWidgetLimit: 100,
+					perIpWidgetLimit: 100,
+					operationLimits: {
+						config: 100,
+						session: 100,
+						messages: 100
+					}
+				}
 			}
 		);
 		assert.equal(await gateway.initialize(), true);
@@ -798,6 +1120,79 @@ describe('API Gateway proxy', () => {
 
 		assert.equal(result.statusCode, 202);
 		assert.equal(result.body, 'routed:/api/v1/routed/item?key=value');
+	});
+
+	it('rate limits public AI operations before proxying and returns embeddable 429 metadata', async () => {
+		const capturedBefore = captured.length;
+		const prefix = '/api/v1/ai-consultant/abcdef123456';
+		const requestOptions = {
+			headers: {
+				origin: 'https://embedded.example',
+				'x-real-ip': '198.51.100.25'
+			}
+		};
+
+		const configResponse = await makeRequest(
+			new URL(`${prefix}/config`, gatewayUrl),
+			requestOptions
+		);
+		const sessionResponse = await makeRequest(
+			new URL(`${prefix}/session`, gatewayUrl),
+			{
+				...requestOptions,
+				method: 'POST',
+				body: '{}'
+			}
+		);
+		const messageResponse = await makeRequest(
+			new URL(`${prefix}/messages`, gatewayUrl),
+			{
+				...requestOptions,
+				method: 'POST',
+				body: '{"message":"hello"}'
+			}
+		);
+		const limited = await makeRequest(
+			new URL(`${prefix}/messages`, gatewayUrl),
+			{
+				...requestOptions,
+				method: 'POST',
+				body: '{"message":"not proxied"}'
+			}
+		);
+
+		assert.equal(configResponse.statusCode, 201);
+		assert.equal(sessionResponse.statusCode, 201);
+		assert.equal(messageResponse.statusCode, 201);
+		assert.equal(captured.length, capturedBefore + 3);
+		assert.equal(limited.statusCode, 429);
+		assert.equal(limited.headers['retry-after'], '60');
+		assert.equal(limited.headers['access-control-allow-origin'], '*');
+		assert.equal(
+			limited.headers['access-control-expose-headers'],
+			'x-request-id, x-correlation-id, retry-after'
+		);
+		assert.equal(
+			limited.headers['access-control-allow-credentials'],
+			undefined
+		);
+		assert.equal(limited.headers['cache-control'], 'no-store');
+		const limitedBody = JSON.parse(limited.body);
+		assert.equal(limitedBody.code, 'ai_consultant_rate_limited');
+		assert.equal(limitedBody.requestId, limited.headers['x-request-id']);
+		assert.equal(
+			limitedBody.correlationId,
+			limited.headers['x-correlation-id']
+		);
+		const rateLimitLog = capturedLogs.find(
+			entry =>
+				entry.event === 'ai_consultant_rate_limited' &&
+				entry.fields?.requestId === limitedBody.requestId
+		);
+		assert.equal(rateLimitLog?.fields?.routeId, 'ai-consultant');
+		assert.equal(rateLimitLog?.fields?.operation, 'messages');
+		assert.equal(rateLimitLog?.fields?.path, undefined);
+		assert.equal(rateLimitLog?.fields?.clientIp, undefined);
 	});
 
 	it('never publishes internal service endpoints through the catch-all route', async () => {

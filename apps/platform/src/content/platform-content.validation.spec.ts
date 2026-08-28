@@ -15,6 +15,14 @@ const legacyDemoWidgetCleanupMigration = readFileSync(
 	'utf8'
 );
 
+const aiConsultantContentMigration = readFileSync(
+	resolve(
+		__dirname,
+		'../../prisma/migrations/20260827220000_replace_online_consultant_home_content/migration.sql'
+	),
+	'utf8'
+);
+
 describe('Platform content validation', () => {
 	it('removes executable legal markup and every dangerous URL form', () => {
 		const sanitized = sanitizeLegalHtml(
@@ -183,6 +191,40 @@ describe('Platform content validation', () => {
 		);
 		expect(legacyDemoWidgetCleanupMigration).not.toContain(
 			'"content" - \'labels\''
+		);
+	});
+
+	it('migrates persisted AI consultant landing content without a runtime alias', () => {
+		expect(aiConsultantContentMigration.trimStart()).toMatch(/^BEGIN;/);
+		expect(aiConsultantContentMigration.trimEnd()).toMatch(/COMMIT;$/);
+		expect(aiConsultantContentMigration).toContain(
+			"nested_content - 'onlineConsultant'"
+		);
+		expect(aiConsultantContentMigration).toContain(
+			"'aiConsultant',\n                    'Задайте вопрос AI-оператору'"
+		);
+		expect(aiConsultantContentMigration).toContain(
+			'Winwidget — AI-консультант и виджеты для сайта'
+		);
+		expect(aiConsultantContentMigration).toContain(
+			'Сервис требует подтверждать ответ фрагментом вашей инструкции.'
+		);
+		expect(aiConsultantContentMigration).toContain(
+			'Покупатель быстро получает информацию из инструкции компании, а важные условия можно перепроверить.'
+		);
+		expect(aiConsultantContentMigration).toContain(
+			'AI-оператор не обходит сайт и сообщает, что подтверждённых данных недостаточно.'
+		);
+		expect(aiConsultantContentMigration).not.toContain(
+			'получает точную информацию'
+		);
+		expect(aiConsultantContentMigration).not.toContain(
+			'не додумывает ответ'
+		);
+		expect(aiConsultantContentMigration).toContain('/ai-consultants/');
+		expect(aiConsultantContentMigration).toContain('/page-ai-consultant/');
+		expect(aiConsultantContentMigration).toContain(
+			'"platform"."refresh_current_semantic_fingerprint"('
 		);
 	});
 });

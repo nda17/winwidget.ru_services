@@ -7,7 +7,7 @@ export enum WidgetType {
 	CALLBACK = 'CALLBACK',
 	TIMER = 'TIMER',
 	STOP_OFFER = 'STOP_OFFER',
-	ONLINE_CONSULTANT = 'ONLINE_CONSULTANT',
+	AI_CONSULTANT = 'AI_CONSULTANT',
 	CALCULATOR = 'CALCULATOR'
 }
 
@@ -17,7 +17,7 @@ export type WidgetTypeSlug =
 	| 'callback'
 	| 'timer'
 	| 'stop-offer'
-	| 'online-consultant'
+	| 'ai-consultant'
 	| 'calculator';
 
 export interface WidgetEntity {
@@ -313,66 +313,34 @@ const definitions: WidgetDefinition[] = [
 		})
 	},
 	{
-		type: WidgetType.ONLINE_CONSULTANT,
-		slug: 'online-consultant',
-		collection: 'online-consultants',
-		responseCollection: 'onlineConsultants',
-		publicApi: 'online-consultant',
-		pagePath: 'page-online-consultant',
-		asset: 'online-consultant.js',
-		autoOpenVariable: 'winonlineconsultantAutoOpen',
-		label: 'Онлайн-консультант',
-		defaultName: 'Онлайн-консультант',
+		type: WidgetType.AI_CONSULTANT,
+		slug: 'ai-consultant',
+		collection: 'ai-consultants',
+		responseCollection: 'aiConsultants',
+		publicApi: 'ai-consultant',
+		pagePath: 'page-ai-consultant',
+		asset: 'ai-consultant.js',
+		autoOpenVariable: 'winAiConsultantAutoOpen',
+		label: 'AI-консультант',
+		defaultName: 'AI-консультант',
 		defaultConfig: () => ({
 			...BUTTON,
-			color: '#ef2b17',
+			color: '#4705fb',
+			bgColor: '#ffffff',
+			textColor: '#1f2937',
 			bubbleEnabled: false,
 			bubbleText: '',
-			title: 'Онлайн-консультант',
-			subtitle: 'Выберите популярный вопрос и получите быстрый ответ.',
-			dataType: 'PHONE',
-			contactTitle: 'Оставьте контакт, если нужен персональный ответ',
-			submitButtonText: 'Отправить',
-			successTitle: 'Спасибо! Заявка отправлена',
-			successSubtitle: 'Мы скоро свяжемся с вами',
+			operatorName: 'Alex',
+			greeting:
+				'Здравствуйте! Я Alex, AI-оператор.\nГотов помочь и ответить на ваши вопросы о товарах, услугах и условиях компании.',
+			instructionsPrompt: '',
 			privacyUrl: PRIVACY_URL,
+			inactivityTimeoutMinutes: 10,
+			farewellMessage:
+				'Я не дождался ответа. Если у вас появятся вопросы, напишите снова — я обязательно помогу.',
+			inputPlaceholder: 'Задайте вопрос...',
 			developInfoActive: true,
-			filterDuplicates: false,
-			quickActions: [
-				{
-					id: 'price',
-					label: 'Цена',
-					answer:
-						'Стоимость зависит от задачи и комплектации. Оставьте контакт, и мы быстро подскажем актуальный вариант.',
-					buttonText: '',
-					buttonUrl: ''
-				},
-				{
-					id: 'delivery',
-					label: 'Доставка',
-					answer:
-						'Доставка рассчитывается по адресу и способу получения. Мы уточним детали и предложим удобный вариант.',
-					buttonText: '',
-					buttonUrl: ''
-				},
-				{
-					id: 'terms',
-					label: 'Сроки',
-					answer:
-						'Сроки зависят от наличия и региона. Обычно мы можем подсказать ориентир сразу после заявки.',
-					buttonText: '',
-					buttonUrl: ''
-				},
-				{
-					id: 'selection',
-					label: 'Подбор',
-					answer:
-						'Опишите задачу, и мы поможем подобрать подходящий вариант без полноценного чата.',
-					buttonText: '',
-					buttonUrl: ''
-				}
-			],
-			integrations: { ...INTEGRATIONS }
+			buttonPulse: true
 		})
 	},
 	{
@@ -465,6 +433,18 @@ export const parseWidgetType = (value: string): WidgetType => {
 			(normalized === 'countdown_timer' &&
 				item.type === WidgetType.TIMER) ||
 			(normalized === 'countdown-timer' && item.type === WidgetType.TIMER)
+	);
+	if (!definition)
+		throw new BadRequestException('Некорректный тип виджета');
+	return definition.type;
+};
+
+export const parsePublicWidgetApiType = (value: string): WidgetType => {
+	const normalized = value.trim().toLowerCase();
+	const definition = definitions.find(
+		item =>
+			(item.type === WidgetType.WHEEL ? item.slug : item.publicApi) ===
+			normalized
 	);
 	if (!definition)
 		throw new BadRequestException('Некорректный тип виджета');

@@ -643,112 +643,44 @@ const stopOfferAdapter: WidgetTypeAdapter = {
 	}
 };
 
-const onlineConsultantAdapter: WidgetTypeAdapter = {
-	type: WidgetType.ONLINE_CONSULTANT,
+const aiConsultantAdapter: WidgetTypeAdapter = {
+	type: WidgetType.AI_CONSULTANT,
 	publicConfig(config, context) {
 		return {
 			isActive: true,
 			publishedVersion: context.publishedVersion,
-			color: stringValue(config.color, '#ef2b17'),
-			bgColor: stringValue(config.bgColor) || null,
+			color: stringValue(config.color, '#4705fb'),
+			bgColor: stringValue(config.bgColor, '#ffffff'),
+			textColor: stringValue(config.textColor, '#1f2937'),
 			...buttonPublicFields(config, context.hardPlan),
 			autoOpenDelay: config.autoOpenDelay || null,
-			bubbleEnabled: false,
-			bubbleText: '',
-			title: stringValue(config.title, 'Онлайн-консультант'),
-			subtitle: stringValue(config.subtitle),
-			dataType: dataType(config),
-			contactTitle: stringValue(
-				config.contactTitle,
-				'Оставьте контакт, если нужен персональный ответ'
+			operatorName: stringValue(config.operatorName, 'Alex'),
+			greeting: stringValue(config.greeting),
+			privacyUrl: stringValue(config.privacyUrl),
+			inactivityTimeoutMinutes: numberValue(
+				config.inactivityTimeoutMinutes,
+				10
 			),
-			submitButtonText: stringValue(config.submitButtonText, 'Отправить'),
-			successTitle: stringValue(
-				config.successTitle,
-				'Спасибо! Заявка отправлена'
-			),
-			successSubtitle: stringValue(config.successSubtitle),
-			privacyUrl: stringValue(config.privacyUrl) || null,
-			...brandingPublicFields(config, context.hardPlan),
-			filterDuplicates: config.filterDuplicates === true,
-			quickActions: Array.isArray(config.quickActions)
-				? config.quickActions
-				: [],
-			hasSubmittedByIp: context.duplicateByIp,
-			...integrationPublicFields(config)
+			farewellMessage: stringValue(config.farewellMessage),
+			inputPlaceholder: stringValue(
+				config.inputPlaceholder,
+				'Задайте вопрос...'
+			)
 		};
 	},
-	prepareLead(input, config) {
-		const contact = contactInput(input, config, normalizePhone);
-		const label = input.actionLabel?.trim().slice(0, 120) || '';
-		const value = input.actionValue?.trim().slice(0, 2000) || '';
-		if (Boolean(label) !== Boolean(value))
-			throw new BadRequestException('Некорректный быстрый вопрос');
-		if (label) {
-			const actions = Array.isArray(config.quickActions)
-				? config.quickActions.map(asJsonObject)
-				: [];
-			if (
-				!actions.some(
-					action => action.label === label && action.answer === value
-				)
-			) {
-				throw new BadRequestException('Некорректный быстрый вопрос');
-			}
-		}
-		return {
-			data: {
-				phone: contact.phone,
-				email: contact.email,
-				actionLabel: label,
-				actionValue: value,
-				url: input.url?.slice(0, 500)
-			}
-		};
+	prepareLead() {
+		throw new BadRequestException('AI-консультант не создаёт заявки');
 	},
-	duplicateRules(prepared, config, ip) {
-		if (config.filterDuplicates !== true) return [];
-		return [
-			{
-				lookup: {
-					phone: prepared.phone,
-					email: prepared.email,
-					ip: ip || undefined
-				},
-				message: 'Заявка с таким контактом уже существует'
-			}
-		];
+	duplicateRules() {
+		return [];
 	},
-	publicDuplicateRule(config, ip) {
-		return ip && config.filterDuplicates === true
-			? { responseKey: 'hasSubmittedByIp', lookup: { ip } }
-			: null;
+	publicDuplicateRule() {
+		return null;
 	},
 	presentLead: unchangedLead,
 	stats: emptyStats,
-	exportSpec(leads) {
-		return commonLeadExport(
-			'online_consultant_leads',
-			[
-				'№',
-				'Дата',
-				'Телефон',
-				'Email',
-				'Быстрый вопрос',
-				'Ответ',
-				'Страница'
-			],
-			leads,
-			(lead, index) => [
-				index + 1,
-				lead.createdAt.toLocaleString('ru-RU'),
-				lead.phone || '',
-				lead.email || '',
-				lead.actionLabel || '',
-				lead.actionValue || '',
-				lead.url || ''
-			]
-		);
+	exportSpec() {
+		return { filenamePrefix: 'ai_consultant', headers: [], rows: [] };
 	}
 };
 
@@ -758,7 +690,7 @@ const ADAPTERS: readonly WidgetTypeAdapter[] = [
 	callbackAdapter,
 	timerAdapter,
 	stopOfferAdapter,
-	onlineConsultantAdapter,
+	aiConsultantAdapter,
 	calculatorWidgetAdapter
 ];
 

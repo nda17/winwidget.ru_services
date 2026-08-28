@@ -39,6 +39,9 @@ const owners = new Map([
 ]);
 const s3Requests = [];
 const s3Objects = new Map();
+const cloudflareRequests = [];
+const turnstileRequests = [];
+const usedTurnstileTokens = new Set();
 const prisma = new PrismaClient({
 	datasources: { db: { url: databaseUrl } }
 });
@@ -50,6 +53,7 @@ let mutationIndex = 0;
 
 const identityServer = createIdentityServer();
 const s3Server = createS3Server();
+const cloudflareServer = createCloudflareServer();
 const CASES = widgetCases();
 
 try {
@@ -65,6 +69,7 @@ try {
 
 	const identityPort = await listenLoopback(identityServer);
 	const s3Port = await listenLoopback(s3Server);
+	const cloudflarePort = await listenLoopback(cloudflareServer);
 	appPort = await reservePort();
 	app = spawn('node', ['dist/src/main.js'], {
 		cwd: new URL('../../', import.meta.url),
@@ -78,6 +83,9 @@ try {
 			WIDGETS_LISTEN_HOST: '127.0.0.1',
 			WIDGETS_PORT: String(appPort),
 			WIDGETS_INTERNAL_TOKEN: internalToken,
+			WIDGETS_IDENTITY_TOKEN: 'behavior-widgets-identity-token-20260828',
+			WIDGETS_OPERATIONS_TOKEN:
+				'behavior-widgets-operations-token-20260828',
 			IDENTITY_INTERNAL_BASE_URL: `http://127.0.0.1:${identityPort}`,
 			IDENTITY_WIDGETS_TOKEN: identityToken,
 			IDENTITY_INTERNAL_TIMEOUT_MS: '2000',
@@ -90,7 +98,19 @@ try {
 			S3_SECRET_ACCESS_KEY: 'widgets_behavior_secret_key',
 			S3_BUCKET: 'behavior-bucket',
 			S3_KEY_PREFIX: 'widgets-behavior',
-			S3_PUBLIC_BASE_URL: `http://127.0.0.1:${s3Port}/behavior-bucket`
+			S3_PUBLIC_BASE_URL: `http://127.0.0.1:${s3Port}/behavior-bucket`,
+			CLOUDFLARE_ACCOUNT_ID: 'behavior_account_123',
+			CLOUDFLARE_API_TOKEN: 'behavior-cloudflare-token',
+			CLOUDFLARE_AI_GATEWAY_ID: 'behavior-ai-gateway',
+			CLOUDFLARE_AI_MODEL: '@cf/qwen/qwen3-30b-a3b-fp8',
+			CLOUDFLARE_AI_TIMEOUT_MS: '2000',
+			CLOUDFLARE_AI_API_ORIGIN: `http://127.0.0.1:${cloudflarePort}`,
+			WIDGETS_AI_SESSION_SECRET:
+				'behavior-session-secret-with-at-least-32-bytes',
+			CLOUDFLARE_TURNSTILE_SITE_KEY: 'behavior-turnstile-site-key',
+			CLOUDFLARE_TURNSTILE_SECRET_KEY: 'behavior-turnstile-secret-key',
+			CLOUDFLARE_TURNSTILE_TIMEOUT_MS: '2000',
+			CLOUDFLARE_TURNSTILE_SITEVERIFY_ORIGIN: `http://127.0.0.1:${cloudflarePort}`
 		},
 		stdio: 'inherit'
 	});
@@ -109,9 +129,21 @@ try {
 		widgets,
 		corsAllowedOrigins: browserCorsAllowedOrigins
 	});
+	assert(
+		cloudflareRequests.length >= 3 &&
+			cloudflareRequests.every(
+				request => request.payloadLogging === 'false' && request.noThinking
+			) &&
+			cloudflareRequests.some(request => request.maxTokens === 700) &&
+			cloudflareRequests.some(request => request.maxTokens === 32),
+		'Cloudflare AI Gateway integration contract was not exercised safely'
+	);
 	assertManagedWheelImageRead(widgets.wheel);
 	await assertOwnerDeactivationBlocksPublic(widgets.wheel);
-	const expectedLeadCount = 8 + browserResults.length;
+	const expectedLeadCount =
+		7 +
+		browserResults.filter(result => result.type !== 'ai-consultant')
+			.length;
 	await assertUsageCounters(expectedLeadCount);
 	await deleteAllWidgets(widgets, expectedLeadCount);
 	console.log(
@@ -128,6 +160,9 @@ try {
 		closeServer(identityServer)
 	);
 	await captureCleanupError(cleanupErrors, () => closeServer(s3Server));
+	await captureCleanupError(cleanupErrors, () =>
+		closeServer(cloudflareServer)
+	);
 	if (cleanupErrors.length) {
 		throw new Error(
 			`Widgets behavior cleanup failed: ${cleanupErrors.join('; ')}`
@@ -205,15 +240,15 @@ function widgetCases() {
 			}
 		},
 		{
-			key: 'onlineConsultant',
-			type: 'online-consultant',
-			collection: 'online-consultants',
-			responseCollection: 'onlineConsultants',
-			publicApi: 'online-consultant',
-			config: { title: 'Behavior consultant', filterDuplicates: false },
-			lead: {
-				phone: '+79990000006',
-				url: 'https://shop.example.test/consultant'
+			key: 'aiConsultant',
+			type: 'ai-consultant',
+			collection: 'ai-consultants',
+			responseCollection: 'aiConsultants',
+			publicApi: 'ai-consultant',
+			config: {
+				operatorName: 'Alex',
+				instructionsPrompt: 'Товар Behavior стоит 1000 рублей.',
+				inactivityTimeoutMinutes: 10
 			}
 		},
 		{
@@ -293,14 +328,16 @@ async function exerciseAllWidgetTypes() {
 				body: {
 					expectedDraftRevision: entity.draftRevision,
 					name: `Behavior updated ${definition.type}`,
-					installDomain: 'shop.example.test',
+					installDomain:
+						definition.key === 'aiConsultant' ? '' : 'shop.example.test',
 					config: definition.config
 				},
 				correlationId: nextCorrelation('update')
 			}
 		);
 		assert(
-			updated.installDomain === 'example.test',
+			updated.installDomain ===
+				(definition.key === 'aiConsultant' ? '' : 'example.test'),
 			`${definition.type} install-domain normalization drifted`
 		);
 		assert(
@@ -311,6 +348,54 @@ async function exerciseAllWidgetTypes() {
 	}
 
 	created.wheel = await uploadWheelImage(created.wheel);
+	created.aiConsultant = await publish(created.aiConsultant);
+	const directAiHeaders = {
+		origin: 'http://localhost:3000',
+		referer: `http://localhost:3000/page-ai-consultant/${created.aiConsultant.publicKey}`
+	};
+	const directAiConfig = await jsonRequest(
+		`/api/v1/ai-consultant/${created.aiConsultant.publicKey}/config`,
+		{ headers: directAiHeaders }
+	);
+	assert(
+		directAiConfig.isActive === true &&
+			directAiConfig.turnstileSiteKey === 'behavior-turnstile-site-key' &&
+			!Object.hasOwn(directAiConfig, 'instructionsPrompt'),
+		'Direct-only AI consultant config drifted'
+	);
+	const directSessionId = randomUUID();
+	const directAiSession = await jsonRequest(
+		`/api/v1/ai-consultant/${created.aiConsultant.publicKey}/session`,
+		{
+			method: 'POST',
+			headers: directAiHeaders,
+			body: {
+				sessionId: directSessionId,
+				turnstileToken: `turnstile-direct-${created.aiConsultant.publicKey}`
+			}
+		}
+	);
+	assert(
+		directAiSession.sessionId === directSessionId &&
+			typeof directAiSession.sessionToken === 'string',
+		'Direct-only AI consultant session bootstrap drifted'
+	);
+	const externalAiDraft = await jsonRequest(
+		`/api/v1/ai-consultants/${created.aiConsultant.id}`,
+		{
+			method: 'PATCH',
+			token: 'behavior-user',
+			body: {
+				expectedDraftRevision: created.aiConsultant.draftRevision,
+				installDomain: 'shop.example.test'
+			},
+			correlationId: nextCorrelation('ai-external-domain')
+		}
+	);
+	created.aiConsultant = {
+		...created.aiConsultant,
+		...externalAiDraft
+	};
 
 	for (const definition of CASES) {
 		let widget = created[definition.key];
@@ -329,6 +414,19 @@ async function exerciseAllWidgetTypes() {
 			assert(
 				config.buttonImageUrl === widget.config.buttonImageUrl,
 				'Published wheel config lost its managed button image'
+			);
+		}
+		if (definition.key === 'aiConsultant') {
+			assert(
+				!Object.hasOwn(config, 'instructionsPrompt'),
+				'AI consultant public config exposed instructionsPrompt'
+			);
+			assert(
+				config.turnstileSiteKey === 'behavior-turnstile-site-key' &&
+					config.turnstileAction === 'ai-consultant-session' &&
+					typeof config.privacyUrl === 'string' &&
+					config.privacyUrl.startsWith('https://'),
+				'AI consultant public Turnstile bootstrap config drifted'
 			);
 		}
 	}
@@ -372,7 +470,9 @@ async function exerciseAllWidgetTypes() {
 	);
 	created.timer = await publish({ ...created.timer, ...timerDraft });
 
-	for (const definition of CASES) {
+	for (const definition of CASES.filter(
+		item => item.key !== 'aiConsultant'
+	)) {
 		const widget = created[definition.key];
 		const submitted = await jsonRequest(
 			`/api/v1/${definition.publicApi}/${widget.publicKey}/lead`,
@@ -389,6 +489,136 @@ async function exerciseAllWidgetTypes() {
 			`${definition.type} lead response drifted`
 		);
 	}
+
+	const aiWidget = created.aiConsultant;
+	await jsonRequest(`/api/v1/ai-consultant/${aiWidget.publicKey}/lead`, {
+		method: 'POST',
+		expectedStatus: 404,
+		body: {},
+		publicRequest: true
+	});
+	await jsonRequest(`/api/v1/ai-consultants/${aiWidget.id}/leads`, {
+		token: 'behavior-user',
+		expectedStatus: 404
+	});
+	await jsonRequest(
+		`/api/v1/ai-consultants/${aiWidget.id}/leads/export?format=csv`,
+		{
+			token: 'behavior-user',
+			expectedStatus: 404
+		}
+	);
+	const publicAiRequest = {
+		requestId: randomUUID(),
+		sessionId: randomUUID(),
+		message: 'Сколько стоит товар?',
+		history: []
+	};
+	const forgedPreviewHeaders = {
+		origin: 'https://other.example.test',
+		referer: `https://winwidget.ru/page-ai-consultant/${aiWidget.publicKey}`
+	};
+	const forgedConfig = await jsonRequest(
+		`/api/v1/ai-consultant/${aiWidget.publicKey}/config`,
+		{ headers: forgedPreviewHeaders }
+	);
+	assert(
+		forgedConfig.isActive === false &&
+			!Object.hasOwn(forgedConfig, 'turnstileSiteKey'),
+		'Forged platform Referer bypassed AI config hostname isolation'
+	);
+	await jsonRequest(
+		`/api/v1/ai-consultant/${aiWidget.publicKey}/session`,
+		{
+			method: 'POST',
+			expectedStatus: 403,
+			headers: forgedPreviewHeaders,
+			body: {
+				sessionId: publicAiRequest.sessionId,
+				turnstileToken: `forged-${aiWidget.publicKey}`
+			}
+		}
+	);
+	assert(
+		!usedTurnstileTokens.has(`forged-${aiWidget.publicKey}`),
+		'Forged platform Referer reached Turnstile validation'
+	);
+	for (const path of [
+		`/api/v1/ai-consultant/${aiWidget.publicKey}/session`,
+		`/api/v1/ai-consultant/${aiWidget.publicKey}/messages`
+	]) {
+		const preflight = await fetch(url(path), {
+			method: 'OPTIONS',
+			headers: {
+				origin: 'https://shop.example.test',
+				'access-control-request-method': 'POST',
+				'access-control-request-headers': 'content-type'
+			}
+		});
+		assert(
+			preflight.status === 204 &&
+				preflight.headers.get('access-control-allow-origin') === '*' &&
+				preflight.headers
+					.get('access-control-allow-methods')
+					?.includes('POST') &&
+				preflight.headers
+					.get('access-control-allow-headers')
+					?.toLowerCase()
+					.includes('content-type'),
+			`AI consultant CORS preflight drifted for ${path}`
+		);
+	}
+	const publicAiSession = await jsonRequest(
+		`/api/v1/ai-consultant/${aiWidget.publicKey}/session`,
+		{
+			method: 'POST',
+			body: {
+				sessionId: publicAiRequest.sessionId,
+				turnstileToken: `turnstile-${aiWidget.publicKey}`
+			},
+			publicRequest: true
+		}
+	);
+	assert(
+		publicAiSession.sessionId === publicAiRequest.sessionId &&
+			typeof publicAiSession.sessionToken === 'string' &&
+			publicAiSession.sessionToken.length >= 80,
+		'AI consultant signed session response drifted'
+	);
+	const publicAiResponse = await jsonRequest(
+		`/api/v1/ai-consultant/${aiWidget.publicKey}/messages`,
+		{
+			method: 'POST',
+			body: {
+				...publicAiRequest,
+				sessionToken: publicAiSession.sessionToken
+			},
+			publicRequest: true
+		}
+	);
+	assert(
+		publicAiResponse.requestId === publicAiRequest.requestId &&
+			publicAiResponse.outcome === 'ANSWER' &&
+			typeof publicAiResponse.reply === 'string',
+		'AI consultant public message response drifted'
+	);
+	const testAiResponse = await jsonRequest(
+		`/api/v1/ai-consultants/${aiWidget.id}/test-message`,
+		{
+			method: 'POST',
+			token: 'behavior-dev',
+			body: {
+				requestId: randomUUID(),
+				sessionId: randomUUID(),
+				message: 'Тест draft',
+				history: []
+			}
+		}
+	);
+	assert(
+		testAiResponse.outcome === 'ANSWER',
+		'AI consultant authenticated test response drifted'
+	);
 
 	const secondWheel = await jsonRequest(
 		`/api/v1/widget/${created.wheel.publicKey}/lead`,
@@ -717,6 +947,34 @@ async function assertRuntimeTelemetry(widgets) {
 		);
 	}
 
+	await jsonRequest(
+		`/api/v1/widget-events/ai-consultant/${widgets.aiConsultant.publicKey}`,
+		{
+			method: 'POST',
+			expectedStatus: 204,
+			publicRequest: true,
+			headers: {
+				origin: 'https://winwidget.ru',
+				referer: `https://winwidget.ru/page-ai-consultant/${widgets.aiConsultant.publicKey}`
+			},
+			body: {
+				event: 'START',
+				runtimeVersion: 'behavior-v1',
+				publishedVersion: widgets.aiConsultant.publishedVersion
+			}
+		}
+	);
+	const aiAnalytics = await jsonRequest(
+		`/api/v1/widget-runtime/ai-consultant/${widgets.aiConsultant.id}/analytics?days=7`,
+		{ token: 'behavior-user' }
+	);
+	assert(
+		aiAnalytics.totals.starts === 1 &&
+			aiAnalytics.submitAvailable === false &&
+			aiAnalytics.completionLabel === 'Завершения',
+		'AI direct-page telemetry or completion semantics drifted'
+	);
+
 	for (const event of ['OPEN', 'START', 'COMPLETE'])
 		await runtimeEvent(widgets.wheel, event);
 	const wheelAnalytics = await jsonRequest(
@@ -1036,7 +1294,7 @@ async function assertCleanDatabase() {
 			['callbacks', prisma.callback.count()],
 			['timers', prisma.countdownTimer.count()],
 			['stopOffers', prisma.stopOffer.count()],
-			['consultants', prisma.onlineConsultant.count()],
+			['consultants', prisma.aiConsultant.count()],
 			['calculators', prisma.calculator.count()],
 			['revisions', prisma.widgetConfigRevision.count()],
 			['runtimePresence', prisma.widgetRuntimePresence.count()],
@@ -1094,7 +1352,7 @@ async function cleanupDatabase() {
 		prisma.callback.deleteMany(),
 		prisma.countdownTimer.deleteMany(),
 		prisma.stopOffer.deleteMany(),
-		prisma.onlineConsultant.deleteMany(),
+		prisma.aiConsultant.deleteMany(),
 		prisma.calculator.deleteMany(),
 		prisma.integrationDeliveryFailure.deleteMany(),
 		prisma.integrationDeliveryReceipt.deleteMany(),
@@ -1225,6 +1483,126 @@ function createS3Server() {
 			response.writeHead(200, { etag: '"widgets-behavior-etag"' }).end();
 		} catch {
 			response.writeHead(500).end();
+		}
+	});
+}
+
+function createCloudflareServer() {
+	return createServer(async (request, response) => {
+		try {
+			const path = new URL(request.url || '/', 'http://127.0.0.1')
+				.pathname;
+			const turnstileWidgetPath =
+				'/client/v4/accounts/behavior_account_123/challenges/widgets/behavior-turnstile-site-key';
+			if (request.method === 'GET' && path === turnstileWidgetPath) {
+				return sendJson(response, 200, {
+					success: true,
+					result: {
+						name: 'WinWidget behavior AI',
+						mode: 'managed',
+						clearance_level: 'no_clearance'
+					}
+				});
+			}
+			if (request.method === 'PUT' && path === turnstileWidgetPath) {
+				const body = await readJson(request);
+				if (
+					request.headers.authorization !==
+						'Bearer behavior-cloudflare-token' ||
+					body.name !== 'WinWidget behavior AI' ||
+					body.mode !== 'managed' ||
+					body.clearance_level !== 'no_clearance' ||
+					!Array.isArray(body.domains) ||
+					!body.domains.includes('winwidget.ru')
+				) {
+					return sendJson(response, 400, { success: false });
+				}
+				turnstileRequests.push({ operation: 'hostname-sync', body });
+				return sendJson(response, 200, {
+					success: true,
+					result: { domains: body.domains }
+				});
+			}
+			if (
+				request.method === 'POST' &&
+				path === '/turnstile/v0/siteverify'
+			) {
+				const body = await readJson(request);
+				const rawToken = String(body.response || '');
+				const browserChallenge = rawToken.startsWith('turnstile-browser-');
+				const directChallenge = rawToken.startsWith('turnstile-direct-');
+				const publicKey = rawToken.replace(
+					browserChallenge
+						? /^turnstile-browser-/
+						: directChallenge
+							? /^turnstile-direct-/
+							: /^turnstile-/,
+					''
+				);
+				if (
+					body.secret !== 'behavior-turnstile-secret-key' ||
+					usedTurnstileTokens.has(body.response) ||
+					!/^[a-f0-9]{12}$/.test(publicKey)
+				) {
+					return sendJson(response, 200, { success: false });
+				}
+				usedTurnstileTokens.add(body.response);
+				turnstileRequests.push({ operation: 'siteverify' });
+				return sendJson(response, 200, {
+					success: true,
+					action: 'ai-consultant-session',
+					cdata: publicKey,
+					hostname:
+						browserChallenge || directChallenge
+							? 'localhost'
+							: 'shop.example.test',
+					challenge_ts: new Date().toISOString()
+				});
+			}
+			if (
+				request.method !== 'POST' ||
+				path !== '/client/v4/accounts/behavior_account_123/ai/run'
+			) {
+				return sendJson(response, 404, { success: false });
+			}
+			const body = await readJson(request);
+			if (
+				request.headers.authorization !==
+					'Bearer behavior-cloudflare-token' ||
+				request.headers['cf-aig-gateway-id'] !== 'behavior-ai-gateway' ||
+				request.headers['cf-aig-collect-log-payload'] !== 'false' ||
+				request.headers['cf-aig-skip-cache'] !== 'true' ||
+				body.model !== '@cf/qwen/qwen3-30b-a3b-fp8' ||
+				!Array.isArray(body.input?.messages)
+			) {
+				return sendJson(response, 400, { success: false });
+			}
+			cloudflareRequests.push({
+				model: body.model,
+				messageCount: body.input.messages.length,
+				maxTokens: body.input.max_tokens,
+				noThinking: String(body.input.messages.at(-1)?.content || '')
+					.trimEnd()
+					.endsWith('/no_think'),
+				payloadLogging: request.headers['cf-aig-collect-log-payload']
+			});
+			const verifier = String(
+				body.input.messages[0]?.content || ''
+			).includes('GROUNDING_VERIFIER_V1');
+			return sendJson(response, 200, {
+				success: true,
+				result: {
+					response: verifier
+						? JSON.stringify({ supported: true })
+						: JSON.stringify({
+								outcome: 'ANSWER',
+								reply: 'Цена товара Behavior составляет 1000 рублей.',
+								evidence: 'Товар Behavior стоит 1000 рублей.'
+							})
+				}
+			});
+		} catch (error) {
+			return sendJson(response, 500, { success: false });
 		}
 	});
 }

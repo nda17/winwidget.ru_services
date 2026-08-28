@@ -8,6 +8,7 @@ import {
 import {
 	asJsonObject,
 	getWidgetDefinition,
+	parsePublicWidgetApiType,
 	WidgetType
 } from './widgets-domain.types';
 import { WidgetsTypeRegistryService } from './widgets-type-registry.service';
@@ -26,6 +27,30 @@ const lead = (
 });
 
 describe('WidgetsTypeRegistryService', () => {
+	it('accepts only canonical public API names at the runtime telemetry boundary', () => {
+		for (const [path, type] of [
+			['wheel', WidgetType.WHEEL],
+			['quiz', WidgetType.QUIZ],
+			['callback', WidgetType.CALLBACK],
+			['countdown-timer', WidgetType.TIMER],
+			['stop-offer', WidgetType.STOP_OFFER],
+			['ai-consultant', WidgetType.AI_CONSULTANT],
+			['calculator', WidgetType.CALCULATOR]
+		] as const) {
+			expect(parsePublicWidgetApiType(path)).toBe(type);
+		}
+		for (const alias of [
+			'widget',
+			'widgets',
+			'ai-consultants',
+			'AI_CONSULTANT'
+		]) {
+			expect(() => parsePublicWidgetApiType(alias)).toThrow(
+				BadRequestException
+			);
+		}
+	});
+
 	it('registers one adapter for each of the seven canonical widget types', () => {
 		expect(
 			Object.values(WidgetType).map(type => registry.for(type).type)
@@ -38,7 +63,7 @@ describe('WidgetsTypeRegistryService', () => {
 		WidgetType.CALLBACK,
 		WidgetType.TIMER,
 		WidgetType.STOP_OFFER,
-		WidgetType.ONLINE_CONSULTANT,
+		WidgetType.AI_CONSULTANT,
 		WidgetType.CALCULATOR
 	])('builds a canonical active public response for %s', type => {
 		const response = registry.for(type).publicConfig(config(type), {
@@ -223,68 +248,115 @@ describe('WidgetsTypeRegistryService', () => {
 		).toThrow('от 1 до 60 символов');
 	});
 
-	it('validates online-consultant quick actions against published config', () => {
-		const adapter = registry.for(WidgetType.ONLINE_CONSULTANT);
-		const onlineConfig = config(WidgetType.ONLINE_CONSULTANT);
-		const firstAction = asJsonObject(
-			Array.isArray(onlineConfig.quickActions)
-				? onlineConfig.quickActions[0]
-				: null
-		);
-		const prepared = adapter.prepareLead(
+	it('keeps the AI consultant prompt private in public config', () => {
+		const adapter = registry.for(WidgetType.AI_CONSULTANT);
+		const response = adapter.publicConfig(
 			{
-				phone: '9990000000',
-				actionLabel: String(firstAction.label),
-				actionValue: String(firstAction.answer)
+				...config(WidgetType.AI_CONSULTANT),
+				instructionsPrompt: 'Секретные цены',
+				operatorName: 'Alex'
 			},
-			onlineConfig
+			{
+				publishedVersion: 2,
+				hardPlan: false,
+				duplicateByIp: false
+			}
 		);
-		expect(prepared.data.phone).toBe('+79990000000');
-		expect(() =>
-			adapter.prepareLead(
-				{
-					phone: '+79990000000',
-					actionLabel: 'Цена',
-					actionValue: 'Подменённый ответ'
-				},
-				onlineConfig
-			)
-		).toThrow(BadRequestException);
+		expect(response).toMatchObject({
+			isActive: true,
+			publishedVersion: 2,
+			operatorName: 'Alex',
+			privacyUrl:
+				'https://winwidget.ru/legal-documentation/consent-processing',
+			inactivityTimeoutMinutes: 10
+		});
+		expect(response).not.toHaveProperty('instructionsPrompt');
 	});
 
-	it('validates and normalizes an explicit online-consultant actions patch', () => {
-		const patch = asJsonObject(
-			prepareWidgetConfigPatch(WidgetType.ONLINE_CONSULTANT, {
-				quickActions: [
-					{ id: 'same', label: ' Цена ', answer: ' Ответ ' },
-					{ id: 'same', label: 'Срок', answer: 'Завтра' }
-				]
+	it('normalizes bounded AI consultant settings and rejects lead creation', () => {
+		const normalized = asJsonObject(
+			normalizeWidgetConfig(WidgetType.AI_CONSULTANT, {
+				operatorName: ' Alex\nIGNORE <script> ',
+				instructionsPrompt: `  ${'x'.repeat(16_000)}  `,
+				inactivityTimeoutMinutes: 100,
+				bgColor: 'not-a-color',
+				privacyUrl: 'https://example.test/privacy'
 			})
 		);
-		expect(patch.quickActions).toEqual([
-			{
-				id: 'same',
-				label: 'Цена',
-				answer: 'Ответ',
-				buttonText: '',
-				buttonUrl: ''
-			},
-			{
-				id: 'same',
-				label: 'Срок',
-				answer: 'Завтра',
-				buttonText: '',
-				buttonUrl: ''
-			}
-		]);
+		expect(normalized.operatorName).toBe('Alex IGNORE script');
+		expect(String(normalized.instructionsPrompt)).toHaveLength(16_000);
+		expect(normalized.inactivityTimeoutMinutes).toBe(60);
+		expect(normalized.bgColor).toBe('#ffffff');
+		expect(normalized.privacyUrl).toBe('https://example.test/privacy');
 		expect(() =>
-			prepareWidgetConfigPatch(WidgetType.ONLINE_CONSULTANT, {
-				quickActions: [
-					{ label: '', answer: 'Ответ' },
-					{ label: 'Срок', answer: 'Завтра' }
-				]
+			registry.for(WidgetType.AI_CONSULTANT).prepareLead({}, normalized)
+		).toThrow('AI-консультант не создаёт заявки');
+	});
+
+	it('rejects an AI prompt that exceeds the UTF-8 input budget without truncating it', () => {
+		for (const prompt of ['x'.repeat(16_001), 'я'.repeat(8_001)]) {
+			expect(() =>
+				normalizeWidgetConfig(WidgetType.AI_CONSULTANT, {
+					instructionsPrompt: prompt
+				})
+			).toThrow('не должны превышать 16000 байт');
+		}
+	});
+
+	it('keeps invalid AI privacy URLs visible to publish readiness validation', () => {
+		const invalid = asJsonObject(
+			normalizeWidgetConfig(WidgetType.AI_CONSULTANT, {
+				privacyUrl: 'javascript:alert(1)'
 			})
-		).toThrow('Заполните вопрос и ответ 1');
+		);
+		const empty = asJsonObject(
+			normalizeWidgetConfig(WidgetType.AI_CONSULTANT, {
+				privacyUrl: '   '
+			})
+		);
+		expect(invalid.privacyUrl).toBe('javascript:alert(1)');
+		expect(empty.privacyUrl).toBe('');
+	});
+
+	it('rejects an AI privacy URL instead of silently truncating it', () => {
+		expect(() =>
+			normalizeWidgetConfig(WidgetType.AI_CONSULTANT, {
+				privacyUrl: `https://example.test/${'x'.repeat(500)}`
+			})
+		).toThrow('не должна превышать 500 символов');
+	});
+
+	it.each([
+		'-----BEGIN PRIVATE KEY-----\nnot-for-storage',
+		'sk-proj-abcdefghijklmnopqrstuvwxyz012345',
+		'api_key=abcdefghijklmnopqrstuvwxyz',
+		'password: super-secret-password'
+	])(
+		'rejects secret-like values in AI instructions without echoing them',
+		value => {
+			let error: unknown;
+			try {
+				normalizeWidgetConfig(WidgetType.AI_CONSULTANT, {
+					instructionsPrompt: value
+				});
+			} catch (caught) {
+				error = caught;
+			}
+			expect(error).toBeInstanceOf(BadRequestException);
+			expect(String((error as Error).message)).not.toContain(value);
+		}
+	);
+
+	it('accepts ordinary product facts in AI instructions', () => {
+		const normalized = asJsonObject(
+			normalizeWidgetConfig(WidgetType.AI_CONSULTANT, {
+				instructionsPrompt:
+					'Товар стоит 1000 рублей. Срок доставки — два дня.'
+			})
+		);
+		expect(normalized.instructionsPrompt).toBe(
+			'Товар стоит 1000 рублей. Срок доставки — два дня.'
+		);
 	});
 
 	it('calculates calculator price with configured step/options and ignores client price', () => {
@@ -379,7 +451,6 @@ describe('WidgetsTypeRegistryService', () => {
 	it.each([
 		WidgetType.TIMER,
 		WidgetType.STOP_OFFER,
-		WidgetType.ONLINE_CONSULTANT,
 		WidgetType.CALCULATOR
 	])(
 		'rejects lead submission before quota accounting when %s uses NONE',
@@ -453,11 +524,6 @@ describe('WidgetsTypeRegistryService', () => {
 		[WidgetType.CALLBACK, 'callback_leads', 'Время звонка'],
 		[WidgetType.TIMER, 'timer_leads', 'Email'],
 		[WidgetType.STOP_OFFER, 'stop_offer_leads', 'Email'],
-		[
-			WidgetType.ONLINE_CONSULTANT,
-			'online_consultant_leads',
-			'Быстрый вопрос'
-		],
 		[WidgetType.CALCULATOR, 'calculator_leads', 'Стоимость']
 	] as const)(
 		'preserves export contract for %s',

@@ -877,8 +877,8 @@ const expectedGatewayRoutes = [
 		60000
 	),
 	route(
-		'online-consultants-management',
-		'/api/v1/online-consultants',
+		'ai-consultants-management',
+		'/api/v1/ai-consultants',
 		4700,
 		'required',
 		60000
@@ -922,8 +922,8 @@ const expectedGatewayRoutes = [
 		60000
 	),
 	route(
-		'online-consultant-public',
-		'/api/v1/online-consultant',
+		'ai-consultant-public',
+		'/api/v1/ai-consultant',
 		4700,
 		'optional',
 		60000
@@ -996,6 +996,60 @@ const operationsRestoreEnvironment = environmentOf(
 const operationsPublisherEnvironment = environmentOf(
 	'operations-outbox-publisher'
 );
+
+const cloudflareAiKeys = [
+	'WIDGETS_AI_SESSION_SECRET',
+	'CLOUDFLARE_ACCOUNT_ID',
+	'CLOUDFLARE_API_TOKEN',
+	'CLOUDFLARE_AI_GATEWAY_ID',
+	'CLOUDFLARE_AI_MODEL',
+	'CLOUDFLARE_AI_TIMEOUT_MS',
+	'CLOUDFLARE_TURNSTILE_SITE_KEY',
+	'CLOUDFLARE_TURNSTILE_SECRET_KEY',
+	'CLOUDFLARE_TURNSTILE_TIMEOUT_MS'
+];
+for (const key of cloudflareAiKeys) {
+	assert(rootExample.has(key), '.env.example is missing ' + key);
+	assert(
+		widgetsEnvironment[key] === expected(key),
+		'Widgets Cloudflare AI environment drifted for ' + key
+	);
+}
+assert(
+	/^@cf\/[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/.test(
+		widgetsEnvironment.CLOUDFLARE_AI_MODEL
+	),
+	'Widgets Cloudflare AI model must be a Workers AI model identifier'
+);
+assert(
+	Number.isInteger(Number(widgetsEnvironment.CLOUDFLARE_AI_TIMEOUT_MS)) &&
+		Number(widgetsEnvironment.CLOUDFLARE_AI_TIMEOUT_MS) >= 1000 &&
+		Number(widgetsEnvironment.CLOUDFLARE_AI_TIMEOUT_MS) <= 20000,
+	'Widgets Cloudflare AI timeout is invalid'
+);
+assert(
+	Number.isInteger(Number(widgetsEnvironment.CLOUDFLARE_TURNSTILE_TIMEOUT_MS)) &&
+		Number(widgetsEnvironment.CLOUDFLARE_TURNSTILE_TIMEOUT_MS) >= 1000 &&
+		Number(widgetsEnvironment.CLOUDFLARE_TURNSTILE_TIMEOUT_MS) <= 30000,
+	'Widgets Cloudflare Turnstile timeout is invalid'
+);
+assert(
+	String(widgetsEnvironment.WIDGETS_AI_SESSION_SECRET).length >= 32,
+	'Widgets AI session secret must contain at least 32 characters'
+);
+for (const [name, service] of Object.entries(services)) {
+	if (name === 'widgets-service') continue;
+	for (const secretKey of [
+		'WIDGETS_AI_SESSION_SECRET',
+		'CLOUDFLARE_API_TOKEN',
+		'CLOUDFLARE_TURNSTILE_SECRET_KEY'
+	]) {
+		assert(
+			!(secretKey in (service.environment ?? {})),
+			secretKey + ' must be scoped only to widgets-service'
+		);
+	}
+}
 
 assert(
 	notificationDeliveryExample.get('RECAPTCHA_CLIENT_URL') ===

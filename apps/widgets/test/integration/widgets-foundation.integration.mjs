@@ -29,8 +29,20 @@ const app = spawn('node', ['dist/src/main.js'], {
 		WIDGETS_LISTEN_HOST: '127.0.0.1',
 		WIDGETS_PORT: String(port),
 		WIDGETS_INTERNAL_TOKEN: internalToken,
+		WIDGETS_IDENTITY_TOKEN: 'foundation-widgets-identity-token-20260828',
+		WIDGETS_OPERATIONS_TOKEN:
+			'foundation-widgets-operations-token-20260828',
+		IDENTITY_WIDGETS_TOKEN: 'foundation-identity-widgets-token-20260828',
 		WIDGETS_INTERNAL_TIMEOUT_MS: '500',
 		WIDGETS_ENTITLEMENT_MAX_STALENESS_MS: '86400000',
+		CLOUDFLARE_ACCOUNT_ID: 'foundation_account_123',
+		CLOUDFLARE_API_TOKEN: 'foundation-cloudflare-token',
+		CLOUDFLARE_AI_GATEWAY_ID: 'foundation-ai-gateway',
+		CLOUDFLARE_AI_MODEL: '@cf/qwen/qwen3-30b-a3b-fp8',
+		WIDGETS_AI_SESSION_SECRET:
+			'foundation-session-secret-with-at-least-32-bytes',
+		CLOUDFLARE_TURNSTILE_SITE_KEY: 'foundation-turnstile-site-key',
+		CLOUDFLARE_TURNSTILE_SECRET_KEY: 'foundation-turnstile-secret-key',
 		CORS_ALLOWED_ORIGINS: 'http://127.0.0.1:3000'
 	},
 	stdio: 'inherit'

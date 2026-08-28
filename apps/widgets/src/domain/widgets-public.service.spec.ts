@@ -1,5 +1,6 @@
 import { NotFoundException } from '@nestjs/common';
 import { EntitlementPlan } from '@prisma/widgets-client';
+import { createHash } from 'node:crypto';
 import { WidgetType } from './widgets-domain.types';
 import { WidgetsPublicService } from './widgets-public.service';
 import { safePublicKey } from './widgets-domain.util';
@@ -18,7 +19,7 @@ const publicWidget = (type: WidgetType) => ({
 });
 
 describe('WidgetsPublicService parity', () => {
-	it('returns the legacy 404 for a malformed canonical public key', () => {
+	it('returns 404 for a malformed canonical public key', () => {
 		expect(() => safePublicKey('invalid')).toThrow(NotFoundException);
 	});
 
@@ -26,9 +27,9 @@ describe('WidgetsPublicService parity', () => {
 		[WidgetType.CALCULATOR, false],
 		[WidgetType.TIMER, true],
 		[WidgetType.STOP_OFFER, true],
-		[WidgetType.ONLINE_CONSULTANT, true]
+		[WidgetType.AI_CONSULTANT, true]
 	] as const)(
-		'preserves NONE lead-limit visibility for %s',
+		'keeps no-contact widgets visible independently of the lead quota for %s',
 		async (type, expectedVisible) => {
 			const widget = publicWidget(type);
 			const publicConfig = jest.fn().mockReturnValue({ isActive: true });
@@ -39,6 +40,14 @@ describe('WidgetsPublicService parity', () => {
 			};
 			const quota = {
 				snapshot: jest.fn().mockResolvedValue({
+					entitlement: {
+						plan: EntitlementPlan.EASY,
+						unlimited: false,
+						maxLeadsPerPeriod: 10
+					},
+					counter: { leadCount: 10 }
+				}),
+				aiSnapshot: jest.fn().mockResolvedValue({
 					entitlement: {
 						plan: EntitlementPlan.EASY,
 						unlimited: false,
@@ -58,7 +67,11 @@ describe('WidgetsPublicService parity', () => {
 				quota as never,
 				{} as never,
 				{} as never,
-				registry as never
+				registry as never,
+				{
+					siteKey: () => 'turnstile-site-key',
+					action: () => 'ai-consultant-session'
+				} as never
 			);
 
 			await expect(
@@ -69,10 +82,61 @@ describe('WidgetsPublicService parity', () => {
 					false,
 					'127.0.0.1'
 				)
-			).resolves.toEqual({ isActive: expectedVisible });
+			).resolves.toEqual(
+				type === WidgetType.AI_CONSULTANT
+					? {
+							isActive: true,
+							turnstileSiteKey: 'turnstile-site-key',
+							turnstileAction: 'ai-consultant-session'
+						}
+					: { isActive: expectedVisible }
+			);
 			expect(publicConfig).toHaveBeenCalledTimes(expectedVisible ? 1 : 0);
+			if (type === WidgetType.AI_CONSULTANT) {
+				expect(quota.aiSnapshot).toHaveBeenCalledWith(widget.userId);
+				expect(quota.snapshot).not.toHaveBeenCalled();
+			}
 		}
 	);
+
+	it('rejects an exhausted AI config IP bucket before repository and quota work', async () => {
+		const repository = { findByPublicKey: jest.fn() };
+		const quota = { aiSnapshot: jest.fn() };
+		const service = new WidgetsPublicService(
+			repository as never,
+			quota as never,
+			{} as never,
+			{} as never,
+			{} as never,
+			{} as never
+		);
+		const source = createHash('sha256')
+			.update('203.0.113.7')
+			.digest('base64url');
+		(
+			service as unknown as {
+				publicAiConfigRates: Map<
+					string,
+					{ count: number; expiresAt: number }
+				>;
+			}
+		).publicAiConfigRates.set(`ai-config:ip:${source}`, {
+			count: 120,
+			expiresAt: Date.now() + 60_000
+		});
+
+		await expect(
+			service.config(
+				WidgetType.AI_CONSULTANT,
+				'abcdef123456',
+				'example.test',
+				false,
+				'203.0.113.7'
+			)
+		).rejects.toMatchObject({ status: 429 });
+		expect(repository.findByPublicKey).not.toHaveBeenCalled();
+		expect(quota.aiSnapshot).not.toHaveBeenCalled();
+	});
 
 	it('uses the transactionally refetched widget for the limit event', async () => {
 		const initial = {
@@ -142,7 +206,8 @@ describe('WidgetsPublicService parity', () => {
 			quota as never,
 			events as never,
 			reporting as never,
-			new WidgetsTypeRegistryService()
+			new WidgetsTypeRegistryService(),
+			{} as never
 		);
 
 		await service.submitLead(

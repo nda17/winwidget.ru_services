@@ -11,6 +11,7 @@ import {
 	WidgetsDomainEventsService
 } from '../messaging/widgets-domain-events.service';
 import { WidgetsQuotaService } from '../quota/widgets-quota.service';
+import { WidgetsCloudflareTurnstileService } from '../ai/widgets-cloudflare-turnstile.service';
 import { WidgetsAccessService } from './widgets-access.service';
 import { WidgetsDomainRepository } from './widgets-domain.repository';
 import {
@@ -43,7 +44,8 @@ export class WidgetsLifecycleService {
 		private readonly quota: WidgetsQuotaService,
 		private readonly reporting: WidgetsReportingService,
 		private readonly events: WidgetsDomainEventsService,
-		private readonly imageLifecycle: WidgetsImageLifecycleService
+		private readonly imageLifecycle: WidgetsImageLifecycleService,
+		private readonly turnstile: WidgetsCloudflareTurnstileService
 	) {}
 
 	async state(type: WidgetType, widgetId: string, userId: string) {
@@ -61,89 +63,118 @@ export class WidgetsLifecycleService {
 		correlationId: string,
 		audit?: Pick<WidgetsAuditInput, 'actorId'>
 	) {
-		await this.repository.client().$transaction(async transaction => {
-			await this.access.assertOwnerCanModify(
-				transaction,
-				userId,
-				Boolean(audit)
-			);
-			const widget = await this.access.owned(
-				type,
-				widgetId,
-				userId,
-				transaction
-			);
-			assertExpectedDraftRevision(widget, expectedDraftRevision);
-			if (!hasUnpublishedChanges(widget)) {
-				throw new BadRequestException(
-					'В черновике нет изменений для публикации'
-				);
-			}
-			const readiness = this.readiness(type, widget);
-			if (!readiness.ready) {
-				throw new BadRequestException({
-					message: 'Виджет пока не готов к публикации',
-					readiness
-				});
-			}
-			const version = widget.publishedVersion + 1;
-			await transaction.widgetConfigRevision.create({
-				data: {
-					widgetType: type,
-					widgetId,
-					version,
-					config: toInputJson(getDraftConfig(widget)),
-					installDomain: getDraftInstallDomain(widget)
-				}
-			});
-			const count = await this.repository.updateMany(
-				type,
-				transaction,
-				{
-					id: widgetId,
-					userId,
-					draftRevision: expectedDraftRevision,
-					publishedVersion: widget.publishedVersion
-				},
-				{
-					config: toInputJson(getDraftConfig(widget)),
-					installDomain: getDraftInstallDomain(widget),
-					publishedVersion: version,
-					publishedFromDraftRevision: expectedDraftRevision,
-					publishedAt: new Date()
-				}
-			);
-			if (count !== 1) {
-				throw new ConflictException(
-					'Настройки уже изменены в другой сессии. Обновите страницу'
-				);
-			}
-			const updated = await this.access.require(
-				type,
-				widgetId,
-				transaction
-			);
-			if (widget.installDomain !== updated.installDomain) {
-				await this.reporting.enqueueWidget(
+		const publish = () =>
+			this.repository.client().$transaction(async transaction => {
+				await this.access.assertOwnerCanModify(
 					transaction,
-					type,
-					updated,
-					false,
-					correlationId
+					userId,
+					Boolean(audit)
 				);
-			}
-			if (audit) {
-				await this.events.enqueueAdminAudit(transaction, {
-					action: 'WIDGET_PUBLISH',
-					actorId: audit.actorId,
-					correlationId,
-					widget: updated,
-					widgetType: type,
-					metadata: { version }
+				const widget = await this.access.owned(
+					type,
+					widgetId,
+					userId,
+					transaction
+				);
+				this.assertPublishCandidate(type, widget, expectedDraftRevision);
+				const version = widget.publishedVersion + 1;
+				await transaction.widgetConfigRevision.create({
+					data: {
+						widgetType: type,
+						widgetId,
+						version,
+						config: toInputJson(getDraftConfig(widget)),
+						installDomain: getDraftInstallDomain(widget)
+					}
 				});
-			}
-		}, TX_OPTIONS);
+				const count = await this.repository.updateMany(
+					type,
+					transaction,
+					{
+						id: widgetId,
+						userId,
+						draftRevision: expectedDraftRevision,
+						publishedVersion: widget.publishedVersion
+					},
+					{
+						config: toInputJson(getDraftConfig(widget)),
+						installDomain: getDraftInstallDomain(widget),
+						publishedVersion: version,
+						publishedFromDraftRevision: expectedDraftRevision,
+						publishedAt: new Date()
+					}
+				);
+				if (count !== 1) {
+					throw new ConflictException(
+						'Настройки уже изменены в другой сессии. Обновите страницу'
+					);
+				}
+				const updated = await this.access.require(
+					type,
+					widgetId,
+					transaction
+				);
+				if (widget.installDomain !== updated.installDomain) {
+					await this.reporting.enqueueWidget(
+						transaction,
+						type,
+						updated,
+						false,
+						correlationId
+					);
+				}
+				if (audit) {
+					await this.events.enqueueAdminAudit(transaction, {
+						action: 'WIDGET_PUBLISH',
+						actorId: audit.actorId,
+						correlationId,
+						widget: updated,
+						widgetType: type,
+						metadata: { version }
+					});
+				}
+			}, TX_OPTIONS);
+		if (type === WidgetType.AI_CONSULTANT) {
+			const widget = await this.repository
+				.client()
+				.$transaction(async transaction => {
+					await this.access.assertOwnerCanModify(
+						transaction,
+						userId,
+						Boolean(audit)
+					);
+					return this.access.owned(type, widgetId, userId, transaction);
+				}, TX_OPTIONS);
+			this.assertPublishCandidate(type, widget, expectedDraftRevision);
+			await this.turnstile.withPublishedHostname(
+				widget.id,
+				getDraftInstallDomain(widget),
+				publish
+			);
+		} else {
+			await publish();
+		}
 		return this.state(type, widgetId, userId);
+	}
+
+	private assertPublishCandidate(
+		type: WidgetType,
+		widget: WidgetEntity,
+		expectedDraftRevision: number
+	): void {
+		assertExpectedDraftRevision(widget, expectedDraftRevision);
+		if (!hasUnpublishedChanges(widget)) {
+			throw new BadRequestException(
+				'В черновике нет изменений для публикации'
+			);
+		}
+		const readiness = this.readiness(type, widget);
+		if (!readiness.ready) {
+			throw new BadRequestException({
+				message: 'Виджет пока не готов к публикации',
+				readiness
+			});
+		}
 	}
 
 	async versions(
@@ -432,9 +463,11 @@ export class WidgetsLifecycleService {
 		const warnings: Array<{ code: string; message: string }> = [];
 		const config = asJsonObject(getDraftConfig(widget));
 		const contactType =
-			type === WidgetType.CALLBACK
-				? 'PHONE'
-				: String(config.dataType || '').toUpperCase();
+			type === WidgetType.AI_CONSULTANT
+				? 'NONE'
+				: type === WidgetType.CALLBACK
+					? 'PHONE'
+					: String(config.dataType || '').toUpperCase();
 		if (
 			!['PHONE', 'EMAIL', 'PHONE_AND_EMAIL', 'NONE'].includes(contactType)
 		) {
@@ -460,6 +493,29 @@ export class WidgetsLifecycleService {
 				code: 'FIELDS_REQUIRED',
 				message: 'Добавьте хотя бы одно поле'
 			});
+		}
+		if (
+			type === WidgetType.AI_CONSULTANT &&
+			!String(config.instructionsPrompt || '').trim()
+		) {
+			blockers.push({
+				code: 'INSTRUCTIONS_PROMPT_REQUIRED',
+				message: 'Добавьте инструкции и информацию для AI-консультанта'
+			});
+		}
+		if (type === WidgetType.AI_CONSULTANT) {
+			try {
+				const privacy = new URL(String(config.privacyUrl || ''));
+				if (!['http:', 'https:'].includes(privacy.protocol)) {
+					throw new Error();
+				}
+			} catch {
+				blockers.push({
+					code: 'PRIVACY_URL_REQUIRED',
+					message:
+						'Укажите ссылку на политику обработки персональных данных'
+				});
+			}
 		}
 		if (contactType !== 'NONE') {
 			try {

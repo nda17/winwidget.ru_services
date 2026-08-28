@@ -18,7 +18,7 @@ const WIDGET_TYPES = [
 	'CALLBACK',
 	'TIMER',
 	'STOP_OFFER',
-	'ONLINE_CONSULTANT',
+	'AI_CONSULTANT',
 	'CALCULATOR'
 ] as const;
 const REPORTING_WIDGET_TYPES = [
@@ -27,7 +27,15 @@ const REPORTING_WIDGET_TYPES = [
 	'callback',
 	'countdownTimer',
 	'stopOffer',
-	'onlineConsultant',
+	'aiConsultant',
+	'calculator'
+] as const;
+const REPORTING_LEAD_WIDGET_TYPES = [
+	'wheel',
+	'quiz',
+	'callback',
+	'countdownTimer',
+	'stopOffer',
 	'calculator'
 ] as const;
 const LEAD_SOURCES = [
@@ -36,7 +44,6 @@ const LEAD_SOURCES = [
 	'callback',
 	'countdown-timer',
 	'stop-offer',
-	'online-consultant',
 	'calculator'
 ] as const;
 const LIMIT_ENTITY_TYPES = [
@@ -45,7 +52,6 @@ const LIMIT_ENTITY_TYPES = [
 	'callback',
 	'timer',
 	'stop-offer',
-	'online-consultant',
 	'calculator'
 ] as const;
 const LEAD_INTEGRATIONS = [
@@ -429,7 +435,12 @@ function assertReportingEvent(
 	if (payload.eventId !== messageId) {
 		throw new Error('Reporting eventId must equal Outbox messageId');
 	}
-	assertNamespacedAggregateId(payload.aggregateId);
+	assertNamespacedAggregateId(
+		payload.aggregateId,
+		kind === 'widget'
+			? REPORTING_WIDGET_TYPES
+			: REPORTING_LEAD_WIDGET_TYPES
+	);
 	assertPositiveBigint(payload.aggregateVersion, 'aggregateVersion');
 	assertPositiveBigint(payload.sourceSequence, 'sourceSequence');
 	assertIsoDate(payload.occurredAt, 'occurredAt');
@@ -462,7 +473,9 @@ function assertReportingEvent(
 	assertIdentifier(state.id, 'state.id');
 	assertOneOf(
 		state.widgetType,
-		REPORTING_WIDGET_TYPES,
+		kind === 'widget'
+			? REPORTING_WIDGET_TYPES
+			: REPORTING_LEAD_WIDGET_TYPES,
 		'state.widgetType'
 	);
 	assertIsoDate(state.createdAt, 'state.createdAt');
@@ -662,7 +675,10 @@ function assertPositiveInteger(
 	}
 }
 
-function assertNamespacedAggregateId(value: unknown): void {
+function assertNamespacedAggregateId<T extends string>(
+	value: unknown,
+	allowedTypes: readonly T[]
+): void {
 	assertIdentifier(value, 'aggregateId');
 	const separator = value.indexOf(':');
 	if (separator < 1 || separator === value.length - 1) {
@@ -670,7 +686,7 @@ function assertNamespacedAggregateId(value: unknown): void {
 	}
 	assertOneOf(
 		value.slice(0, separator),
-		REPORTING_WIDGET_TYPES,
+		allowedTypes,
 		'aggregateId.widgetType'
 	);
 	assertIdentifier(value.slice(separator + 1), 'aggregateId.id');

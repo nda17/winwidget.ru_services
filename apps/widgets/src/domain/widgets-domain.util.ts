@@ -76,10 +76,64 @@ export const normalizeInstallDomain = (value: unknown): string => {
 		: suffix;
 };
 
+export const normalizeExactInstallDomain = (value: unknown): string => {
+	if (value === null || value === undefined) return '';
+	if (typeof value !== 'string')
+		throw new BadRequestException(INVALID_DOMAIN);
+	const candidate = value.trim();
+	if (!candidate) return '';
+	if (/\s/.test(candidate) || candidate.includes('@')) {
+		throw new BadRequestException(INVALID_DOMAIN);
+	}
+	let hostname: string;
+	try {
+		hostname = new URL(
+			/^[a-z][a-z\d+.-]*:\/\//i.test(candidate)
+				? candidate
+				: `https://${candidate}`
+		).hostname;
+	} catch {
+		throw new BadRequestException(INVALID_DOMAIN);
+	}
+	hostname = hostname
+		.toLowerCase()
+		.replace(/^\[/, '')
+		.replace(/\]$/, '')
+		.replace(/\.$/, '')
+		.replace(/^\*\./, '');
+	if (!hostname) throw new BadRequestException(INVALID_DOMAIN);
+	if (
+		LOCAL_DOMAINS.has(hostname) ||
+		/^(\d{1,3}\.){3}\d{1,3}$/.test(hostname) ||
+		hostname.includes(':')
+	) {
+		return hostname;
+	}
+	const ascii = domainToASCII(hostname);
+	const labels = ascii.split('.');
+	if (
+		!ascii ||
+		labels.length < 2 ||
+		labels.some(label => !/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/i.test(label))
+	) {
+		throw new BadRequestException(INVALID_DOMAIN);
+	}
+	return ascii;
+};
+
 const safeDomain = (value: string | undefined): string | null => {
 	if (!value) return null;
 	try {
 		return normalizeInstallDomain(value);
+	} catch {
+		return null;
+	}
+};
+
+const safeExactDomain = (value: string | undefined): string | null => {
+	if (!value) return null;
+	try {
+		return normalizeExactInstallDomain(value);
 	} catch {
 		return null;
 	}
@@ -94,6 +148,12 @@ export const getRequestDomain = (request: Request): string | null =>
 		firstHeader(request.headers.referer || request.headers.referrer)
 	);
 
+export const getRequestHostname = (request: Request): string | null =>
+	safeExactDomain(firstHeader(request.headers.origin)) ||
+	safeExactDomain(
+		firstHeader(request.headers.referer || request.headers.referrer)
+	);
+
 export const isDomainAllowed = (
 	installDomain: string,
 	requestDomain: string | null
@@ -102,6 +162,16 @@ export const isDomainAllowed = (
 		installDomain &&
 		requestDomain &&
 		safeDomain(installDomain) === requestDomain
+	);
+
+export const isExactHostnameAllowed = (
+	installDomain: string,
+	requestHostname: string | null
+): boolean =>
+	Boolean(
+		installDomain &&
+		requestHostname &&
+		safeExactDomain(installDomain) === requestHostname
 	);
 
 export const isDirectPageRequest = (
@@ -127,6 +197,25 @@ export const isDirectPageRequest = (
 	} catch {
 		return false;
 	}
+};
+
+export const isAiDirectPageRequest = (
+	request: Request,
+	pagePath: string,
+	publicKey: string,
+	nodeEnv: string | undefined
+): boolean => {
+	if (!isDirectPageRequest(request, pagePath, publicKey)) return false;
+	const hostname = getRequestHostname(request);
+	if (hostname === 'winwidget.ru' || hostname === 'www.winwidget.ru') {
+		return true;
+	}
+	return (
+		['test', 'development'].includes(nodeEnv || '') &&
+		Boolean(
+			hostname && ['localhost', '127.0.0.1', '::1'].includes(hostname)
+		)
+	);
 };
 
 export const getClientIp = (request: Request): string => {

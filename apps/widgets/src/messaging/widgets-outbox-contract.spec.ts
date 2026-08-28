@@ -249,4 +249,47 @@ describe('Widgets Outbox event contracts', () => {
 			)
 		).toThrow('eventId must equal Outbox messageId');
 	});
+
+	it('accepts AI widget events but rejects impossible AI lead events', () => {
+		const common = {
+			schemaVersion: 1,
+			eventId: EVENT_ID,
+			aggregateVersion: '1',
+			sourceSequence: '1',
+			occurredAt: OCCURRED_AT,
+			tombstone: false
+		};
+		expect(() =>
+			assertWidgetsOutboxContract(
+				outbox('widgets.widget.changed.v1', 'widgets.widget.changed.v1', {
+					...common,
+					eventType: 'widgets.widget.changed.v1',
+					aggregateId: 'aiConsultant:widget-1',
+					state: {
+						id: 'widget-1',
+						userId: 'user-1',
+						widgetType: 'aiConsultant',
+						isActive: true,
+						hasInstallDomain: true,
+						createdAt: OCCURRED_AT
+					}
+				})
+			)
+		).not.toThrow();
+		expect(() =>
+			assertWidgetsOutboxContract(
+				outbox('widgets.lead.changed.v1', 'widgets.lead.changed.v1', {
+					...common,
+					eventType: 'widgets.lead.changed.v1',
+					aggregateId: 'aiConsultant:lead-1',
+					state: {
+						id: 'lead-1',
+						widgetId: 'widget-1',
+						widgetType: 'aiConsultant',
+						createdAt: OCCURRED_AT
+					}
+				})
+			)
+		).toThrow('aggregateId.widgetType has an unsupported value');
+	});
 });

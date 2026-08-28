@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { BadRequestException, Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/widgets-client';
 import { WidgetsPrismaService } from '../prisma/widgets-prisma.service';
 import { WidgetEntity, WidgetType } from './widgets-domain.types';
@@ -12,7 +12,7 @@ export type WidgetsDomainClient =
 	| Prisma.TransactionClient;
 
 export interface WidgetWithLeadCount extends WidgetEntity {
-	_count: { leads: number };
+	_count?: { leads: number };
 }
 
 export interface WidgetLeadRecord {
@@ -91,10 +91,11 @@ export class WidgetsDomainRepository {
 				return client.stopOffer.findMany(args) as Promise<
 					WidgetWithLeadCount[]
 				>;
-			case WidgetType.ONLINE_CONSULTANT:
-				return client.onlineConsultant.findMany(args) as Promise<
-					WidgetWithLeadCount[]
-				>;
+			case WidgetType.AI_CONSULTANT:
+				return client.aiConsultant.findMany({
+					where: { userId },
+					orderBy: { createdAt: 'desc' }
+				});
 			case WidgetType.CALCULATOR:
 				return client.calculator.findMany(args) as Promise<
 					WidgetWithLeadCount[]
@@ -129,8 +130,8 @@ export class WidgetsDomainRepository {
 				return client.stopOffer.findUnique(
 					args
 				) as Promise<WidgetEntity | null>;
-			case WidgetType.ONLINE_CONSULTANT:
-				return client.onlineConsultant.findUnique(
+			case WidgetType.AI_CONSULTANT:
+				return client.aiConsultant.findUnique(
 					args
 				) as Promise<WidgetEntity | null>;
 			case WidgetType.CALCULATOR:
@@ -167,8 +168,8 @@ export class WidgetsDomainRepository {
 				return client.stopOffer.findUnique(
 					args
 				) as Promise<WidgetEntity | null>;
-			case WidgetType.ONLINE_CONSULTANT:
-				return client.onlineConsultant.findUnique(
+			case WidgetType.AI_CONSULTANT:
+				return client.aiConsultant.findUnique(
 					args
 				) as Promise<WidgetEntity | null>;
 			case WidgetType.CALCULATOR:
@@ -205,8 +206,8 @@ export class WidgetsDomainRepository {
 				}) as Promise<WidgetEntity>;
 			case WidgetType.STOP_OFFER:
 				return client.stopOffer.create({ data }) as Promise<WidgetEntity>;
-			case WidgetType.ONLINE_CONSULTANT:
-				return client.onlineConsultant.create({
+			case WidgetType.AI_CONSULTANT:
+				return client.aiConsultant.create({
 					data
 				}) as Promise<WidgetEntity>;
 			case WidgetType.CALCULATOR:
@@ -252,11 +253,11 @@ export class WidgetsDomainRepository {
 					data
 				} as Prisma.StopOfferUpdateManyArgs);
 				break;
-			case WidgetType.ONLINE_CONSULTANT:
-				result = await client.onlineConsultant.updateMany({
+			case WidgetType.AI_CONSULTANT:
+				result = await client.aiConsultant.updateMany({
 					where,
 					data
-				} as Prisma.OnlineConsultantUpdateManyArgs);
+				} as Prisma.AiConsultantUpdateManyArgs);
 				break;
 			case WidgetType.CALCULATOR:
 				result = await client.calculator.updateMany({
@@ -285,10 +286,8 @@ export class WidgetsDomainRepository {
 				return client.countdownTimer.delete(args) as Promise<WidgetEntity>;
 			case WidgetType.STOP_OFFER:
 				return client.stopOffer.delete(args) as Promise<WidgetEntity>;
-			case WidgetType.ONLINE_CONSULTANT:
-				return client.onlineConsultant.delete(
-					args
-				) as Promise<WidgetEntity>;
+			case WidgetType.AI_CONSULTANT:
+				return client.aiConsultant.delete(args) as Promise<WidgetEntity>;
 			case WidgetType.CALCULATOR:
 				return client.calculator.delete(args) as Promise<WidgetEntity>;
 		}
@@ -361,18 +360,8 @@ export class WidgetsDomainRepository {
 						resetToken: data.resetToken || ''
 					}
 				}) as Promise<WidgetLeadRecord>;
-			case WidgetType.ONLINE_CONSULTANT:
-				return client.onlineConsultantLead.create({
-					data: {
-						onlineConsultantId: widgetId,
-						phone: data.phone,
-						email: data.email,
-						actionLabel: data.actionLabel || '',
-						actionValue: data.actionValue || '',
-						url: data.url,
-						ip: data.ip
-					}
-				}) as Promise<WidgetLeadRecord>;
+			case WidgetType.AI_CONSULTANT:
+				throw new BadRequestException('AI-консультант не создаёт заявки');
 			case WidgetType.CALCULATOR:
 				return client.calculatorLead.create({
 					data: {
@@ -478,21 +467,8 @@ export class WidgetsDomainRepository {
 						select: { id: true }
 					})
 				);
-			case WidgetType.ONLINE_CONSULTANT:
-				return Boolean(
-					await client.onlineConsultantLead.findFirst({
-						where: {
-							onlineConsultantId: widgetId,
-							...(createdAt && { createdAt }),
-							OR: this.duplicateOr([
-								lookup.phone ? { phone: lookup.phone } : null,
-								lookup.email ? { email: lookup.email } : null,
-								lookup.ip ? { ip: lookup.ip } : null
-							]) as Prisma.OnlineConsultantLeadWhereInput[]
-						},
-						select: { id: true }
-					})
-				);
+			case WidgetType.AI_CONSULTANT:
+				return false;
 			case WidgetType.CALCULATOR:
 				return Boolean(
 					await client.calculatorLead.findFirst({
@@ -578,10 +554,8 @@ export class WidgetsDomainRepository {
 				return client.stopOfferLead.findMany(args) as Promise<
 					WidgetLeadRecord[]
 				>;
-			case WidgetType.ONLINE_CONSULTANT:
-				return client.onlineConsultantLead.findMany(args) as Promise<
-					WidgetLeadRecord[]
-				>;
+			case WidgetType.AI_CONSULTANT:
+				return [];
 			case WidgetType.CALCULATOR:
 				return client.calculatorLead.findMany(args) as Promise<
 					WidgetLeadRecord[]
@@ -666,8 +640,8 @@ export class WidgetsDomainRepository {
 				return { countdownTimerId: widgetId };
 			case WidgetType.STOP_OFFER:
 				return { stopOfferId: widgetId };
-			case WidgetType.ONLINE_CONSULTANT:
-				return { onlineConsultantId: widgetId };
+			case WidgetType.AI_CONSULTANT:
+				throw new BadRequestException('AI-консультант не создаёт заявки');
 			case WidgetType.CALCULATOR:
 				return { calculatorId: widgetId };
 		}
@@ -696,10 +670,8 @@ export class WidgetsDomainRepository {
 				return this.prisma.stopOfferLead.findMany(
 					args as Prisma.StopOfferLeadFindManyArgs
 				);
-			case WidgetType.ONLINE_CONSULTANT:
-				return this.prisma.onlineConsultantLead.findMany(
-					args as Prisma.OnlineConsultantLeadFindManyArgs
-				);
+			case WidgetType.AI_CONSULTANT:
+				throw new BadRequestException('AI-консультант не создаёт заявки');
 			case WidgetType.CALCULATOR:
 				return this.prisma.calculatorLead.findMany(
 					args as Prisma.CalculatorLeadFindManyArgs
@@ -722,8 +694,8 @@ export class WidgetsDomainRepository {
 				return this.prisma.countdownTimerLead.count({ where });
 			case WidgetType.STOP_OFFER:
 				return this.prisma.stopOfferLead.count({ where });
-			case WidgetType.ONLINE_CONSULTANT:
-				return this.prisma.onlineConsultantLead.count({ where });
+			case WidgetType.AI_CONSULTANT:
+				throw new BadRequestException('AI-консультант не создаёт заявки');
 			case WidgetType.CALCULATOR:
 				return this.prisma.calculatorLead.count({ where });
 		}

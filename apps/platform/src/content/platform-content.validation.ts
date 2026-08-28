@@ -93,7 +93,7 @@ const STRUCTURED_HOME_CONTENT_SCHEMA = object({
 					quiz: required(string(500)),
 					callback: required(string(500)),
 					countdown: required(string(500)),
-					onlineConsultant: required(string(500)),
+					aiConsultant: required(string(500)),
 					stopOffer: required(string(500)),
 					calculator: required(string(500))
 				})
@@ -163,7 +163,7 @@ const STRUCTURED_HOME_CONTENT_SCHEMA = object({
 								'quiz',
 								'callback',
 								'timer',
-								'onlineConsultant',
+								'aiConsultant',
 								'stopOffer',
 								'calculator',
 								'none'

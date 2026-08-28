@@ -1,7 +1,7 @@
 import { ReportingPrismaService } from '../prisma/reporting-prisma.service';
 import {
-	REPORTING_WIDGET_TYPES,
-	ReportingWidgetType
+	REPORTING_LEAD_WIDGET_TYPES,
+	ReportingLeadWidgetType
 } from '../projections/reporting-event.contract';
 import { Injectable } from '@nestjs/common';
 
@@ -17,7 +17,6 @@ interface LeadCounts {
 	callback: number;
 	countdownTimer: number;
 	stopOffer: number;
-	onlineConsultant: number;
 	calculator: number;
 }
 
@@ -285,7 +284,6 @@ export class DailySummaryReportService {
 			`- Обратный звонок: ${currentLeads.callback}`,
 			`- Таймеры: ${currentLeads.countdownTimer}`,
 			`- Стоп-офферы: ${currentLeads.stopOffer}`,
-			`- Онлайн-консультанты: ${currentLeads.onlineConsultant}`,
 			`- Калькуляторы стоимости: ${currentLeads.calculator}`,
 			'',
 			'<b>Подписки</b>',
@@ -319,11 +317,11 @@ export class DailySummaryReportService {
 			groups.map(group => [group.widgetType, group._count])
 		);
 		const result = Object.fromEntries(
-			REPORTING_WIDGET_TYPES.map(type => [type, map.get(type) || 0])
-		) as Record<ReportingWidgetType, number>;
+			REPORTING_LEAD_WIDGET_TYPES.map(type => [type, map.get(type) || 0])
+		) as Record<ReportingLeadWidgetType, number>;
 		return {
 			...result,
-			total: REPORTING_WIDGET_TYPES.reduce(
+			total: REPORTING_LEAD_WIDGET_TYPES.reduce(
 				(sum, type) => sum + result[type],
 				0
 			)

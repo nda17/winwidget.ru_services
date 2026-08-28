@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { BadRequestException, Injectable } from '@nestjs/common';
 import { Prisma, WidgetsOutboxExchange } from '@prisma/widgets-client';
 import { createHash, randomUUID } from 'node:crypto';
 import type { WidgetLeadRecord } from '../domain/widgets-domain.repository';
@@ -51,6 +51,7 @@ export class WidgetsDomainEventsService {
 		credentials: Prisma.InputJsonObject;
 		targetFingerprint: string;
 	} | null {
+		if (type === WidgetType.AI_CONSULTANT) return null;
 		const values = asJsonObject(asJsonObject(config).integrations);
 		let destination: {
 			integration: LeadIntegration;
@@ -104,6 +105,7 @@ export class WidgetsDomainEventsService {
 			config: unknown;
 		}
 	): Promise<void> {
+		this.assertLeadType(input.type);
 		const integrations = asJsonObject(
 			asJsonObject(input.config).integrations
 		);
@@ -144,6 +146,7 @@ export class WidgetsDomainEventsService {
 			periodKey: string | null;
 		}
 	): Promise<void> {
+		this.assertLeadType(input.type);
 		const integrations = asJsonObject(
 			asJsonObject(input.config).integrations
 		);
@@ -371,9 +374,16 @@ export class WidgetsDomainEventsService {
 	}
 
 	private source(type: WidgetType): string {
+		this.assertLeadType(type);
 		if (type === WidgetType.WHEEL) return 'widget';
 		if (type === WidgetType.TIMER) return 'countdown-timer';
 		return getWidgetDefinition(type).slug;
+	}
+
+	private assertLeadType(type: WidgetType): void {
+		if (type === WidgetType.AI_CONSULTANT) {
+			throw new BadRequestException('AI-консультант не создаёт заявки');
+		}
 	}
 
 	private headers(

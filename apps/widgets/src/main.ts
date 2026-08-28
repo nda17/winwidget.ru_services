@@ -65,7 +65,7 @@ async function bootstrap(): Promise<void> {
 			'callback',
 			'countdown-timer',
 			'stop-offer',
-			'online-consultant',
+			'ai-consultant',
 			'calculator'
 		].map(value => `/api/v1/${value}`);
 		app.use(

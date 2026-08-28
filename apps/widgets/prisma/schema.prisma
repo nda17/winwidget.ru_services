@@ -157,44 +157,25 @@ model StopOfferLead {
   @@schema("widgets")
 }
 
-model OnlineConsultant {
-  id                         String                 @id @default(cuid())
-  userId                     String                 @map("user_id")
-  publicKey                  String                 @unique @map("public_key")
-  name                       String                 @default("Онлайн-консультант")
-  isActive                   Boolean                @default(true) @map("is_active")
-  installDomain              String                 @default("") @map("install_domain")
-  config                     Json                   @default("{}")
-  draftConfig                Json?                  @map("draft_config")
-  draftInstallDomain         String?                @map("draft_install_domain")
-  draftRevision              Int                    @default(0) @map("draft_revision")
-  publishedVersion           Int                    @default(0) @map("published_version")
-  publishedFromDraftRevision Int                    @default(0) @map("published_from_draft_revision")
-  publishedAt                DateTime?              @map("published_at")
-  leads                      OnlineConsultantLead[]
-  createdAt                  DateTime               @default(now()) @map("created_at")
-  updatedAt                  DateTime               @updatedAt @map("updated_at")
+model AiConsultant {
+  id                         String    @id @default(cuid())
+  userId                     String    @map("user_id")
+  publicKey                  String    @unique @map("public_key")
+  name                       String    @default("AI-консультант")
+  isActive                   Boolean   @default(true) @map("is_active")
+  installDomain              String    @default("") @map("install_domain")
+  config                     Json      @default("{}")
+  draftConfig                Json?     @map("draft_config")
+  draftInstallDomain         String?   @map("draft_install_domain")
+  draftRevision              Int       @default(0) @map("draft_revision")
+  publishedVersion           Int       @default(0) @map("published_version")
+  publishedFromDraftRevision Int       @default(0) @map("published_from_draft_revision")
+  publishedAt                DateTime? @map("published_at")
+  createdAt                  DateTime  @default(now()) @map("created_at")
+  updatedAt                  DateTime  @updatedAt @map("updated_at")
 
   @@index([userId])
-  @@map("online_consultants")
-  @@schema("widgets")
-}
-
-model OnlineConsultantLead {
-  id                 String           @id @default(cuid())
-  onlineConsultantId String           @map("online_consultant_id")
-  phone              String?
-  email              String?
-  actionLabel        String           @default("") @map("action_label")
-  actionValue        String           @default("") @map("action_value")
-  url                String?
-  ip                 String?
-  onlineConsultant   OnlineConsultant @relation(fields: [onlineConsultantId], references: [id], onDelete: Cascade)
-  createdAt          DateTime         @default(now()) @map("created_at")
-
-  @@index([onlineConsultantId])
-  @@index([onlineConsultantId, ip])
-  @@map("online_consultant_leads")
+  @@map("ai_consultants")
   @@schema("widgets")
 }
 
