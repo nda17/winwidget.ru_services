@@ -48,6 +48,7 @@ model Callback {
   publishedFromDraftRevision Int            @default(0) @map("published_from_draft_revision")
   publishedAt                DateTime?      @map("published_at")
   leads                      CallbackLead[]
+  otpChallenges              CallbackOtpChallenge[]
   createdAt                  DateTime       @default(now()) @map("created_at")
   updatedAt                  DateTime       @updatedAt @map("updated_at")
 
@@ -57,19 +58,66 @@ model Callback {
 }
 
 model CallbackLead {
-  id         String   @id @default(cuid())
-  callbackId String   @map("callback_id")
-  phone      String
-  timeSlot   String   @default("") @map("time_slot")
-  timezone   String   @default("") @map("timezone")
-  url        String?
-  ip         String?
-  callback   Callback @relation(fields: [callbackId], references: [id], onDelete: Cascade)
-  createdAt  DateTime @default(now()) @map("created_at")
+  id                      String                   @id @default(cuid())
+  callbackId              String                   @map("callback_id")
+  phone                   String
+  timeSlot                String                   @default("") @map("time_slot")
+  timezone                String                   @default("") @map("timezone")
+  url                     String?
+  ip                      String?
+  verificationMode        CallbackVerificationMode @default(OFF) @map("verification_mode")
+  verificationChallengeId String?                  @unique(map: "callback_leads_verification_challenge_unique") @map("verification_challenge_id") @db.Uuid
+  callback                Callback                 @relation(fields: [callbackId], references: [id], onDelete: Cascade)
+  verificationChallenge   CallbackOtpChallenge?    @relation(fields: [verificationChallengeId], references: [id], onDelete: NoAction)
+  createdAt               DateTime                 @default(now()) @map("created_at")
 
   @@index([callbackId])
   @@index([callbackId, ip])
   @@map("callback_leads")
+  @@schema("widgets")
+}
+
+model CallbackOtpChallenge {
+  id                String             @id @default(uuid()) @db.Uuid
+  callbackId        String             @map("callback_id")
+  ownerId           String             @map("owner_id")
+  publishedVersion  Int                @map("published_version")
+  channel           CallbackOtpChannel
+  destinationHash   String             @map("destination_hash") @db.Char(64)
+  ipHash            String             @map("ip_hash") @db.Char(64)
+  codeHash          String             @map("code_hash") @db.Char(64)
+  attempts          Int                @default(0)
+  expiresAt         DateTime           @map("expires_at")
+  resendAvailableAt DateTime           @map("resend_available_at")
+  sentAt            DateTime?          @map("sent_at")
+  failedAt          DateTime?          @map("failed_at")
+  revokedAt         DateTime?          @map("revoked_at")
+  consumedAt        DateTime?          @map("consumed_at")
+  callback          Callback           @relation(fields: [callbackId], references: [id], onDelete: Cascade)
+  lead              CallbackLead?
+  createdAt         DateTime           @default(now()) @map("created_at")
+  updatedAt         DateTime           @updatedAt @map("updated_at")
+
+  @@index([callbackId, channel, destinationHash, createdAt], map: "callback_otp_challenges_destination_idx")
+  @@index([expiresAt, id], map: "callback_otp_challenges_expiry_idx")
+  @@index([ownerId, createdAt], map: "callback_otp_challenges_owner_idx")
+  @@map("callback_otp_challenges")
+  @@schema("widgets")
+}
+
+model CallbackOtpRateBucket {
+  id              String   @id @default(uuid()) @db.Uuid
+  scope           String   @db.VarChar(40)
+  subjectHash     String   @map("subject_hash") @db.Char(64)
+  count           Int
+  windowStartedAt DateTime @map("window_started_at")
+  windowEndsAt    DateTime @map("window_ends_at")
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  @@unique([scope, subjectHash], map: "callback_otp_rate_buckets_scope_subject_unique")
+  @@index([windowEndsAt, id], map: "callback_otp_rate_buckets_expiry_idx")
+  @@map("callback_otp_rate_buckets")
   @@schema("widgets")
 }
 
@@ -700,6 +748,21 @@ enum OwnerStatus {
   ACTIVE
   DEACTIVATED
   DELETED
+
+  @@schema("widgets")
+}
+
+enum CallbackVerificationMode {
+  OFF
+  SMS
+  EMAIL
+
+  @@schema("widgets")
+}
+
+enum CallbackOtpChannel {
+  SMS
+  EMAIL
 
   @@schema("widgets")
 }

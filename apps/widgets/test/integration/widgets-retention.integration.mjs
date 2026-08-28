@@ -50,6 +50,7 @@ const old = new Date(now.getTime() - 60 * DAY_MS);
 const boundary = new Date(now.getTime() - 30 * DAY_MS);
 const runId = randomUUID();
 const tracked = {
+	callbacks: [],
 	outbox: [],
 	consumerReceipts: [],
 	consumerFailures: [],
@@ -72,12 +73,16 @@ try {
 		receiptDays: 30,
 		failureDetailDays: 30,
 		cleanupOutbox: true,
+		cleanupOtpState: true,
 		cleanupWorkerState: true,
 		now,
 		batchSize: 1,
 		maxBatches: 10
 	});
 	assert.deepEqual(first, {
+		callbackOtpChallengesDeleted: 1,
+		callbackOtpChallengesRedacted: 1,
+		callbackOtpRateBucketsDeleted: 0,
 		publishedOutboxDeleted: 1,
 		credentialSnapshotsDeleted: 2,
 		integrationReceiptsCompacted: 2,
@@ -87,6 +92,7 @@ try {
 	});
 
 	await assertOutboxRetention(fixture);
+	await assertCallbackOtpRetention(fixture);
 	await assertConsumerRetention(fixture);
 	await assertIntegrationRetention(fixture);
 	await assertReceiptTombstones(fixture);
@@ -97,12 +103,16 @@ try {
 		receiptDays: 30,
 		failureDetailDays: 30,
 		cleanupOutbox: true,
+		cleanupOtpState: true,
 		cleanupWorkerState: true,
 		now,
 		batchSize: 1,
 		maxBatches: 10
 	});
 	assert.deepEqual(second, {
+		callbackOtpChallengesDeleted: 0,
+		callbackOtpChallengesRedacted: 0,
+		callbackOtpRateBucketsDeleted: 0,
 		publishedOutboxDeleted: 0,
 		credentialSnapshotsDeleted: 0,
 		integrationReceiptsCompacted: 0,
@@ -118,6 +128,7 @@ try {
 }
 
 async function seedFixture() {
+	const callbackOtp = await createCallbackOtpFixture();
 	const oldPublished = await createOutbox('PUBLISHED', old);
 	const boundaryPublished = await createOutbox('PUBLISHED', boundary);
 	const pending = await createOutbox('PENDING', old);
@@ -200,6 +211,7 @@ async function seedFixture() {
 	);
 
 	return {
+		...callbackOtp,
 		oldPublished,
 		boundaryPublished,
 		pending,
@@ -227,6 +239,75 @@ async function seedFixture() {
 		openIntegrationFailure,
 		blockedOpenFailure
 	};
+}
+
+async function createCallbackOtpFixture() {
+	const callback = await prisma.callback.create({
+		data: {
+			id: `retention-callback-${runId}`,
+			userId: `retention-owner-${runId}`,
+			publicKey: hash(`retention-callback:${runId}`).slice(0, 32),
+			installDomain: 'example.test',
+			config: { verificationMode: 'EMAIL', launcherEnabled: true },
+			publishedVersion: 1,
+			publishedAt: old,
+			createdAt: old,
+			updatedAt: old
+		}
+	});
+	tracked.callbacks.push(callback.id);
+	const expiresAt = new Date(old.getTime() + 5 * 60 * 1000);
+	const resendAvailableAt = new Date(old.getTime() + 60 * 1000);
+	const sentAt = new Date(old.getTime() + 30 * 1000);
+	const consumedAt = new Date(old.getTime() + 2 * 60 * 1000);
+	const consumedChallenge = await prisma.callbackOtpChallenge.create({
+		data: {
+			id: randomUUID(),
+			callbackId: callback.id,
+			ownerId: callback.userId,
+			publishedVersion: 1,
+			channel: 'EMAIL',
+			destinationHash: hash(`retention-destination:${runId}`),
+			ipHash: hash(`retention-ip:${runId}`),
+			codeHash: hash(`retention-code:${runId}`),
+			expiresAt,
+			resendAvailableAt,
+			sentAt,
+			consumedAt,
+			createdAt: old,
+			updatedAt: consumedAt
+		}
+	});
+	const lead = await prisma.callbackLead.create({
+		data: {
+			callbackId: callback.id,
+			phone: '+79991234567',
+			timeSlot: '11:00–13:00',
+			timezone: 'Europe/Moscow',
+			url: 'https://example.test/callback',
+			verificationMode: 'EMAIL',
+			verificationChallengeId: consumedChallenge.id,
+			createdAt: consumedAt
+		}
+	});
+	const unconsumedChallenge = await prisma.callbackOtpChallenge.create({
+		data: {
+			id: randomUUID(),
+			callbackId: callback.id,
+			ownerId: callback.userId,
+			publishedVersion: 1,
+			channel: 'EMAIL',
+			destinationHash: hash(`retention-unused-destination:${runId}`),
+			ipHash: hash(`retention-unused-ip:${runId}`),
+			codeHash: hash(`retention-unused-code:${runId}`),
+			expiresAt,
+			resendAvailableAt,
+			sentAt,
+			createdAt: old,
+			updatedAt: sentAt
+		}
+	});
+	return { callback, consumedChallenge, unconsumedChallenge, lead };
 }
 
 async function createOutbox(status, timestamp, overrides = {}) {
@@ -401,6 +482,31 @@ async function assertOutboxRetention(fixture) {
 			fixture.quarantined.id,
 			fixture.processing.id
 		])
+	);
+}
+
+async function assertCallbackOtpRetention(fixture) {
+	const consumed = await prisma.callbackOtpChallenge.findUniqueOrThrow({
+		where: { id: fixture.consumedChallenge.id }
+	});
+	assert.equal(consumed.destinationHash, '0'.repeat(64));
+	assert.equal(consumed.ipHash, '1'.repeat(64));
+	assert.equal(consumed.codeHash, '2'.repeat(64));
+	assert.equal(consumed.callbackId, fixture.callback.id);
+	assert.equal(consumed.ownerId, fixture.callback.userId);
+	assert.equal(consumed.publishedVersion, 1);
+	assert.equal(consumed.channel, 'EMAIL');
+	assert.ok(consumed.consumedAt);
+	const lead = await prisma.callbackLead.findUniqueOrThrow({
+		where: { id: fixture.lead.id }
+	});
+	assert.equal(lead.verificationMode, 'EMAIL');
+	assert.equal(lead.verificationChallengeId, consumed.id);
+	assert.equal(
+		await prisma.callbackOtpChallenge.findUnique({
+			where: { id: fixture.unconsumedChallenge.id }
+		}),
+		null
 	);
 }
 
@@ -666,6 +772,9 @@ async function cleanupFixture() {
 		}),
 		prisma.widgetsOutboxEvent.deleteMany({
 			where: { id: { in: tracked.outbox } }
+		}),
+		prisma.callback.deleteMany({
+			where: { id: { in: tracked.callbacks } }
 		})
 	]);
 }

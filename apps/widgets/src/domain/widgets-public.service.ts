@@ -6,9 +6,17 @@ import {
 	Injectable,
 	NotFoundException
 } from '@nestjs/common';
-import { EntitlementPlan } from '@prisma/widgets-client';
+import {
+	CallbackOtpChannel,
+	CallbackVerificationMode,
+	EntitlementPlan
+} from '@prisma/widgets-client';
 import { createHash } from 'node:crypto';
 import { WidgetsCloudflareTurnstileService } from '../ai/widgets-cloudflare-turnstile.service';
+import {
+	callbackOtpChannel,
+	WidgetsCallbackOtpService
+} from '../callback/widgets-callback-otp.service';
 import { WidgetsDomainEventsService } from '../messaging/widgets-domain-events.service';
 import { WidgetsQuotaService } from '../quota/widgets-quota.service';
 import { normalizeWidgetConfig } from './widgets-config-normalizer';
@@ -19,8 +27,15 @@ import {
 	isExactHostnameAllowed
 } from './widgets-domain.util';
 import { WidgetsReportingService } from './widgets-reporting.service';
-import type { WidgetLeadInput } from './widgets-type-adapter';
-import { dataType } from './widgets-type-adapter';
+import type {
+	PreparedWidgetLead,
+	WidgetLeadInput
+} from './widgets-type-adapter';
+import {
+	dataType,
+	normalizeEmail,
+	normalizePhone
+} from './widgets-type-adapter';
 import { WidgetsTypeRegistryService } from './widgets-type-registry.service';
 
 interface PublicConfigRateEntry {
@@ -50,7 +65,8 @@ export class WidgetsPublicService {
 		private readonly events: WidgetsDomainEventsService,
 		private readonly reporting: WidgetsReportingService,
 		private readonly registry: WidgetsTypeRegistryService,
-		private readonly turnstile: WidgetsCloudflareTurnstileService
+		private readonly turnstile: WidgetsCloudflareTurnstileService,
+		private readonly callbackOtp: WidgetsCallbackOtpService
 	) {}
 
 	async config(
@@ -188,6 +204,75 @@ export class WidgetsPublicService {
 		return createHash('sha256').update(value).digest('base64url');
 	}
 
+	async startCallbackVerification(
+		publicKey: string,
+		input: { phone?: string; email?: string },
+		ip: string,
+		requestDomain: string | null,
+		directPageAccessAllowed: boolean
+	) {
+		const callback = await this.repository.findByPublicKey(
+			WidgetType.CALLBACK,
+			publicKey
+		);
+		if (!callback) throw new NotFoundException('Виджет не найден');
+		this.assertSubmissionAvailable(
+			callback,
+			requestDomain,
+			directPageAccessAllowed
+		);
+		const config = asJsonObject(
+			normalizeWidgetConfig(WidgetType.CALLBACK, callback.config)
+		);
+		const mode = this.callbackVerificationMode(config);
+		const channel = callbackOtpChannel(mode);
+		if (!channel) {
+			throw new BadRequestException(
+				'Проверка для этого виджета отключена'
+			);
+		}
+		let destination: string | undefined;
+		if (channel === CallbackOtpChannel.SMS) {
+			if (input.email !== undefined) {
+				throw new BadRequestException(
+					'Для SMS-проверки передавайте только телефон'
+				);
+			}
+			destination = normalizePhone(input.phone);
+			if (!destination) {
+				throw new BadRequestException('Укажите корректный телефон');
+			}
+		} else {
+			if (input.phone !== undefined) {
+				throw new BadRequestException(
+					'Для email-проверки передавайте только email'
+				);
+			}
+			destination = normalizeEmail(input.email);
+			if (!destination) {
+				throw new BadRequestException('Укажите корректный email');
+			}
+		}
+		const snapshot = await this.quota.snapshot(callback.userId);
+		const limit = snapshot.entitlement.maxLeadsPerPeriod;
+		if (
+			snapshot.entitlement.unlimited !== true &&
+			(limit === null || snapshot.counter.leadCount >= limit)
+		) {
+			throw new ForbiddenException(
+				'Лимит заявок исчерпан или подписка неактивна'
+			);
+		}
+		return this.callbackOtp.start({
+			callbackId: callback.id,
+			ownerId: callback.userId,
+			publishedVersion: callback.publishedVersion,
+			channel,
+			destination,
+			ip
+		});
+	}
+
 	async submitLead(
 		type: WidgetType,
 		publicKey: string,
@@ -207,10 +292,23 @@ export class WidgetsPublicService {
 		const adapter = this.registry.for(type);
 		// This deliberately happens before the quota transaction. For NONE the
 		// endpoint must return 400 and must not touch usage or create Outbox rows.
-		adapter.prepareLead(
-			input,
-			asJsonObject(normalizeWidgetConfig(type, initial.config))
+		const initialConfig = asJsonObject(
+			normalizeWidgetConfig(type, initial.config)
 		);
+		const initialPrepared = adapter.prepareLead(input, initialConfig);
+		const initialVerification = this.callbackVerificationIdentity(
+			type,
+			initial,
+			initialConfig,
+			input,
+			initialPrepared
+		);
+		if (initialVerification?.identity) {
+			const replay = await this.callbackOtp.precheckOrReplay(
+				initialVerification.identity
+			);
+			if (replay) return { success: true, lead: replay };
+		}
 
 		let response: Record<string, unknown> | undefined;
 		let limitContext:
@@ -222,7 +320,9 @@ export class WidgetsPublicService {
 		const result = await this.quota.withLeadCreation(
 			initial.userId,
 			{
-				idempotencyKey: `lead-create:${initial.userId}:${initial.id}:${correlationId}`,
+				idempotencyKey: initialVerification?.identity
+					? `lead-create:${initial.userId}:${initial.id}:${initialVerification.identity.challengeId}`
+					: `lead-create:${initial.userId}:${initial.id}:${correlationId}`,
 				correlationId
 			},
 			async transaction => {
@@ -244,6 +344,19 @@ export class WidgetsPublicService {
 				);
 				limitContext = { widget, config };
 				const prepared = adapter.prepareLead(input, config);
+				const verification = this.callbackVerificationIdentity(
+					type,
+					widget,
+					config,
+					input,
+					prepared
+				);
+				if (verification?.identity) {
+					await this.callbackOtp.assertConsumable(
+						transaction,
+						verification.identity
+					);
+				}
 				for (const rule of adapter.duplicateRules(
 					prepared.data,
 					config,
@@ -263,9 +376,22 @@ export class WidgetsPublicService {
 				const lead = await this.repository.createLead(
 					type,
 					widget.id,
-					{ ...prepared.data, ip },
+					{
+						...prepared.data,
+						ip,
+						...(verification && {
+							verificationMode: verification.mode,
+							verificationChallengeId: verification.identity?.challengeId
+						})
+					},
 					transaction
 				);
+				if (verification?.identity) {
+					await this.callbackOtp.consume(
+						transaction,
+						verification.identity
+					);
+				}
 				await this.events.enqueueLeadIntegrations(transaction, {
 					type,
 					widget,
@@ -298,9 +424,88 @@ export class WidgetsPublicService {
 					limit,
 					periodKey
 				});
-			}
+			},
+			initialVerification?.identity
+				? transaction =>
+						this.callbackOtp.findReplayInTransaction(
+							transaction,
+							initialVerification.identity
+						)
+				: undefined
 		);
 		return { success: true, lead: result.value, ...(response || {}) };
+	}
+
+	private callbackVerificationIdentity(
+		type: WidgetType,
+		widget: { id: string; userId: string; publishedVersion: number },
+		config: Record<string, unknown>,
+		input: WidgetLeadInput,
+		prepared: PreparedWidgetLead
+	) {
+		if (type !== WidgetType.CALLBACK) return null;
+		const mode = this.callbackVerificationMode(config);
+		if (
+			mode !== CallbackVerificationMode.EMAIL &&
+			input.email !== undefined
+		) {
+			throw new BadRequestException(
+				'Email разрешён только при подтверждении по email'
+			);
+		}
+		const channel = callbackOtpChannel(mode);
+		if (!channel) {
+			if (input.challengeId !== undefined || input.code !== undefined) {
+				throw new BadRequestException(
+					'Код подтверждения не должен передаваться при отключённой проверке'
+				);
+			}
+			return { mode, identity: null };
+		}
+		if (
+			!input.challengeId ||
+			!input.code ||
+			!/^[0-9]{6}$/.test(input.code)
+		) {
+			throw new BadRequestException(
+				'Введите шестизначный код подтверждения'
+			);
+		}
+		const destination =
+			channel === CallbackOtpChannel.SMS
+				? prepared.data.phone
+				: normalizeEmail(input.email);
+		if (!destination) {
+			throw new BadRequestException(
+				channel === CallbackOtpChannel.SMS
+					? 'Укажите корректный телефон'
+					: 'Укажите корректный email'
+			);
+		}
+		return {
+			mode,
+			identity: {
+				callbackId: widget.id,
+				ownerId: widget.userId,
+				publishedVersion: widget.publishedVersion,
+				channel,
+				challengeId: input.challengeId,
+				code: input.code,
+				destination,
+				payload: {
+					phone: prepared.data.phone || '',
+					timeSlot: prepared.data.timeSlot || '',
+					timezone: prepared.data.timezone || '',
+					url: prepared.data.url ?? null
+				}
+			}
+		};
+	}
+
+	private callbackVerificationMode(
+		config: Record<string, unknown>
+	): CallbackVerificationMode {
+		return config.verificationMode as CallbackVerificationMode;
 	}
 
 	private assertSubmissionAvailable(

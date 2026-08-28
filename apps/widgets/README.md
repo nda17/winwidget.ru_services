@@ -28,6 +28,9 @@ PostgreSQL `widgets`. Браузерные assets виджетов также с
   `/countdown-timers`, `/stop-offers`, `/ai-consultants`, `/calculators`)
 - `/widget-settings/**`, `/widgets/admin/**` и управление ошибками доставки
 - публичные endpoints конфигурации/заявок виджетов и `/widget-events/**`
+- `POST /callback/:key/verification/start` для опционального callback OTP;
+  финальный `/callback/:key/lead` требует challenge и шестизначный код при
+  опубликованном режиме `SMS` или `EMAIL`
 - `GET /ai-consultant/:key/config`, `POST /ai-consultant/:key/session` и
   `POST /ai-consultant/:key/messages`
 - `POST /ai-consultants/:id/test-message` для проверки сохранённого draft
@@ -75,6 +78,23 @@ VPS. Замените все шаблоны и передавайте тольк
 `CLOUDFLARE_TURNSTILE_SITE_KEY` / `CLOUDFLARE_TURNSTILE_SECRET_KEY` и отдельный
 `WIDGETS_AI_SESSION_SECRET`. API token должен иметь Workers AI и Turnstile Sites
 Write, хранится только в production secret env и не передаётся во frontend.
+
+Callback OTP принадлежит Widgets и отправляется синхронно через SMTP или
+SMS Aero. Задайте отдельный `WIDGETS_CALLBACK_OTP_SECRET` длиной не менее 32
+байт, существующие `SMTP_*` и `SMSAERO_*` credentials. Код действует 5 минут,
+допускает не более 5 попыток и никогда не сохраняется открытым. Email нужен
+только для подтверждения: финальная заявка хранит телефон и metadata канала,
+но не email. Отсутствие или сбой одного из провайдеров закрывает только
+соответствующий OTP-вызов; readiness остальных виджетов остаётся доступным.
+
+Опубликованный `verificationMode` фиксирует канал. Start принимает ровно
+`{"phone":"+79991234567"}` для `SMS` либо
+`{"email":"visitor@example.com"}` для `EMAIL` и возвращает
+`challengeId`, `expiresAt`, `resendAvailableAt`, `destinationHint`. При `429`
+клиент использует доступный через CORS заголовок `Retry-After`. Финальная
+заявка передаёт прежние callback-поля плюс `challengeId` и шестизначный `code`;
+для `EMAIL` она также повторяет email только для серверной привязки challenge.
+При `OFF` challenge и code не принимаются.
 
 ```bash
 pnpm install --frozen-lockfile

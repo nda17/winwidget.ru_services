@@ -140,6 +140,53 @@ export class SubmitWidgetLeadDto {
 	answers?: unknown[];
 }
 
+export class CallbackVerificationStartDto {
+	@IsOptional()
+	@IsString()
+	@MaxLength(200)
+	phone?: string;
+
+	@IsOptional()
+	@IsEmail({}, { message: 'Укажите корректный email' })
+	@MaxLength(200)
+	email?: string;
+}
+
+export class SubmitCallbackLeadDto {
+	@IsString()
+	@MaxLength(200)
+	phone: string;
+
+	@IsOptional()
+	@IsEmail({}, { message: 'Укажите корректный email' })
+	@MaxLength(200)
+	email?: string;
+
+	@IsOptional()
+	@IsString()
+	@MaxLength(100)
+	timeSlot?: string;
+
+	@IsOptional()
+	@IsString()
+	@MaxLength(100)
+	timezone?: string;
+
+	@IsOptional()
+	@IsString()
+	@MaxLength(500)
+	url?: string;
+
+	@IsOptional()
+	@IsUUID('4')
+	challengeId?: string;
+
+	@IsOptional()
+	@IsString()
+	@Matches(/^\d{6}$/, { message: 'Код должен содержать 6 цифр' })
+	code?: string;
+}
+
 export class AiConsultantHistoryMessageDto {
 	@IsIn(['user', 'assistant'])
 	role: 'user' | 'assistant';

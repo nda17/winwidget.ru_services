@@ -40,6 +40,9 @@ importers:
       express:
         specifier: ^4.22.1
         version: 4.22.2
+      nodemailer:
+        specifier: 9.0.3
+        version: 9.0.3
       prisma:
         specifier: 5.22.0
         version: 5.22.0
@@ -71,6 +74,9 @@ importers:
       '@types/node':
         specifier: ^20.17.12
         version: 20.19.43
+      '@types/nodemailer':
+        specifier: ^6.4.17
+        version: 6.4.24
       '@typescript-eslint/eslint-plugin':
         specifier: ^6.21.0
         version: 6.21.0(@typescript-eslint/parser@6.21.0(eslint@8.57.1)(typescript@5.9.3))(eslint@8.57.1)(typescript@5.9.3)
@@ -117,6 +123,9 @@ packages:
         integrity: sha512-O5otOc1c6UZh5HsHAaPdYBcUUR9HL6mtnKqvc8nxN/CKDGUBUpsdh0q8K04Uz/dd1i0TaGyIQuQNqoO7+ad2TQ==
       }
     engines: { node: '>=20.0.0' }
+    deprecated: |-
+      Deprecated due to Document number parsing bug in JSON, see
+        https://github.com/aws/aws-sdk-js-v3/issues/8246. Newer version available.
 
   '@aws-sdk/credential-provider-env@3.972.66':
     resolution:
@@ -1271,6 +1280,12 @@ packages:
     resolution:
       {
         integrity: sha512-6oYBAi5ikg4Pl+kGsoYtawUMBT2zZMCvPNF7pVLnHZfd1zf38DRiWn/gT01RYCdUqkv7Fhr+C9ot4/tb+2sVvA==
+      }
+
+  '@types/nodemailer@6.4.24':
+    resolution:
+      {
+        integrity: sha512-Ww4u0rT9wQNXh4JiQaIwx3QWdcOFXzOjQA2zc+jtFYNmQiT4mIUqcDin51bDFdkzKubFnQCZNK7FIHlPKQ/q9w==
       }
 
   '@types/qs@6.15.1':
@@ -3206,6 +3221,13 @@ packages:
       }
     engines: { node: '>=18' }
 
+  nodemailer@9.0.3:
+    resolution:
+      {
+        integrity: sha512-n+YP+NKwR5zRWa60k3GiQ6Q3B4KXCoAw40dAKeCtYn020iNN74aWK2liXIC3ZEATeGql7we3tE3t8QwhY0eskw==
+      }
+    engines: { node: '>=6.0.0' }
+
   normalize-path@3.0.0:
     resolution:
       {
@@ -5071,6 +5093,10 @@ snapshots:
     dependencies:
       undici-types: 6.21.0
 
+  '@types/nodemailer@6.4.24':
+    dependencies:
+      '@types/node': 20.19.43
+
   '@types/qs@6.15.1': {}
 
   '@types/range-parser@1.2.7': {}
@@ -6480,6 +6506,8 @@ snapshots:
   node-int64@0.4.0: {}
 
   node-releases@2.0.52: {}
+
+  nodemailer@9.0.3: {}
 
   normalize-path@3.0.0: {}
 

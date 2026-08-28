@@ -19,6 +19,8 @@ export interface WidgetLeadInput {
 	actionLabel?: string;
 	actionValue?: string;
 	url?: string;
+	challengeId?: string;
+	code?: string;
 }
 
 export interface PreparedWidgetLead {

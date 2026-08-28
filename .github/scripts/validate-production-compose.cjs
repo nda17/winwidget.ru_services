@@ -39,6 +39,7 @@ const gatewayExample = parseExample('apps/api-gateway/.env.example');
 const notificationDeliveryExample = parseExample(
 	'apps/notification-delivery/.env.example'
 );
+const widgetsExample = parseExample('apps/widgets/.env.example');
 const expected = key => process.env[key] ?? rootExample.get(key);
 
 const composeUnusedLegacyRootExampleKeys = [
@@ -1037,10 +1038,77 @@ assert(
 	String(widgetsEnvironment.WIDGETS_AI_SESSION_SECRET).length >= 32,
 	'Widgets AI session secret must contain at least 32 characters'
 );
+
+const callbackOtpKeys = [
+	'WIDGETS_CALLBACK_OTP_SECRET',
+	'WIDGETS_CALLBACK_OTP_PROVIDER_TIMEOUT_MS',
+	'SMTP_SERVER',
+	'SMTP_PORT',
+	'SMTP_SECURE',
+	'SMTP_LOGIN',
+	'SMTP_PASSWORD',
+	'SMTP_CONNECTION_TIMEOUT_MS',
+	'SMTP_GREETING_TIMEOUT_MS',
+	'SMTP_SOCKET_TIMEOUT_MS',
+	'SMSAERO_EMAIL',
+	'SMSAERO_API_KEY',
+	'SMSAERO_SIGN'
+];
+for (const key of callbackOtpKeys) {
+	assert(rootExample.has(key), '.env.example is missing ' + key);
+	assert(
+		widgetsExample.has(key),
+		'apps/widgets/.env.example is missing ' + key
+	);
+	assert(
+		widgetsEnvironment[key] === expected(key),
+		'Widgets callback OTP environment drifted for ' + key
+	);
+}
+const callbackOtpExampleSecret =
+	'change_me_at_least_32_random_bytes_callback_otp_secret';
+assert(
+	rootExample.get('WIDGETS_CALLBACK_OTP_SECRET') ===
+		callbackOtpExampleSecret &&
+		widgetsExample.get('WIDGETS_CALLBACK_OTP_SECRET') ===
+			callbackOtpExampleSecret,
+	'Widgets callback OTP examples must keep the explicit non-production placeholder'
+);
+assert(
+	String(widgetsEnvironment.WIDGETS_CALLBACK_OTP_SECRET).length >= 32 &&
+		widgetsEnvironment.WIDGETS_CALLBACK_OTP_SECRET !==
+			widgetsEnvironment.WIDGETS_AI_SESSION_SECRET &&
+		widgetsEnvironment.WIDGETS_CALLBACK_OTP_SECRET !==
+			widgetsEnvironment.SMTP_PASSWORD &&
+		widgetsEnvironment.WIDGETS_CALLBACK_OTP_SECRET !==
+			widgetsEnvironment.SMSAERO_API_KEY,
+	'Widgets callback OTP secret must be dedicated and contain at least 32 characters'
+);
+assert(
+	Number.isInteger(
+		Number(widgetsEnvironment.WIDGETS_CALLBACK_OTP_PROVIDER_TIMEOUT_MS)
+	) &&
+		Number(widgetsEnvironment.WIDGETS_CALLBACK_OTP_PROVIDER_TIMEOUT_MS) >=
+			1000 &&
+		Number(widgetsEnvironment.WIDGETS_CALLBACK_OTP_PROVIDER_TIMEOUT_MS) <=
+			60000,
+	'Widgets callback OTP provider timeout is invalid'
+);
+assert(
+	Number.isInteger(Number(widgetsEnvironment.SMTP_PORT)) &&
+		Number(widgetsEnvironment.SMTP_PORT) >= 1 &&
+		Number(widgetsEnvironment.SMTP_PORT) <= 65535,
+	'Widgets callback OTP SMTP port is invalid'
+);
+assert(
+	['true', 'false'].includes(String(widgetsEnvironment.SMTP_SECURE)),
+	'Widgets callback OTP SMTP secure flag is invalid'
+);
 for (const [name, service] of Object.entries(services)) {
 	if (name === 'widgets-service') continue;
 	for (const secretKey of [
 		'WIDGETS_AI_SESSION_SECRET',
+		'WIDGETS_CALLBACK_OTP_SECRET',
 		'CLOUDFLARE_API_TOKEN',
 		'CLOUDFLARE_TURNSTILE_SECRET_KEY'
 	]) {

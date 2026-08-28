@@ -18,6 +18,9 @@ const SHUTDOWN_TIMEOUT_MS = 20_000;
 const OUTBOX_RETENTION_MAX_DAYS = 365;
 const RECEIPT_RETENTION_MAX_DAYS = 730;
 const FAILURE_RETENTION_MAX_DAYS = 365;
+const CALLBACK_OTP_DESTINATION_TOMBSTONE = '0'.repeat(64);
+const CALLBACK_OTP_IP_TOMBSTONE = '1'.repeat(64);
+const CALLBACK_OTP_CODE_TOMBSTONE = '2'.repeat(64);
 
 export const WIDGETS_REDACTED_FAILURE_DETAIL =
 	'[redacted after retention]';
@@ -29,6 +32,9 @@ export interface WidgetsRetentionConfig {
 }
 
 export interface WidgetsRetentionResult {
+	callbackOtpChallengesDeleted: number;
+	callbackOtpChallengesRedacted: number;
+	callbackOtpRateBucketsDeleted: number;
 	publishedOutboxDeleted: number;
 	credentialSnapshotsDeleted: number;
 	integrationReceiptsCompacted: number;
@@ -39,6 +45,7 @@ export interface WidgetsRetentionResult {
 
 export interface WidgetsRetentionCleanupInput extends WidgetsRetentionConfig {
 	cleanupOutbox: boolean;
+	cleanupOtpState?: boolean;
 	cleanupWorkerState: boolean;
 	now?: Date;
 	batchSize?: number;
@@ -46,6 +53,9 @@ export interface WidgetsRetentionCleanupInput extends WidgetsRetentionConfig {
 }
 
 const emptyResult = (): WidgetsRetentionResult => ({
+	callbackOtpChallengesDeleted: 0,
+	callbackOtpChallengesRedacted: 0,
+	callbackOtpRateBucketsDeleted: 0,
 	publishedOutboxDeleted: 0,
 	credentialSnapshotsDeleted: 0,
 	integrationReceiptsCompacted: 0,
@@ -113,6 +123,90 @@ export async function runWidgetsRetentionCleanup(
 						DELETE FROM "widgets"."outbox_events" AS event
 						USING expired
 						WHERE event."id" = expired."id"
+					`
+				)
+		);
+	}
+
+	if (input.cleanupOtpState) {
+		result.callbackOtpChallengesDeleted = await executeBatches(
+			maxBatches,
+			batchSize,
+			() =>
+				prisma.$executeRaw(
+					Prisma.sql`
+						WITH expired AS (
+							SELECT challenge."id"
+							FROM "widgets"."callback_otp_challenges" AS challenge
+							WHERE challenge."consumed_at" IS NULL
+								AND (
+									challenge."expires_at" < ${now}
+									OR challenge."revoked_at" < ${now}
+									OR challenge."failed_at" < ${now}
+								)
+								AND NOT EXISTS (
+									SELECT 1
+									FROM "widgets"."callback_leads" AS lead
+									WHERE lead."verification_challenge_id" = challenge."id"
+								)
+							ORDER BY challenge."expires_at" ASC, challenge."id" ASC
+							LIMIT ${batchSize}
+							FOR UPDATE OF challenge SKIP LOCKED
+						)
+						DELETE FROM "widgets"."callback_otp_challenges" AS challenge
+						USING expired
+						WHERE challenge."id" = expired."id"
+					`
+				)
+		);
+		result.callbackOtpChallengesRedacted = await executeBatches(
+			maxBatches,
+			batchSize,
+			() =>
+				prisma.$executeRaw(
+					Prisma.sql`
+						WITH expired AS (
+							SELECT challenge."id"
+							FROM "widgets"."callback_otp_challenges" AS challenge
+							WHERE challenge."consumed_at" IS NOT NULL
+								AND challenge."expires_at" <= ${now}
+								AND (
+									challenge."destination_hash" <> ${CALLBACK_OTP_DESTINATION_TOMBSTONE}
+									OR challenge."ip_hash" <> ${CALLBACK_OTP_IP_TOMBSTONE}
+									OR challenge."code_hash" <> ${CALLBACK_OTP_CODE_TOMBSTONE}
+								)
+							ORDER BY challenge."expires_at" ASC, challenge."id" ASC
+							LIMIT ${batchSize}
+							FOR UPDATE OF challenge SKIP LOCKED
+						)
+						UPDATE "widgets"."callback_otp_challenges" AS challenge
+						SET
+							"destination_hash" = ${CALLBACK_OTP_DESTINATION_TOMBSTONE},
+							"ip_hash" = ${CALLBACK_OTP_IP_TOMBSTONE},
+							"code_hash" = ${CALLBACK_OTP_CODE_TOMBSTONE},
+							"updated_at" = ${now}
+						FROM expired
+						WHERE challenge."id" = expired."id"
+					`
+				)
+		);
+		result.callbackOtpRateBucketsDeleted = await executeBatches(
+			maxBatches,
+			batchSize,
+			() =>
+				prisma.$executeRaw(
+					Prisma.sql`
+						WITH expired AS (
+							SELECT bucket."id"
+							FROM "widgets"."callback_otp_rate_buckets" AS bucket
+							WHERE bucket."window_ends_at" < ${now}
+							ORDER BY bucket."window_ends_at" ASC, bucket."id" ASC
+							LIMIT ${batchSize}
+							FOR UPDATE OF bucket SKIP LOCKED
+						)
+						DELETE FROM "widgets"."callback_otp_rate_buckets" AS bucket
+						USING expired
+						WHERE bucket."id" = expired."id"
 					`
 				)
 		);
@@ -428,6 +522,7 @@ export class WidgetsRetentionService
 			const result = await runWidgetsRetentionCleanup(this.prisma, {
 				...this.retention,
 				cleanupOutbox: this.runtime.publisherEnabled,
+				cleanupOtpState: this.runtime.publisherEnabled,
 				cleanupWorkerState: this.runtime.workerEnabled
 			});
 			this.lastSuccessfulCleanupAt = new Date();
@@ -444,7 +539,7 @@ export class WidgetsRetentionService
 			);
 			if (total) {
 				this.logger.log(
-					`Widgets retention cleanup outbox=${result.publishedOutboxDeleted} snapshots=${result.credentialSnapshotsDeleted} integrationReceipts=${result.integrationReceiptsCompacted} consumerReceipts=${result.consumerReceiptsCompacted} integrationFailures=${result.integrationFailureDetailsRedacted} consumerFailures=${result.consumerFailureDetailsRedacted}`
+					`Widgets retention cleanup callbackOtpChallenges=${result.callbackOtpChallengesDeleted} callbackOtpChallengesRedacted=${result.callbackOtpChallengesRedacted} callbackOtpRates=${result.callbackOtpRateBucketsDeleted} outbox=${result.publishedOutboxDeleted} snapshots=${result.credentialSnapshotsDeleted} integrationReceipts=${result.integrationReceiptsCompacted} consumerReceipts=${result.consumerReceiptsCompacted} integrationFailures=${result.integrationFailureDetailsRedacted} consumerFailures=${result.consumerFailureDetailsRedacted}`
 				);
 			}
 		} catch (error) {

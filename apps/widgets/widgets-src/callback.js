@@ -1,13 +1,24 @@
 (function () {
 	'use strict';
 
-	if (window.__wincallbackScriptRunning) return;
-	window.__wincallbackScriptRunning = true;
-
 	var SYSTEM_FONT_STACK =
 		"system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif";
 
 	var _currentScript = document.currentScript;
+	var KEY =
+		(_currentScript && _currentScript.getAttribute('data-key')) || '';
+	if (!KEY) {
+		console.warn('[wincallback] Missing required data-key attribute.');
+		return;
+	}
+	if (window.__wincallbackScriptRunning) {
+		console.warn(
+			'[wincallback] Duplicate script ignored; only one callback widget instance is supported per page.'
+		);
+		return;
+	}
+	var INSTANCE_TOKEN = {};
+	window.__wincallbackScriptRunning = INSTANCE_TOKEN;
 
 	var API_BASE = (function () {
 		try {
@@ -22,11 +33,7 @@
 		}
 	})();
 
-	var KEY =
-		(_currentScript && _currentScript.getAttribute('data-key')) || '';
-	if (!KEY) return;
-
-	var RUNTIME_VERSION = '2026.08';
+	var RUNTIME_VERSION = '2026.08.28-callback-otp';
 	var PUBLISHED_VERSION = 0;
 	var telemetryEventsSent = Object.create(null);
 
@@ -158,6 +165,54 @@
 		return '';
 	}
 
+	function readResponseJson(response) {
+		return response.text().then(function (text) {
+			if (!text) return null;
+			try {
+				return JSON.parse(text);
+			} catch (e) {
+				return null;
+			}
+		});
+	}
+
+	function getResponseMessage(data, fallback) {
+		if (data && typeof data.message === 'string' && data.message.trim()) {
+			return data.message.trim();
+		}
+		if (data && Array.isArray(data.message) && data.message.length) {
+			return data.message.join('. ');
+		}
+		return fallback;
+	}
+
+	function fetchJson(url, options) {
+		return fetch(url, getWidgetFetchOptions(options)).then(
+			function (response) {
+				return readResponseJson(response).then(function (data) {
+					if (!response.ok) {
+						var error = new Error(
+							getResponseMessage(data, 'Не удалось выполнить запрос')
+						);
+						error.status = response.status;
+						error.data = data;
+						var retryAfterSeconds = Number(
+							response.headers.get('Retry-After')
+						);
+						if (
+							Number.isFinite(retryAfterSeconds) &&
+							retryAfterSeconds > 0
+						) {
+							error.retryAfterSeconds = Math.ceil(retryAfterSeconds);
+						}
+						throw error;
+					}
+					return data;
+				});
+			}
+		);
+	}
+
 	// ─── Phone mask ───────────────────────────────────────────────────────────
 
 	var MASKS = {
@@ -233,6 +288,92 @@
 	var isOpen = false;
 	var submitted = false;
 	var previousBodyStyles = null;
+	var destroyed = false;
+	var pendingOpen = false;
+	var configRequestController = null;
+	var formRequestController = null;
+	var activePhoneController = null;
+	var resendTimerId = null;
+	var bubbleShowTimerId = null;
+	var autoOpenTimerId = null;
+	var buttonAnimation = null;
+	var managedTimeoutIds = [];
+	var managedAnimationFrameIds = [];
+	var publicApi = null;
+
+	function setManagedTimeout(callback, delay) {
+		var timeoutId = window.setTimeout(function () {
+			managedTimeoutIds = managedTimeoutIds.filter(function (item) {
+				return item !== timeoutId;
+			});
+			if (!destroyed) callback();
+		}, delay);
+		managedTimeoutIds.push(timeoutId);
+		return timeoutId;
+	}
+
+	function clearManagedTimeout(timeoutId) {
+		if (timeoutId === null || typeof timeoutId === 'undefined') return;
+		window.clearTimeout(timeoutId);
+		managedTimeoutIds = managedTimeoutIds.filter(function (item) {
+			return item !== timeoutId;
+		});
+	}
+
+	function requestManagedAnimationFrame(callback) {
+		var frameId = window.requestAnimationFrame(function () {
+			managedAnimationFrameIds = managedAnimationFrameIds.filter(
+				function (item) {
+					return item !== frameId;
+				}
+			);
+			if (!destroyed) callback();
+		});
+		managedAnimationFrameIds.push(frameId);
+		return frameId;
+	}
+
+	function clearManagedAsyncWork() {
+		managedTimeoutIds.forEach(function (timeoutId) {
+			window.clearTimeout(timeoutId);
+		});
+		managedTimeoutIds = [];
+		managedAnimationFrameIds.forEach(function (frameId) {
+			window.cancelAnimationFrame(frameId);
+		});
+		managedAnimationFrameIds = [];
+		resendTimerId = null;
+		bubbleShowTimerId = null;
+		autoOpenTimerId = null;
+	}
+
+	function abortController(controller) {
+		if (controller && typeof controller.abort === 'function') {
+			try {
+				controller.abort();
+			} catch (e) {}
+		}
+	}
+
+	function createRequestController() {
+		return typeof AbortController === 'function'
+			? new AbortController()
+			: null;
+	}
+
+	function disposeFormState() {
+		if (
+			activePhoneController &&
+			typeof activePhoneController.destroy === 'function'
+		) {
+			activePhoneController.destroy();
+		}
+		activePhoneController = null;
+		abortController(formRequestController);
+		formRequestController = null;
+		clearManagedTimeout(resendTimerId);
+		resendTimerId = null;
+	}
 
 	function firePixelEvent(goalName) {
 		if (cfg && cfg.yandexMetrikaId && typeof window.ym === 'function') {
@@ -366,14 +507,11 @@
 		cbBtn.style.animation = 'none';
 	}
 
-	setTimeout(startButtonAnimation, 4000);
-
-	window.addEventListener(
-		'scroll',
-		function () {
-			if (scrollTriggered) return;
-			scrollTriggered = true;
-			cbBtn.animate(
+	function handleWindowScroll() {
+		if (scrollTriggered || destroyed || !canShowLauncher()) return;
+		scrollTriggered = true;
+		if (typeof cbBtn.animate === 'function') {
+			buttonAnimation = cbBtn.animate(
 				[
 					{ transform: 'translateY(0) rotate(0deg)' },
 					{ transform: 'translateY(-250px) rotate(-6deg)' },
@@ -384,10 +522,11 @@
 					easing: 'cubic-bezier(.34,1.56,.64,1)'
 				}
 			);
-			startButtonAnimation();
-		},
-		{ passive: true }
-	);
+		}
+		startButtonAnimation();
+	}
+
+	window.addEventListener('scroll', handleWindowScroll, { passive: true });
 
 	// ─── Modal ────────────────────────────────────────────────────────────────
 
@@ -458,7 +597,7 @@
 		input.classList.remove('wcb-shake');
 		void input.offsetWidth;
 		input.classList.add('wcb-shake');
-		setTimeout(function () {
+		setManagedTimeout(function () {
 			input.classList.remove('wcb-shake');
 		}, 450);
 	}
@@ -532,6 +671,7 @@
 	}
 
 	function buildForm() {
+		disposeFormState();
 		modal.innerHTML = '';
 
 		var closeBtn = el(
@@ -560,6 +700,7 @@
 		var accentColor = cfg.color || '#4705fb';
 		var btnColor = cfg.buttonColor || accentColor;
 		var privacyUrl = getSafeExternalUrl(cfg.privacyUrl);
+		var verificationMode = cfg.verificationMode;
 
 		if (cfg.title) {
 			var titleEl = el('h2', {
@@ -703,6 +844,122 @@
 			modal.appendChild(timeWrap);
 		}
 
+		// ── Optional email verification contact ─────────────────────────────────
+
+		var emailInput = null;
+		var emailErrText = null;
+		if (verificationMode === 'EMAIL') {
+			var emailWrap = el('div', { marginBottom: '12px' });
+			var emailLabel = el('label', {
+				display: 'block',
+				fontSize: '12px',
+				color: '#888',
+				marginBottom: '4px',
+				fontWeight: '500'
+			});
+			emailLabel.textContent = 'Email для получения кода';
+			emailInput = document.createElement('input');
+			emailInput.type = 'email';
+			emailInput.autocomplete = 'email';
+			emailInput.inputMode = 'email';
+			emailInput.placeholder = 'name@example.com';
+			css(emailInput, {
+				width: '100%',
+				boxSizing: 'border-box',
+				padding: '12px 14px',
+				fontSize: '16px',
+				border: '1.5px solid #e0d6f0',
+				borderRadius: '12px',
+				outline: 'none',
+				fontFamily: 'inherit',
+				transition: 'border-color 0.2s, box-shadow 0.2s'
+			});
+			emailErrText = document.createElement('div');
+			emailErrText.className = 'wcb-err-text';
+			emailErrText.textContent = 'Введите корректный email';
+			emailInput.addEventListener('focus', function () {
+				if (!emailInput.classList.contains('wcb-field-err')) {
+					emailInput.style.borderColor = accentColor;
+					emailInput.style.boxShadow = '0 0 0 3px ' + accentColor + '22';
+				}
+			});
+			emailInput.addEventListener('blur', function () {
+				if (!emailInput.classList.contains('wcb-field-err')) {
+					emailInput.style.borderColor = '#e0d6f0';
+					emailInput.style.boxShadow = 'none';
+				}
+			});
+			emailWrap.appendChild(emailLabel);
+			emailWrap.appendChild(emailInput);
+			emailWrap.appendChild(emailErrText);
+			modal.appendChild(emailWrap);
+		}
+
+		// ── OTP code ─────────────────────────────────────────────────────────────
+
+		var codeWrap = el('div', {
+			display: 'none',
+			marginBottom: '12px'
+		});
+		var codeLabel = el('label', {
+			display: 'block',
+			fontSize: '12px',
+			color: '#888',
+			marginBottom: '4px',
+			fontWeight: '500'
+		});
+		codeLabel.textContent = 'Код подтверждения';
+		var destinationHint = el('div', {
+			fontSize: '12px',
+			color: '#6b6378',
+			lineHeight: '1.4',
+			marginBottom: '8px'
+		});
+		var codeInput = document.createElement('input');
+		codeInput.type = 'text';
+		codeInput.autocomplete = 'one-time-code';
+		codeInput.inputMode = 'numeric';
+		codeInput.pattern = '[0-9]*';
+		codeInput.maxLength = 6;
+		codeInput.placeholder = '000000';
+		css(codeInput, {
+			width: '100%',
+			boxSizing: 'border-box',
+			padding: '12px 14px',
+			fontSize: '20px',
+			fontWeight: '700',
+			letterSpacing: '0.2em',
+			textAlign: 'center',
+			border: '1.5px solid #e0d6f0',
+			borderRadius: '12px',
+			outline: 'none',
+			fontFamily: 'inherit',
+			transition: 'border-color 0.2s, box-shadow 0.2s'
+		});
+		var codeErrText = document.createElement('div');
+		codeErrText.className = 'wcb-err-text';
+		codeErrText.textContent = 'Введите шестизначный код';
+		var resendBtn = el('button', {
+			display: 'block',
+			margin: '8px auto 0',
+			padding: '4px 8px',
+			border: 'none',
+			background: 'transparent',
+			color: accentColor,
+			fontSize: '12px',
+			fontWeight: '600',
+			cursor: 'pointer',
+			fontFamily: 'inherit'
+		});
+		resendBtn.type = 'button';
+		resendBtn.textContent = 'Отправить код ещё раз';
+		codeWrap.appendChild(codeLabel);
+		codeWrap.appendChild(destinationHint);
+		codeWrap.appendChild(codeInput);
+		codeWrap.appendChild(codeErrText);
+		codeWrap.appendChild(resendBtn);
+		if (verificationMode !== 'OFF') modal.appendChild(codeWrap);
+
 		// ── Submit button ────────────────────────────────────────────────────────
 
 		var submitBtn = el('button', {
@@ -720,95 +977,466 @@
 			transition: 'opacity 0.2s, transform 0.15s',
 			opacity: '0.5'
 		});
-		submitBtn.textContent = cfg.submitButtonText || 'Заказать звонок';
+		submitBtn.type = 'button';
 		var submitError = document.createElement('div');
 		submitError.className = 'wcb-err-text';
 		submitError.style.textAlign = 'center';
 		submitError.style.marginBottom = '12px';
+		var state = {
+			phase: 'CONTACT',
+			challengeId: '',
+			contact: '',
+			expiresAt: 0,
+			resendAvailableAt: 0,
+			destinationHint: ''
+		};
+
+		function getPhone() {
+			return phoneController ? phoneController.getNumber() : null;
+		}
+
+		function getEmail() {
+			return emailInput ? emailInput.value.trim() : '';
+		}
+
+		function isEmailValid() {
+			return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(getEmail());
+		}
+
+		function getVerificationContact() {
+			return verificationMode === 'SMS' ? getPhone() || '' : getEmail();
+		}
+
+		function setFieldDisabled(disabled) {
+			phoneInput.disabled = disabled;
+			if (timeSelect) timeSelect.disabled = disabled;
+			if (emailInput) emailInput.disabled = disabled;
+			codeInput.disabled = disabled;
+		}
+
+		function clearEmailErr() {
+			if (!emailInput || !emailErrText) return;
+			emailInput.classList.remove('wcb-field-err');
+			emailErrText.classList.remove('wcb-err-show');
+		}
+
+		function showEmailErr() {
+			if (!emailInput || !emailErrText) return;
+			emailInput.classList.add('wcb-field-err');
+			emailErrText.classList.add('wcb-err-show');
+			shakeInput(emailInput);
+			emailInput.focus();
+		}
+
+		function clearCodeErr() {
+			codeInput.classList.remove('wcb-field-err');
+			codeErrText.classList.remove('wcb-err-show');
+		}
+
+		function showCodeErr(message) {
+			codeErrText.textContent = message || 'Введите шестизначный код';
+			codeInput.classList.add('wcb-field-err');
+			codeErrText.classList.add('wcb-err-show');
+			shakeInput(codeInput);
+			codeInput.focus();
+		}
+
+		function showSubmitError(message) {
+			submitError.textContent = message;
+			submitError.classList.add('wcb-err-show');
+		}
+
+		function clearSubmitError() {
+			submitError.classList.remove('wcb-err-show');
+		}
+
+		function canContinue() {
+			if (!phoneValid) return false;
+			if (verificationMode === 'EMAIL' && !isEmailValid()) return false;
+			if (state.phase === 'CODE') {
+				return /^\d{6}$/.test(codeInput.value);
+			}
+			return true;
+		}
+
+		function syncSubmitButton() {
+			var busy =
+				state.phase === 'STARTING' || state.phase === 'SUBMITTING';
+			var retryRemainingSeconds =
+				state.phase === 'CONTACT'
+					? Math.max(
+							0,
+							Math.ceil((state.resendAvailableAt - Date.now()) / 1000)
+						)
+					: 0;
+			var coolingDown = retryRemainingSeconds > 0;
+			submitBtn.disabled = busy || coolingDown;
+			setFieldDisabled(busy);
+			if (state.phase === 'STARTING') {
+				submitBtn.textContent = 'Отправляем код...';
+			} else if (state.phase === 'SUBMITTING') {
+				submitBtn.textContent = 'Отправляем...';
+			} else if (state.phase === 'CODE') {
+				submitBtn.textContent = 'Подтвердить и отправить';
+			} else if (coolingDown) {
+				submitBtn.textContent =
+					'Повторить через ' + retryRemainingSeconds + ' с';
+			} else if (verificationMode === 'OFF') {
+				submitBtn.textContent = cfg.submitButtonText || 'Заказать звонок';
+			} else {
+				submitBtn.textContent = 'Получить код';
+			}
+			submitBtn.style.opacity =
+				busy || coolingDown || !canContinue() ? '0.5' : '1';
+		}
+
+		function resetChallenge(message) {
+			state.phase = 'CONTACT';
+			state.challengeId = '';
+			state.contact = '';
+			state.expiresAt = 0;
+			state.resendAvailableAt = 0;
+			state.destinationHint = '';
+			codeInput.value = '';
+			codeWrap.style.display = 'none';
+			clearCodeErr();
+			clearManagedTimeout(resendTimerId);
+			resendTimerId = null;
+			if (message) showSubmitError(message);
+			syncSubmitButton();
+		}
+
+		function invalidateChallengeIfContactChanged() {
+			if (
+				state.phase === 'CODE' &&
+				getVerificationContact() !== state.contact
+			) {
+				resetChallenge('Контакт изменён. Получите новый код.');
+			}
+		}
+
+		function updateResendCountdown() {
+			clearManagedTimeout(resendTimerId);
+			resendTimerId = null;
+			if (state.phase !== 'CODE' && state.phase !== 'CONTACT') return;
+			var remainingSeconds = Math.max(
+				0,
+				Math.ceil((state.resendAvailableAt - Date.now()) / 1000)
+			);
+			if (state.phase === 'CODE') {
+				resendBtn.disabled = remainingSeconds > 0;
+				resendBtn.style.opacity = remainingSeconds > 0 ? '0.55' : '1';
+				resendBtn.style.cursor =
+					remainingSeconds > 0 ? 'default' : 'pointer';
+				resendBtn.textContent = remainingSeconds
+					? 'Повторить через ' + remainingSeconds + ' с'
+					: 'Отправить код ещё раз';
+			} else {
+				syncSubmitButton();
+			}
+			if (remainingSeconds > 0) {
+				resendTimerId = setManagedTimeout(updateResendCountdown, 1000);
+			}
+		}
+
+		function validateContact() {
+			if (!phoneValid) {
+				showPhoneErr();
+				return false;
+			}
+			if (verificationMode === 'EMAIL' && !isEmailValid()) {
+				showEmailErr();
+				return false;
+			}
+			return true;
+		}
+
+		function finishFormRequest(controller) {
+			if (formRequestController === controller) {
+				formRequestController = null;
+			}
+		}
+
+		function startVerification() {
+			if (state.phase === 'STARTING' || state.phase === 'SUBMITTING') {
+				return;
+			}
+			if (state.resendAvailableAt > Date.now()) {
+				updateResendCountdown();
+				return;
+			}
+			clearSubmitError();
+			clearEmailErr();
+			if (!validateContact()) return;
+
+			var wasResend = state.phase === 'CODE';
+			var previousState = {
+				challengeId: state.challengeId,
+				contact: state.contact,
+				expiresAt: state.expiresAt,
+				resendAvailableAt: state.resendAvailableAt,
+				destinationHint: state.destinationHint
+			};
+			state.phase = 'STARTING';
+			syncSubmitButton();
+			var payload =
+				verificationMode === 'SMS'
+					? { phone: getPhone() }
+					: { email: getEmail() };
+			var requestContact = getVerificationContact();
+			var controller = createRequestController();
+			formRequestController = controller;
+
+			fetchJson(
+				API_BASE +
+					'/callback/' +
+					encodeURIComponent(KEY) +
+					'/verification/start',
+				{
+					method: 'POST',
+					headers: { 'Content-Type': 'application/json' },
+					body: JSON.stringify(payload),
+					signal: controller ? controller.signal : undefined
+				}
+			)
+				.then(function (data) {
+					if (destroyed) return;
+					var expiresAt = Date.parse(data && data.expiresAt);
+					var resendAvailableAt = Date.parse(
+						data && data.resendAvailableAt
+					);
+					if (
+						!data ||
+						typeof data.challengeId !== 'string' ||
+						!data.challengeId ||
+						!Number.isFinite(expiresAt) ||
+						expiresAt <= Date.now() ||
+						!Number.isFinite(resendAvailableAt) ||
+						typeof data.destinationHint !== 'string'
+					) {
+						throw new Error('Сервис проверки вернул некорректный ответ');
+					}
+					state.phase = 'CODE';
+					state.challengeId = data.challengeId;
+					state.contact = requestContact;
+					state.expiresAt = expiresAt;
+					state.resendAvailableAt = resendAvailableAt;
+					state.destinationHint = data.destinationHint;
+					codeInput.value = '';
+					destinationHint.textContent =
+						'Код отправлен: ' + data.destinationHint;
+					codeWrap.style.display = 'block';
+					updateResendCountdown();
+					syncSubmitButton();
+					codeInput.focus();
+				})
+				.catch(function (error) {
+					if (destroyed || (error && error.name === 'AbortError')) return;
+					var retryAfterSeconds =
+						error &&
+						error.status === 429 &&
+						Number.isFinite(error.retryAfterSeconds) &&
+						error.retryAfterSeconds > 0
+							? error.retryAfterSeconds
+							: 0;
+					if (wasResend && previousState.challengeId) {
+						state.phase = 'CODE';
+						state.challengeId = previousState.challengeId;
+						state.contact = previousState.contact;
+						state.expiresAt = previousState.expiresAt;
+						state.resendAvailableAt = previousState.resendAvailableAt;
+						state.destinationHint = previousState.destinationHint;
+						updateResendCountdown();
+					} else {
+						state.phase = 'CONTACT';
+						state.resendAvailableAt = 0;
+					}
+					if (retryAfterSeconds > 0) {
+						state.resendAvailableAt = Math.max(
+							state.resendAvailableAt,
+							Date.now() + retryAfterSeconds * 1000
+						);
+						updateResendCountdown();
+					}
+					showSubmitError(
+						error && error.message
+							? error.message
+							: 'Не удалось отправить код. Попробуйте ещё раз.'
+					);
+					syncSubmitButton();
+				})
+				.then(function () {
+					finishFormRequest(controller);
+				});
+		}
+
+		function submitLead() {
+			if (state.phase === 'STARTING' || state.phase === 'SUBMITTING') {
+				return;
+			}
+			clearSubmitError();
+			clearCodeErr();
+			if (!validateContact()) return;
+
+			var payload = {
+				phone: getPhone(),
+				timeSlot: timeSelect ? timeSelect.value : '',
+				timezone: '',
+				url: window.location.href
+			};
+			try {
+				payload.timezone =
+					Intl.DateTimeFormat().resolvedOptions().timeZone;
+			} catch (e) {}
+
+			if (verificationMode !== 'OFF') {
+				if (
+					state.phase !== 'CODE' ||
+					!state.challengeId ||
+					getVerificationContact() !== state.contact
+				) {
+					resetChallenge('Контакт изменён. Получите новый код.');
+					return;
+				}
+				if (Date.now() >= state.expiresAt) {
+					resetChallenge('Срок действия кода истёк. Получите новый код.');
+					return;
+				}
+				var code = codeInput.value.replace(/\D/g, '');
+				if (!/^\d{6}$/.test(code)) {
+					showCodeErr('Введите шестизначный код');
+					return;
+				}
+				payload.challengeId = state.challengeId;
+				payload.code = code;
+				if (verificationMode === 'EMAIL') {
+					payload.email = state.contact;
+				}
+			}
+
+			state.phase = 'SUBMITTING';
+			syncSubmitButton();
+			var controller = createRequestController();
+			formRequestController = controller;
+			fetchJson(
+				API_BASE + '/callback/' + encodeURIComponent(KEY) + '/lead',
+				{
+					method: 'POST',
+					headers: { 'Content-Type': 'application/json' },
+					body: JSON.stringify(payload),
+					signal: controller ? controller.signal : undefined
+				}
+			)
+				.then(function (data) {
+					if (
+						!data ||
+						data.success !== true ||
+						!data.lead ||
+						typeof data.lead.id !== 'string' ||
+						!data.lead.id
+					) {
+						throw new Error('Сервис не подтвердил создание заявки');
+					}
+					if (destroyed) return;
+					submitted = true;
+					state.phase = 'DONE';
+					sendTelemetryEvent('COMPLETE');
+					firePixelEvent('wcb_send');
+					buildSuccess();
+				})
+				.catch(function (error) {
+					if (destroyed || (error && error.name === 'AbortError')) return;
+					if (
+						verificationMode !== 'OFF' &&
+						(error.status === 409 || error.status === 410)
+					) {
+						resetChallenge(
+							error.message ||
+								'Код больше недействителен. Получите новый код.'
+						);
+						return;
+					}
+					state.phase = verificationMode === 'OFF' ? 'CONTACT' : 'CODE';
+					showSubmitError(
+						error && error.message
+							? error.message
+							: 'Не удалось отправить заявку. Попробуйте ещё раз.'
+					);
+					if (verificationMode !== 'OFF') {
+						showCodeErr(
+							error && error.message
+								? error.message
+								: 'Проверьте код и попробуйте ещё раз'
+						);
+					}
+					syncSubmitButton();
+				})
+				.then(function () {
+					finishFormRequest(controller);
+				});
+		}
+
 		if (window.winwidgetPhone) {
 			phoneController = window.winwidgetPhone.attach(phoneInput, {
 				placeholder: '+7 999 123-45-67',
 				onChange: function (phone) {
 					phoneValid = Boolean(phone);
-					submitBtn.style.opacity = phoneValid ? '1' : '0.5';
 					clearPhoneErr();
+					invalidateChallengeIfContactChanged();
+					syncSubmitButton();
 				}
 			});
+			activePhoneController = phoneController;
 		}
 
-		submitBtn.addEventListener('mouseenter', function () {
-			if (phoneValid) submitBtn.style.opacity = '0.88';
+		if (emailInput) {
+			emailInput.addEventListener('input', function () {
+				sendTelemetryEvent('START');
+				clearEmailErr();
+				invalidateChallengeIfContactChanged();
+				syncSubmitButton();
+			});
+		}
+		codeInput.addEventListener('focus', function () {
+			if (!codeInput.classList.contains('wcb-field-err')) {
+				codeInput.style.borderColor = accentColor;
+				codeInput.style.boxShadow = '0 0 0 3px ' + accentColor + '22';
+			}
 		});
-		submitBtn.addEventListener('mouseleave', function () {
-			submitBtn.style.opacity = phoneValid ? '1' : '0.5';
+		codeInput.addEventListener('blur', function () {
+			if (!codeInput.classList.contains('wcb-field-err')) {
+				codeInput.style.borderColor = '#e0d6f0';
+				codeInput.style.boxShadow = 'none';
+			}
+		});
+		codeInput.addEventListener('input', function () {
+			codeInput.value = codeInput.value.replace(/\D/g, '').slice(0, 6);
+			clearCodeErr();
+			clearSubmitError();
+			syncSubmitButton();
+		});
+		resendBtn.addEventListener('click', function () {
+			if (!resendBtn.disabled && state.phase === 'CODE') {
+				startVerification();
+			}
 		});
 
-		var isSubmitting = false;
+		submitBtn.addEventListener('mouseenter', function () {
+			if (!submitBtn.disabled && canContinue()) {
+				submitBtn.style.opacity = '0.88';
+			}
+		});
+		submitBtn.addEventListener('mouseleave', syncSubmitButton);
 		submitBtn.addEventListener('click', function () {
 			sendTelemetryEvent('START');
-			if (isSubmitting) return;
-			submitError.classList.remove('wcb-err-show');
-			if (!phoneValid) {
-				showPhoneErr();
+			if (verificationMode !== 'OFF' && state.phase !== 'CODE') {
+				startVerification();
 				return;
 			}
-
-			var phone = phoneController ? phoneController.getNumber() : null;
-
-			isSubmitting = true;
-			submitBtn.disabled = true;
-			submitBtn.style.opacity = '0.6';
-			submitBtn.textContent = 'Отправляем...';
-
-			var timezone = '';
-			try {
-				timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-			} catch (e) {}
-
-			fetch(
-				API_BASE + '/callback/' + KEY + '/lead',
-				getWidgetFetchOptions({
-					method: 'POST',
-					headers: { 'Content-Type': 'application/json' },
-					body: JSON.stringify({
-						phone: phone,
-						timeSlot: timeSelect ? timeSelect.value : '',
-						timezone: timezone,
-						url: window.location.href
-					})
-				})
-			)
-				.then(function (r) {
-					return r.json().then(function (data) {
-						if (!r.ok) {
-							throw new Error(
-								data && data.message
-									? data.message
-									: 'Не удалось отправить заявку'
-							);
-						}
-						return data;
-					});
-				})
-				.then(function () {
-					sendTelemetryEvent('COMPLETE');
-					submitted = true;
-					firePixelEvent('wcb_send');
-					buildSuccess();
-				})
-				.catch(function (error) {
-					isSubmitting = false;
-					submitBtn.disabled = false;
-					submitBtn.style.opacity = '1';
-					submitBtn.textContent =
-						cfg.submitButtonText || 'Заказать звонок';
-					submitError.textContent =
-						error && error.message
-							? error.message
-							: 'Не удалось отправить заявку. Попробуйте ещё раз.';
-					submitError.classList.add('wcb-err-show');
-				});
+			submitLead();
 		});
+
+		syncSubmitButton();
 
 		modal.appendChild(submitBtn);
 		modal.appendChild(submitError);
@@ -838,6 +1466,7 @@
 	}
 
 	function buildSuccess() {
+		disposeFormState();
 		modal.innerHTML = '';
 		var accentColor = cfg.color || '#4705fb';
 
@@ -925,18 +1554,46 @@
 		previousBodyStyles = null;
 	}
 
+	function canShowLauncher() {
+		return Boolean(
+			cfg &&
+			publicApi &&
+			publicApi.ready === true &&
+			cfg.launcherEnabled === true &&
+			!AUTO_OPEN &&
+			!(cfg.hasSubmittedByIp && cfg.filterDuplicates)
+		);
+	}
+
+	function syncLauncherVisibility() {
+		if (!canShowLauncher() || isOpen) {
+			cbBtn.style.display = 'none';
+			stopButtonAnimation();
+			return;
+		}
+		cbBtn.style.display = 'flex';
+		cbBtn.style.opacity = '1';
+		cbBtn.style.pointerEvents = 'auto';
+		cbBtn.style.transform = 'scale(1)';
+		startButtonAnimation();
+	}
+
 	function openModal() {
-		if (isOpen) return;
+		if (destroyed || !publicApi || publicApi.ready !== true || !cfg) {
+			if (!destroyed) pendingOpen = true;
+			return false;
+		}
+		if (cfg.hasSubmittedByIp && cfg.filterDuplicates) return false;
+		pendingOpen = false;
+		if (isOpen) return true;
 		isOpen = true;
-		cbBtn.style.opacity = '0';
-		cbBtn.style.pointerEvents = 'none';
-		cbBtn.style.transform = 'scale(0.8)';
+		cbBtn.style.display = 'none';
 		stopButtonAnimation();
 		overlay.style.display = 'flex';
 		lockBody();
 		submitted ? buildSuccess() : buildForm();
-		requestAnimationFrame(function () {
-			requestAnimationFrame(function () {
+		requestManagedAnimationFrame(function () {
+			requestManagedAnimationFrame(function () {
 				modal.style.transform = 'translateY(0)';
 				modal.style.opacity = '1';
 			});
@@ -944,28 +1601,30 @@
 		sendTelemetryEvent('OPEN');
 		fireEvent('open');
 		firePixelEvent('wcb_open');
+		return true;
 	}
 
 	function closeModal() {
-		if (!isOpen) return;
+		pendingOpen = false;
+		if (!isOpen) return false;
 		isOpen = false;
-		cbBtn.style.opacity = '1';
-		cbBtn.style.pointerEvents = 'auto';
-		cbBtn.style.transform = 'scale(1)';
-		startButtonAnimation();
+		syncLauncherVisibility();
 		unlockBody();
 		modal.style.transform = 'translateY(40px)';
 		modal.style.opacity = '0';
-		setTimeout(function () {
+		setManagedTimeout(function () {
 			if (!isOpen) overlay.style.display = 'none';
 		}, 300);
 		fireEvent('close');
+		return true;
 	}
 
 	function fireEvent(name) {
 		try {
 			document.dispatchEvent(
-				new CustomEvent('winwidget:callback:' + name)
+				new CustomEvent('winwidget:callback:' + name, {
+					detail: { key: KEY }
+				})
 			);
 		} catch (e) {}
 	}
@@ -977,19 +1636,33 @@
 		if (!bubble || bubble.style.display === 'none') return;
 		bubble.style.opacity = '0';
 		bubble.style.transform = 'translateY(-50%) scale(0.85)';
-		setTimeout(function () {
+		setManagedTimeout(function () {
 			bubble.style.display = 'none';
 		}, 300);
 	}
 
-	cbBtn.addEventListener('click', function () {
+	function handleLauncherClick() {
 		hideBubble();
 		isOpen ? closeModal() : openModal();
-	});
+	}
 
-	backdrop.addEventListener('click', function () {
+	function handleBackdropClick() {
 		if (!AUTO_OPEN) closeModal();
-	});
+	}
+
+	function handleBubbleCloseClick(event) {
+		event.stopPropagation();
+		hideBubble();
+	}
+
+	function handleBubbleClick(event) {
+		event.stopPropagation();
+		hideBubble();
+		openModal();
+	}
+
+	cbBtn.addEventListener('click', handleLauncherClick);
+	backdrop.addEventListener('click', handleBackdropClick);
 
 	// ─── Init ─────────────────────────────────────────────────────────────────
 
@@ -1007,138 +1680,216 @@
 		document.body.appendChild(el);
 	}
 
-	Promise.all([
-		ensurePhoneHelper(),
-		fetch(
-			API_BASE + '/callback/' + KEY + '/config',
-			getWidgetFetchOptions()
-		)
-	])
-		.then(function (result) {
-			var r = result[1];
-			if (!r.ok) {
-				console.warn(
-					'[wincallback] Widget not found or inactive (' + r.status + ')'
-				);
-				return null;
-			}
-			return r.json();
-		})
-		.then(function (data) {
-			if (data === null) return;
-			if (!data || !data.isActive) {
-				console.warn('[wincallback] Widget is inactive');
-				if (AUTO_OPEN) showDisabledPage();
-				return;
-			}
-
-			cfg = data;
-			updatePublishedVersion(cfg.publishedVersion);
-			if (cfg.hasSubmittedByIp && cfg.filterDuplicates) return;
-
-			sendTelemetryEvent('IMPRESSION');
-
-			var size = cfg.buttonSize || 60;
-
-			positionButton();
-			cbBtn.style.display = AUTO_OPEN ? 'none' : 'flex';
-
-			var iconEl = cbBtn.querySelector('#wcb-btn-icon');
-			if (iconEl) {
-				iconEl.style.width = size + 'px';
-				iconEl.style.height = size + 'px';
-				iconEl.onerror = function () {
-					iconEl.onerror = null;
-					iconEl.src = getWidgetAssetUrl('callback-button.png');
-				};
-				iconEl.src =
-					cfg.buttonImageUrl || getWidgetAssetUrl('callback-button.png');
-			}
-
-			applyColor(cfg.openButtonColor || cfg.color || '#4705fb');
-
-			buttonPulseEnabled = cfg.buttonPulse !== false;
-
-			if (cfg.bgColor) modal.style.background = cfg.bgColor;
-
-			updateBubbleSide(cfg.buttonSide || 'right');
-
-			var bubbleClose = document.getElementById('wcb-bubble-close');
-			var bubbleEl = document.getElementById('wcb-bubble');
-			var bubbleText = document.getElementById('wcb-bubble-text');
-
-			if (bubbleText)
-				bubbleText.textContent =
-					cfg.bubbleText || cfg.title || 'Перезвоним!';
-			if (bubbleEl && cfg.bubbleEnabled === false) {
-				bubbleEl.style.display = 'none';
-			}
-
-			if (bubbleClose) {
-				bubbleClose.addEventListener('click', function (e) {
-					e.stopPropagation();
-					hideBubble();
-				});
-			}
-
-			if (bubbleEl) {
-				bubbleEl.addEventListener('click', function (e) {
-					e.stopPropagation();
-					hideBubble();
-					openModal();
-				});
-			}
-
-			if (!AUTO_OPEN && cfg.bubbleEnabled !== false) {
-				setTimeout(function () {
-					var b = document.getElementById('wcb-bubble');
-					if (!b || isOpen) return;
-					b.style.display = 'block';
-					requestAnimationFrame(function () {
-						requestAnimationFrame(function () {
-							b.style.opacity = '1';
-							b.style.transform = 'translateY(-50%) scale(1)';
-						});
-					});
-				}, 2000);
-			}
-
-			if (!AUTO_OPEN && !isOpen) {
-				stopButtonAnimation();
-				startButtonAnimation();
-			}
-
-			if (cfg.autoOpenDelay && cfg.autoOpenDelay > 0) {
-				setTimeout(function () {
-					if (!isOpen) openModal();
-				}, cfg.autoOpenDelay * 1000);
-			}
-
-			if (AUTO_OPEN) {
-				openModal();
-			}
-		})
-		.catch(function (e) {
-			console.error('[wincallback] Failed to load config:', e);
-		});
-
 	// ─── Public API ───────────────────────────────────────────────────────────
 
-	function destroyWidget() {
-		unlockBody();
+	function removeDisabledPage() {
 		var disabledPage = document.getElementById('callback-widget-disabled');
-		if (disabledPage && disabledPage.parentNode)
+		if (disabledPage && disabledPage.parentNode) {
 			disabledPage.parentNode.removeChild(disabledPage);
+		}
+	}
+
+	function validateRuntimeConfig(data) {
+		if (!data || typeof data !== 'object') {
+			throw new Error('Widget config is missing');
+		}
+		if (data.isActive !== true) return;
+		if (
+			data.verificationMode !== 'OFF' &&
+			data.verificationMode !== 'SMS' &&
+			data.verificationMode !== 'EMAIL'
+		) {
+			throw new Error(
+				'Widget config must contain verificationMode OFF, SMS or EMAIL'
+			);
+		}
+		if (typeof data.launcherEnabled !== 'boolean') {
+			throw new Error(
+				'Widget config must contain boolean launcherEnabled'
+			);
+		}
+	}
+
+	function applyRuntimeConfig(data) {
+		validateRuntimeConfig(data);
+		if (!data.isActive) {
+			cfg = null;
+			publicApi.ready = false;
+			cbBtn.style.display = 'none';
+			hideBubble();
+			if (isOpen) closeModal();
+			if (AUTO_OPEN) showDisabledPage();
+			console.warn('[wincallback] Widget is inactive');
+			return false;
+		}
+
+		removeDisabledPage();
+		cfg = data;
+		updatePublishedVersion(cfg.publishedVersion);
+		clearManagedTimeout(bubbleShowTimerId);
+		clearManagedTimeout(autoOpenTimerId);
+		bubbleShowTimerId = null;
+		autoOpenTimerId = null;
+
+		var size = cfg.buttonSize || 60;
+		positionButton();
+		var iconEl = cbBtn.querySelector('#wcb-btn-icon');
+		if (iconEl) {
+			iconEl.style.width = size + 'px';
+			iconEl.style.height = size + 'px';
+			iconEl.onerror = function () {
+				iconEl.onerror = null;
+				iconEl.src = getWidgetAssetUrl('callback-button.png');
+			};
+			iconEl.src =
+				cfg.buttonImageUrl || getWidgetAssetUrl('callback-button.png');
+		}
+
+		applyColor(cfg.openButtonColor || cfg.color || '#4705fb');
+		buttonPulseEnabled = cfg.buttonPulse !== false;
+		modal.style.background = cfg.bgColor || '#fff';
+		updateBubbleSide(cfg.buttonSide || 'right');
+
+		var bubbleEl = document.getElementById('wcb-bubble');
+		var bubbleText = document.getElementById('wcb-bubble-text');
+		if (bubbleText) {
+			bubbleText.textContent =
+				cfg.bubbleText || cfg.title || 'Перезвоним!';
+		}
+		if (bubbleEl) bubbleEl.style.display = 'none';
+
+		if (cfg.hasSubmittedByIp && cfg.filterDuplicates) {
+			publicApi.ready = false;
+			cbBtn.style.display = 'none';
+			if (isOpen) closeModal();
+			return false;
+		}
+
+		if (isOpen) submitted ? buildSuccess() : buildForm();
+		publicApi.ready = true;
+		sendTelemetryEvent('IMPRESSION');
+		syncLauncherVisibility();
+		fireEvent('ready');
+
+		if (canShowLauncher() && cfg.bubbleEnabled !== false && !isOpen) {
+			bubbleShowTimerId = setManagedTimeout(function () {
+				var bubble = document.getElementById('wcb-bubble');
+				if (!bubble || isOpen || !canShowLauncher()) return;
+				bubble.style.display = 'block';
+				requestManagedAnimationFrame(function () {
+					requestManagedAnimationFrame(function () {
+						bubble.style.opacity = '1';
+						bubble.style.transform = 'translateY(-50%) scale(1)';
+					});
+				});
+			}, 2000);
+		}
+
+		if (pendingOpen || AUTO_OPEN) {
+			openModal();
+		} else if (cfg.autoOpenDelay && cfg.autoOpenDelay > 0) {
+			autoOpenTimerId = setManagedTimeout(function () {
+				if (!isOpen) openModal();
+			}, cfg.autoOpenDelay * 1000);
+		}
+		return true;
+	}
+
+	var phoneHelperPromise = ensurePhoneHelper();
+
+	function refreshWidgetConfig() {
+		if (destroyed) return Promise.resolve(false);
+		abortController(configRequestController);
+		configRequestController = createRequestController();
+		var controller = configRequestController;
+		publicApi.ready = false;
+		return Promise.all([
+			phoneHelperPromise,
+			fetchJson(
+				API_BASE + '/callback/' + encodeURIComponent(KEY) + '/config',
+				{
+					signal: controller ? controller.signal : undefined
+				}
+			)
+		])
+			.then(function (result) {
+				if (destroyed || configRequestController !== controller) {
+					return false;
+				}
+				configRequestController = null;
+				return applyRuntimeConfig(result[1]);
+			})
+			.catch(function (error) {
+				if (configRequestController === controller) {
+					configRequestController = null;
+				}
+				if (destroyed || (error && error.name === 'AbortError')) {
+					return false;
+				}
+				cbBtn.style.display = 'none';
+				console.error('[wincallback] Failed to load config:', error);
+				return false;
+			});
+	}
+
+	function destroyWidget() {
+		if (destroyed) return false;
+		destroyed = true;
+		pendingOpen = false;
+		publicApi.ready = false;
+		abortController(configRequestController);
+		configRequestController = null;
+		disposeFormState();
+		clearManagedAsyncWork();
+		window.removeEventListener('scroll', handleWindowScroll);
+		cbBtn.removeEventListener('click', handleLauncherClick);
+		backdrop.removeEventListener('click', handleBackdropClick);
+		var bubbleClose = document.getElementById('wcb-bubble-close');
+		var bubbleEl = document.getElementById('wcb-bubble');
+		if (bubbleClose) {
+			bubbleClose.removeEventListener('click', handleBubbleCloseClick);
+		}
+		if (bubbleEl) {
+			bubbleEl.removeEventListener('click', handleBubbleClick);
+		}
+		if (buttonAnimation && typeof buttonAnimation.cancel === 'function') {
+			try {
+				buttonAnimation.cancel();
+			} catch (e) {}
+		}
+		buttonAnimation = null;
+		unlockBody();
+		removeDisabledPage();
 		if (cbBtn.parentNode) cbBtn.parentNode.removeChild(cbBtn);
 		if (host.parentNode) host.parentNode.removeChild(host);
 		if (styleAnim.parentNode) styleAnim.parentNode.removeChild(styleAnim);
-		delete window.__wincallbackScriptRunning;
-		delete window.winwidgetCallback;
+		if (window.__wincallbackScriptRunning === INSTANCE_TOKEN) {
+			delete window.__wincallbackScriptRunning;
+		}
+		if (window.winwidgetCallback === publicApi) {
+			delete window.winwidgetCallback;
+		}
+		return true;
 	}
 
-	window.winwidgetCallback = {
+	publicApi = {
+		key: KEY,
+		ready: false,
 		open: openModal,
 		close: closeModal,
+		refresh: refreshWidgetConfig,
 		destroy: destroyWidget
 	};
+	window.winwidgetCallback = publicApi;
+
+	var bubbleClose = document.getElementById('wcb-bubble-close');
+	var bubbleEl = document.getElementById('wcb-bubble');
+	if (bubbleClose) {
+		bubbleClose.addEventListener('click', handleBubbleCloseClick);
+	}
+	if (bubbleEl) {
+		bubbleEl.addEventListener('click', handleBubbleClick);
+	}
+
+	refreshWidgetConfig();
 })();

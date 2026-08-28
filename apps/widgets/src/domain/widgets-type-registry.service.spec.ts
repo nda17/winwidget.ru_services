@@ -229,9 +229,27 @@ describe('WidgetsTypeRegistryService', () => {
 		).toThrow(BadRequestException);
 	});
 
-	it('keeps Callback reads forgiving but validates an explicit slots patch', () => {
+	it('requires the clean Callback contract and validates an explicit slots patch', () => {
+		expect(() =>
+			normalizeWidgetConfig(WidgetType.CALLBACK, {
+				timeSlots: ['9:00–11:00']
+			})
+		).toThrow('OFF, SMS или EMAIL');
+		expect(() =>
+			normalizeWidgetConfig(WidgetType.CALLBACK, {
+				verificationMode: 'OFF'
+			})
+		).toThrow('отображаться кнопка виджета');
+		expect(() =>
+			normalizeWidgetConfig(WidgetType.CALLBACK, {
+				verificationMode: 'LEGACY',
+				launcherEnabled: true
+			})
+		).toThrow('OFF, SMS или EMAIL');
 		const normalized = asJsonObject(
 			normalizeWidgetConfig(WidgetType.CALLBACK, {
+				verificationMode: 'OFF',
+				launcherEnabled: true,
 				timeSlots: [' 9:00–11:00 ', '9:00–11:00', null]
 			})
 		);
@@ -246,6 +264,32 @@ describe('WidgetsTypeRegistryService', () => {
 				timeSlots: ['x'.repeat(61)]
 			})
 		).toThrow('от 1 до 60 символов');
+	});
+
+	it('publishes the callback OTP/launcher contract and limits IP duplicates to 30 minutes', () => {
+		const callbackConfig = {
+			...config(WidgetType.CALLBACK),
+			verificationMode: 'EMAIL',
+			launcherEnabled: false,
+			filterDuplicates: true
+		};
+		expect(
+			registry.for(WidgetType.CALLBACK).publicConfig(callbackConfig, {
+				publishedVersion: 4,
+				hardPlan: false,
+				duplicateByIp: false
+			})
+		).toMatchObject({
+			verificationMode: 'EMAIL',
+			launcherEnabled: false
+		});
+		const before = Date.now() - 30 * 60 * 1000;
+		const lookup = registry
+			.for(WidgetType.CALLBACK)
+			.publicDuplicateRule(callbackConfig, '203.0.113.10')?.lookup;
+		const after = Date.now() - 30 * 60 * 1000;
+		expect(lookup?.since?.getTime()).toBeGreaterThanOrEqual(before);
+		expect(lookup?.since?.getTime()).toBeLessThanOrEqual(after);
 	});
 
 	it('keeps the AI consultant prompt private in public config', () => {

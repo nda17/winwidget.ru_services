@@ -6,6 +6,7 @@ import { WidgetsRabbitMqService } from '../messaging/widgets-rabbitmq.service';
 import { WidgetsPrismaService } from '../prisma/widgets-prisma.service';
 import { WidgetsRetentionService } from '../retention/widgets-retention.service';
 import { WidgetsRuntimeService } from '../runtime/widgets-runtime.service';
+import { WidgetsCallbackOtpService } from '../callback/widgets-callback-otp.service';
 
 @Injectable()
 export class WidgetsHealthService {
@@ -16,7 +17,8 @@ export class WidgetsHealthService {
 		private readonly projections: WidgetsProjectionWorkerService,
 		private readonly integrations: WidgetsIntegrationWorkerService,
 		private readonly outbox: WidgetsOutboxPublisherService,
-		private readonly retention: WidgetsRetentionService
+		private readonly retention: WidgetsRetentionService,
+		private readonly callbackOtp: WidgetsCallbackOtpService
 	) {}
 
 	liveness() {
@@ -71,6 +73,7 @@ export class WidgetsHealthService {
 			service: 'widgets',
 			role: this.runtime.role,
 			revision: process.env.APP_REVISION || 'unknown',
+			callbackOtp: this.callbackOtp.status(),
 			retention: this.retention.status()
 		};
 	}

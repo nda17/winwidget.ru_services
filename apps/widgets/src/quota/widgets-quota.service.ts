@@ -130,10 +130,23 @@ export class WidgetsQuotaService {
 			transaction: Prisma.TransactionClient,
 			limit: number,
 			periodKey: string | null
-		) => Promise<unknown>
+		) => Promise<unknown>,
+		findExisting?: (
+			transaction: Prisma.TransactionClient
+		) => Promise<T | null>
 	): Promise<LeadQuotaResult<T>> {
 		return this.prisma.$transaction(async transaction => {
 			const context = await this.lockContext(transaction, userId);
+			const existing = findExisting
+				? await findExisting(transaction)
+				: null;
+			if (existing !== null) {
+				return {
+					value: existing,
+					newCount: context.counter.leadCount,
+					limitReached: false
+				};
+			}
 			const limit = context.entitlement.maxLeadsPerPeriod;
 			if (
 				context.entitlement.unlimited !== true &&

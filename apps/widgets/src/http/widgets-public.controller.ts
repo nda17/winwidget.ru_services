@@ -2,6 +2,8 @@ import {
 	Body,
 	Controller,
 	Get,
+	HttpCode,
+	HttpStatus,
 	NotFoundException,
 	Param,
 	Post,
@@ -14,6 +16,7 @@ import {
 import { ConfigService } from '@nestjs/config';
 import type { Request, Response } from 'express';
 import { WidgetsApiGuard } from '../auth/widgets-auth.guard';
+import { CallbackOtpRateLimitException } from '../callback/widgets-callback-otp.service';
 import { WidgetsDomainService } from '../domain/widgets-domain.service';
 import {
 	getWidgetDefinition,
@@ -28,7 +31,11 @@ import {
 	isDirectPageRequest,
 	safePublicKey
 } from '../domain/widgets-domain.util';
-import { SubmitWidgetLeadDto } from './widgets.dto';
+import {
+	CallbackVerificationStartDto,
+	SubmitCallbackLeadDto,
+	SubmitWidgetLeadDto
+} from './widgets.dto';
 import {
 	requestCorrelationId,
 	typeFromRequestPath
@@ -38,7 +45,9 @@ const CONFIG_PATHS = WIDGET_DEFINITIONS.map(
 	item => `${item.publicApi}/:key/config`
 );
 const LEAD_PATHS = WIDGET_DEFINITIONS.filter(
-	item => item.type !== WidgetType.AI_CONSULTANT
+	item =>
+		item.type !== WidgetType.AI_CONSULTANT &&
+		item.type !== WidgetType.CALLBACK
 ).map(item => `${item.publicApi}/:key/lead`);
 
 @Controller()
@@ -102,6 +111,53 @@ export class WidgetsPublicController {
 			getClientIp(request),
 			getRequestDomain(request),
 			isDirectPageRequest(request, definition.pagePath, key),
+			requestCorrelationId(request)
+		);
+	}
+
+	@Post('callback/:key/verification/start')
+	@HttpCode(HttpStatus.OK)
+	async startCallbackVerification(
+		@Param('key') rawKey: string,
+		@Body() dto: CallbackVerificationStartDto,
+		@Req() request: Request,
+		@Res({ passthrough: true }) response: Response
+	) {
+		response.setHeader('Access-Control-Allow-Origin', '*');
+		response.setHeader('Access-Control-Expose-Headers', 'Retry-After');
+		const key = safePublicKey(rawKey);
+		try {
+			return await this.widgets.startCallbackVerification(
+				key,
+				dto,
+				getClientIp(request),
+				getRequestDomain(request),
+				isDirectPageRequest(request, 'page-callback', key)
+			);
+		} catch (error) {
+			if (error instanceof CallbackOtpRateLimitException) {
+				response.setHeader('Retry-After', String(error.retryAfterSeconds));
+			}
+			throw error;
+		}
+	}
+
+	@Post('callback/:key/lead')
+	async submitCallback(
+		@Param('key') rawKey: string,
+		@Body() dto: SubmitCallbackLeadDto,
+		@Req() request: Request,
+		@Res({ passthrough: true }) response: Response
+	) {
+		response.setHeader('Access-Control-Allow-Origin', '*');
+		const key = safePublicKey(rawKey);
+		return this.widgets.submitLead(
+			WidgetType.CALLBACK,
+			key,
+			dto,
+			getClientIp(request),
+			getRequestDomain(request),
+			isDirectPageRequest(request, 'page-callback', key),
 			requestCorrelationId(request)
 		);
 	}

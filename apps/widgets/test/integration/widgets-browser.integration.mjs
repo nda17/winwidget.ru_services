@@ -96,7 +96,6 @@ export async function runWidgetsBrowserIntegration({
 			'Widgets browser integration requires the exact CORS allowlist fixture'
 		);
 	}
-
 	const pendingResults = new Map();
 	const pendingPageLoads = new Map();
 	const pages = new Map();
@@ -257,6 +256,20 @@ function browserPage(browserCase) {
       var runtimeErrors = [];
       var resourceErrors = [];
       var reported = false;
+	  var callbackConfigMode = testCase.type === 'callback' ? 'OFF' : '';
+	  var callbackBaseConfig = null;
+	  var callbackChallenge = null;
+	  var callbackMockLeadCount = 0;
+	  var callbackRateLimitOnce = false;
+	  var callbackEvents = [];
+
+	  if (testCase.type === 'callback') {
+		['ready', 'open', 'close'].forEach(function (name) {
+		  document.addEventListener('winwidget:callback:' + name, function (event) {
+			callbackEvents.push({ name: name, key: event && event.detail && event.detail.key });
+		  });
+		});
+	  }
 
       window.addEventListener('error', function (event) {
         var target = event.target;
@@ -285,18 +298,109 @@ function browserPage(browserCase) {
           body: body
         };
         requests.push(request);
-        return nativeFetch(input, options).then(function (response) {
+		var pathname = new URL(String(url), window.location.href).pathname;
+
+		function complete(response) {
           request.status = response.status;
           if (response.ok) return response;
           return response.clone().text().then(function (body) {
             request.responseBody = String(body).slice(0, 2048);
             return response;
           }, function () { return response; });
-        }, function (error) {
+		}
+
+		function fail(error) {
           request.status = 0;
           request.error = String(error && error.message || error);
           throw error;
-        });
+		}
+
+		function callbackJsonResponse(status, payload, headers) {
+		  return new Response(JSON.stringify(payload), {
+			status: status,
+			headers: Object.assign({ 'content-type': 'application/json; charset=utf-8' }, headers || {})
+		  });
+		}
+
+		if (testCase.type === 'callback' && pathname.endsWith('/callback/' + testCase.publicKey + '/config')) {
+		  if (callbackConfigMode === 'OFF' && !callbackBaseConfig) {
+			  return nativeFetch(input, options).then(function (response) {
+				  return response.clone().json().then(function (config) {
+					if (config.isActive !== true) {
+					  throw new Error('Callback browser base config is inactive');
+					}
+					callbackBaseConfig = config;
+				return delay(300).then(function () {
+				  return callbackJsonResponse(response.status, Object.assign({}, config, {
+					verificationMode: 'OFF',
+					launcherEnabled: false,
+					bubbleEnabled: false,
+					autoOpenDelay: 0
+				  }));
+				});
+			  });
+			}).then(complete, fail);
+		  }
+		  return delay(150).then(function () {
+			return callbackJsonResponse(200, Object.assign({}, callbackBaseConfig, {
+			  isActive: true,
+			  hasSubmittedByIp: false,
+			  filterDuplicates: false,
+			  verificationMode: callbackConfigMode,
+			  launcherEnabled: false,
+			  bubbleEnabled: false,
+			  autoOpenDelay: 0
+			}));
+		  }).then(complete, fail);
+		}
+
+		if (testCase.type === 'callback' && callbackConfigMode !== 'OFF' && pathname.endsWith('/verification/start')) {
+		  var startPayload = JSON.parse(body || '{}');
+		  var expectedStartKey = callbackConfigMode === 'SMS' ? 'phone' : 'email';
+		  if (Object.keys(startPayload).sort().join(',') !== expectedStartKey || typeof startPayload[expectedStartKey] !== 'string' || !startPayload[expectedStartKey]) {
+			return Promise.resolve(callbackJsonResponse(400, { message: 'Invalid verification start payload' })).then(complete, fail);
+		  }
+		  if (callbackRateLimitOnce) {
+			callbackRateLimitOnce = false;
+			return Promise.resolve(callbackJsonResponse(429, { message: 'Повторная отправка кода пока недоступна' }, { 'Retry-After': '1' })).then(complete, fail);
+		  }
+		  callbackChallenge = {
+			id: 'browser-challenge-' + callbackConfigMode.toLowerCase() + '-' + requests.length,
+			contact: startPayload[expectedStartKey],
+			used: false,
+			lead: null
+		  };
+		  return Promise.resolve(callbackJsonResponse(200, {
+			challengeId: callbackChallenge.id,
+			expiresAt: new Date(Date.now() + 300000).toISOString(),
+			resendAvailableAt: new Date(Date.now() + 60000).toISOString(),
+			destinationHint: callbackConfigMode === 'SMS' ? '+7 (***) ***-00-03' : 'b***@example.test'
+		  })).then(complete, fail);
+		}
+
+		if (testCase.type === 'callback' && callbackConfigMode !== 'OFF' && pathname.endsWith('/lead')) {
+		  var leadPayload = JSON.parse(body || '{}');
+		  if (!callbackChallenge || leadPayload.challengeId !== callbackChallenge.id || typeof leadPayload.code !== 'string') {
+			return Promise.resolve(callbackJsonResponse(400, { message: 'Сначала получите код подтверждения' })).then(complete, fail);
+		  }
+		  if ((callbackConfigMode === 'SMS' && Object.hasOwn(leadPayload, 'email')) || (callbackConfigMode === 'EMAIL' && leadPayload.email !== callbackChallenge.contact)) {
+			return Promise.resolve(callbackJsonResponse(400, { message: 'Invalid email challenge binding' })).then(complete, fail);
+		  }
+		  if (leadPayload.code !== '123456') {
+			return Promise.resolve(callbackJsonResponse(400, { message: 'Неверный код подтверждения' })).then(complete, fail);
+		  }
+		  if (!callbackChallenge.used) {
+			callbackChallenge.used = true;
+			callbackMockLeadCount += 1;
+			callbackChallenge.lead = { id: 'browser-lead-' + callbackConfigMode.toLowerCase() };
+		  }
+		  return Promise.resolve(callbackJsonResponse(201, {
+			success: true,
+			lead: callbackChallenge.lead
+		  })).then(complete, fail);
+		}
+
+		return nativeFetch(input, options).then(complete, fail);
       };
 
       if (testCase.type === 'wheel') {
@@ -305,9 +409,9 @@ function browserPage(browserCase) {
       } else if (testCase.type === 'quiz') {
         window.winquizAutoOpen = true;
       } else if (testCase.type === 'callback') {
-        window.wincallbackAutoOpen = true;
-        window.winwidgetCallbackAutoOpen = true;
-        window.winwidget = { autoOpen: true };
+		window.wincallbackAutoOpen = true;
+		window.winwidgetCallbackAutoOpen = true;
+		window.winwidget = { autoOpen: true };
       } else if (testCase.type === 'timer') {
         window.wintimerAutoOpen = true;
       } else if (testCase.type === 'stop-offer') {
@@ -470,6 +574,187 @@ function browserPage(browserCase) {
         });
       }
 
+	  function observedRequestAfter(startIndex, suffix, method, status) {
+		return requests.slice(startIndex).find(function (request) {
+		  return request.status !== null && request.method === method && new URL(request.url).pathname.endsWith(suffix) && (typeof status !== 'number' || request.status === status);
+		});
+	  }
+
+	  async function verifyCallbackNativeOpen() {
+		var api = await waitFor(function () { return window.winwidgetCallback; }, 'callback public API');
+		if (api.key !== testCase.publicKey || api.ready !== false) {
+		  throw new Error('Callback public API was not exposed in the loading state');
+		}
+		if (api.open() !== false) {
+		  throw new Error('Callback early open did not report its queued state');
+		}
+		var initialConfig = await waitFor(function () { return callbackBaseConfig; }, 'callback public config');
+		if (initialConfig.isActive !== true) {
+		  throw new Error('Callback direct-page config was inactive; check the full-referrer AUTO_OPEN contract');
+		}
+		await waitFor(function () { return api.ready === true; }, 'callback ready state');
+		var host = await waitFor(function () {
+		  var candidate = document.getElementById(testCase.hostId);
+		  return candidate && candidate.shadowRoot ? candidate : null;
+		}, 'callback Shadow DOM');
+		await waitFor(function () {
+		  return host.shadowRoot.getElementById('callback-widget-overlay').style.display === 'flex';
+		}, 'queued callback open');
+		var launcher = document.getElementById('callback-widget-button');
+		if (!launcher || launcher.style.display !== 'none') {
+		  throw new Error('Callback launcherEnabled=false exposed the built-in launcher');
+		}
+		var launcherIcon = launcher.querySelector('#wcb-btn-icon');
+		if (!launcherIcon || launcherIcon.src !== testCase.serviceOrigin + '/widgets/callback-button.png') {
+		  throw new Error('Callback launcher icon URL was duplicated or changed');
+		}
+		if (!callbackEvents.some(function (event) { return event.name === 'ready' && event.key === testCase.publicKey; }) || !callbackEvents.some(function (event) { return event.name === 'open' && event.key === testCase.publicKey; })) {
+		  throw new Error('Callback keyed ready/open events were not dispatched');
+		}
+		var readyCount = callbackEvents.filter(function (event) { return event.name === 'ready'; }).length;
+		var refreshed = api.refresh();
+		if (!refreshed || typeof refreshed.then !== 'function' || api.ready !== false || await refreshed !== true || window.winwidgetCallback !== api || api.ready !== true) {
+		  throw new Error('Callback refresh did not preserve and restore the public API');
+		}
+		await waitFor(function () {
+		  return callbackEvents.filter(function (event) { return event.name === 'ready'; }).length === readyCount + 1;
+		}, 'callback refresh ready event');
+	  }
+
+	  async function loadCallbackMode(mode) {
+		var previousApi = window.winwidgetCallback;
+		if (!previousApi || previousApi.destroy() !== true) {
+		  throw new Error('Callback runtime did not destroy cleanly before ' + mode);
+		}
+		if (window.winwidgetCallback || window.__wincallbackScriptRunning) {
+		  throw new Error('Callback destroy left public runtime state behind');
+		}
+		window.wincallbackAutoOpen = false;
+		window.winwidgetCallbackAutoOpen = false;
+		window.winwidget = { autoOpen: false };
+		callbackConfigMode = mode;
+		callbackChallenge = null;
+		var script = document.createElement('script');
+		script.src = testCase.serviceOrigin + '/widgets/callback.js?browser-mode=' + mode.toLowerCase() + '-' + Date.now();
+		script.async = true;
+		script.setAttribute('data-key', testCase.publicKey);
+		var loaded = new Promise(function (resolve, reject) {
+		  script.onload = resolve;
+		  script.onerror = function () { reject(new Error('Failed to reload callback runtime for ' + mode)); };
+		});
+		document.body.appendChild(script);
+		await loaded;
+		var api = await waitFor(function () { return window.winwidgetCallback; }, mode + ' callback API');
+		if (api.ready !== false || api.open() !== false) {
+		  throw new Error(mode + ' callback did not queue early external open');
+		}
+		await waitFor(function () { return api.ready === true; }, mode + ' callback ready');
+		var host = await waitFor(function () {
+		  var candidate = document.getElementById(testCase.hostId);
+		  return candidate && candidate.shadowRoot ? candidate : null;
+		}, mode + ' callback host');
+		await waitFor(function () {
+		  return host.shadowRoot.getElementById('callback-widget-overlay').style.display === 'flex';
+		}, mode + ' callback open');
+		if (document.getElementById('callback-widget-button').style.display !== 'none') {
+		  throw new Error(mode + ' callback exposed its disabled launcher');
+		}
+		return host.shadowRoot;
+	  }
+
+	  async function exerciseCallbackOtpPaths() {
+		var smsShadow = await loadCallbackMode('SMS');
+		fill(await waitFor(function () { return smsShadow.querySelector('input[type="tel"]'); }, 'SMS callback phone'), testCase.phone);
+		var smsRequestStart = requests.length;
+		click(await waitFor(function () { return findButton(smsShadow, /Получить код/); }, 'SMS get code'), 'SMS get code');
+		var firstSmsStart = await waitFor(function () {
+		  return observedRequestAfter(smsRequestStart, '/verification/start', 'POST', 200);
+		}, 'SMS verification start');
+		if (observedRequestAfter(smsRequestStart, '/lead', 'POST')) {
+		  throw new Error('Callback sent a lead before an OTP code was entered');
+		}
+		var firstSmsPayload = JSON.parse(firstSmsStart.body || '{}');
+		if (Object.keys(firstSmsPayload).join(',') !== 'phone') {
+		  throw new Error('SMS verification start payload drifted');
+		}
+		var smsCode = await waitFor(function () {
+		  var input = smsShadow.querySelector('input[autocomplete="one-time-code"]');
+		  return input && input.parentNode.style.display !== 'none' ? input : null;
+		}, 'SMS code input');
+		if (smsCode.inputMode !== 'numeric' || smsCode.maxLength !== 6) {
+		  throw new Error('Callback OTP browser hints drifted');
+		}
+		var resend = findButton(smsShadow, /Повторить через/);
+		if (resend || !Array.prototype.some.call(smsShadow.querySelectorAll('button'), function (button) { return button.disabled && /Повторить через (59|60) с/.test(button.textContent); })) {
+		  throw new Error('Callback resend countdown did not start at 60 seconds');
+		}
+
+		fill(smsShadow.querySelector('input[type="tel"]'), '+79991119999');
+		await waitFor(function () { return smsCode.parentNode.style.display === 'none'; }, 'changed SMS contact invalidation');
+		var secondSmsStartIndex = requests.length;
+		callbackRateLimitOnce = true;
+		click(await waitFor(function () { return findButton(smsShadow, /Получить код/); }, 'SMS get replacement code'), 'SMS get replacement code');
+		await waitFor(function () { return observedRequestAfter(secondSmsStartIndex, '/verification/start', 'POST', 429); }, 'SMS Retry-After response');
+		if (!Array.prototype.some.call(smsShadow.querySelectorAll('button'), function (button) { return button.disabled && /Повторить через 1 с/.test(button.textContent); })) {
+		  throw new Error('Callback did not apply the server Retry-After cooldown');
+		}
+		var replacementButton = await waitFor(function () { return findButton(smsShadow, /Получить код/); }, 'SMS Retry-After cooldown', 3000);
+		var replacementSmsStart = requests.length;
+		click(replacementButton, 'SMS get replacement code after cooldown');
+		await waitFor(function () { return observedRequestAfter(replacementSmsStart, '/verification/start', 'POST', 200); }, 'replacement SMS challenge');
+		smsCode = await waitFor(function () {
+		  var input = smsShadow.querySelector('input[autocomplete="one-time-code"]');
+		  return input && input.parentNode.style.display !== 'none' ? input : null;
+		}, 'replacement SMS code input');
+
+		var invalidLeadStart = requests.length;
+		fill(smsCode, '000000');
+		click(await waitFor(function () { return findButton(smsShadow, /Подтвердить и отправить/); }, 'SMS invalid code submit'), 'SMS invalid code submit');
+		await waitFor(function () { return observedRequestAfter(invalidLeadStart, '/lead', 'POST', 400); }, 'SMS invalid-code response');
+		await waitFor(function () { return smsShadow.querySelector('.wcb-err-show'); }, 'SMS invalid-code error');
+
+		var validLeadStart = requests.length;
+		fill(smsCode, '123456');
+		click(await waitFor(function () { return findButton(smsShadow, /Подтвердить и отправить/); }, 'SMS valid code submit'), 'SMS valid code submit');
+		var validSmsLead = await waitFor(function () { return observedRequestAfter(validLeadStart, '/lead', 'POST', 201); }, 'SMS verified lead');
+		var validSmsPayload = JSON.parse(validSmsLead.body || '{}');
+		if (!validSmsPayload.challengeId || validSmsPayload.code !== '123456' || Object.hasOwn(validSmsPayload, 'email')) {
+		  throw new Error('SMS verified lead payload drifted');
+		}
+		var smsCreatedCount = callbackMockLeadCount;
+		await window.fetch(validSmsLead.url, {
+		  method: 'POST',
+		  headers: { 'Content-Type': 'application/json' },
+		  body: validSmsLead.body
+		});
+		if (callbackMockLeadCount !== smsCreatedCount) {
+		  throw new Error('Callback OTP replay created a duplicate mock lead');
+		}
+
+		var emailShadow = await loadCallbackMode('EMAIL');
+		fill(await waitFor(function () { return emailShadow.querySelector('input[type="tel"]'); }, 'EMAIL callback phone'), '+79991118888');
+		fill(await waitFor(function () { return emailShadow.querySelector('input[type="email"]'); }, 'EMAIL verification address'), 'browser@example.test');
+		var emailStartIndex = requests.length;
+		click(await waitFor(function () { return findButton(emailShadow, /Получить код/); }, 'EMAIL get code'), 'EMAIL get code');
+		var emailStart = await waitFor(function () { return observedRequestAfter(emailStartIndex, '/verification/start', 'POST', 200); }, 'EMAIL verification start');
+		var emailPayload = JSON.parse(emailStart.body || '{}');
+		if (Object.keys(emailPayload).join(',') !== 'email' || emailPayload.email !== 'browser@example.test' || observedRequestAfter(emailStartIndex, '/lead', 'POST')) {
+		  throw new Error('EMAIL verification request or pre-code lead contract drifted');
+		}
+		var emailCode = await waitFor(function () {
+		  var input = emailShadow.querySelector('input[autocomplete="one-time-code"]');
+		  return input && input.parentNode.style.display !== 'none' ? input : null;
+		}, 'EMAIL code input');
+		var emailLeadStart = requests.length;
+		fill(emailCode, '123456');
+		click(await waitFor(function () { return findButton(emailShadow, /Подтвердить и отправить/); }, 'EMAIL valid code submit'), 'EMAIL valid code submit');
+		var emailLead = await waitFor(function () { return observedRequestAfter(emailLeadStart, '/lead', 'POST', 201); }, 'EMAIL verified lead');
+		var emailLeadPayload = JSON.parse(emailLead.body || '{}');
+		if (!emailLeadPayload.challengeId || emailLeadPayload.code !== '123456' || emailLeadPayload.email !== 'browser@example.test' || callbackMockLeadCount !== smsCreatedCount + 1) {
+		  throw new Error('EMAIL verified lead lost its challenge binding or duplicated a lead');
+		}
+	  }
+
       function telemetryRequests() {
         return requests.filter(function (request) {
           return request.method === 'POST' && new URL(request.url).pathname.indexOf('/api/v1/widget-events/') === 0;
@@ -517,6 +802,9 @@ function browserPage(browserCase) {
       }
 
       async function run() {
+		if (testCase.type === 'callback') {
+		  await verifyCallbackNativeOpen();
+		}
         var host = await waitFor(function () {
           var candidate = document.getElementById(testCase.hostId);
           return candidate && candidate.shadowRoot ? candidate : null;
@@ -547,6 +835,9 @@ function browserPage(browserCase) {
           return requiredTelemetrySequence();
         }, testCase.type + ' completion telemetry', 10000);
         var events = telemetry.map(function (request) { return request.event; });
+		if (testCase.type === 'callback') {
+		  await exerciseCallbackOtpPaths();
+		}
         if (resourceErrors.length) {
           throw new Error('Failed browser resources: ' + resourceErrors.join(', '));
         }

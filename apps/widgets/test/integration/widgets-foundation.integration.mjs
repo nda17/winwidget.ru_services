@@ -41,6 +41,8 @@ const app = spawn('node', ['dist/src/main.js'], {
 		CLOUDFLARE_AI_MODEL: '@cf/qwen/qwen3-30b-a3b-fp8',
 		WIDGETS_AI_SESSION_SECRET:
 			'foundation-session-secret-with-at-least-32-bytes',
+		WIDGETS_CALLBACK_OTP_SECRET:
+			'foundation-callback-otp-secret-at-least-32-bytes',
 		CLOUDFLARE_TURNSTILE_SITE_KEY: 'foundation-turnstile-site-key',
 		CLOUDFLARE_TURNSTILE_SECRET_KEY: 'foundation-turnstile-secret-key',
 		CORS_ALLOWED_ORIGINS: 'http://127.0.0.1:3000'

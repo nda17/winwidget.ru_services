@@ -267,6 +267,24 @@ credentials в browser и проверить все семь типов на в�
 
 ## Инженерная эксплуатация
 
+### P1 — устранить high-уязвимости production-зависимостей Widgets
+
+`pnpm --dir apps/widgets audit --prod --audit-level high` от 28.08.2026
+подтвердил семь high findings в существующем baseline: `xlsx@0.18.5`,
+транзитивный `multer@2.0.2` через NestJS и `lodash@4.17.21` через
+`@nestjs/config`. Добавленный callback-функционал эти зависимости не вводит;
+новый `nodemailer` уже закреплён на исправленной версии `9.0.3`.
+
+- Отдельно выбрать поддерживаемый источник и версию SheetJS: npm-пакет `xlsx`
+  не объявляет исправленной версии, поэтому слепой override запрещён.
+- Обновить NestJS/`@nestjs/config` либо применить только доказанно совместимые
+  overrides до исправленных `multer` и `lodash`.
+- Добавить regression-тесты загрузки файлов, экспорта XLSX, лимитов multipart и
+  обработки глубоко вложенных полей; затем повторить unit/integration,
+  production Docker build и dependency audit.
+- До исправления не расширять публичные upload/import endpoints и сохранять
+  действующие ограничения размера/типа входных файлов.
+
 ### P2 — повысить сигнал CI и распараллелить verify
 
 - Перехватывать ожидаемые ERROR/WARN отрицательных tests через logger spy.

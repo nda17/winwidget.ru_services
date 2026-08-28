@@ -335,6 +335,8 @@ const callbackAdapter: WidgetTypeAdapter = {
 		return {
 			isActive: true,
 			publishedVersion: context.publishedVersion,
+			verificationMode: stringValue(config.verificationMode),
+			launcherEnabled: config.launcherEnabled === true,
 			color: stringValue(config.color, '#4705fb'),
 			bgColor: stringValue(config.bgColor) || null,
 			...buttonPublicFields(config, context.hardPlan),
@@ -396,14 +398,23 @@ const callbackAdapter: WidgetTypeAdapter = {
 		];
 		if (config.filterDuplicates === true && ip)
 			rules.push({
-				lookup: { ip },
+				lookup: {
+					ip,
+					since: new Date(Date.now() - 30 * 60 * 1000)
+				},
 				message: 'Заявка с этого устройства уже существует'
 			});
 		return rules;
 	},
 	publicDuplicateRule(config, ip) {
 		return ip && config.filterDuplicates === true
-			? { responseKey: 'hasSubmittedByIp', lookup: { ip } }
+			? {
+					responseKey: 'hasSubmittedByIp',
+					lookup: {
+						ip,
+						since: new Date(Date.now() - 30 * 60 * 1000)
+					}
+				}
 			: null;
 	},
 	presentLead: unchangedLead,

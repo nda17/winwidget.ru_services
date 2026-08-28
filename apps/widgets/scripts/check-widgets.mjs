@@ -186,6 +186,8 @@ const telemetryRuntimeTypes = {
 };
 
 for (const [file, runtimeType] of Object.entries(telemetryRuntimeTypes)) {
+	const runtimeVersion =
+		file === 'callback.js' ? '2026.08.28-callback-otp' : '2026.08';
 	const telemetryFunctionSource = getNamedFunctionSource(
 		runtimeSources[file],
 		'sendTelemetryEvent'
@@ -215,7 +217,7 @@ for (const [file, runtimeType] of Object.entries(telemetryRuntimeTypes)) {
 			'KEY',
 			'window',
 			[
-				"var RUNTIME_VERSION = '2026.08';",
+				`var RUNTIME_VERSION = ${JSON.stringify(runtimeVersion)};`,
 				'var PUBLISHED_VERSION = 1;',
 				'var telemetryEventsSent = Object.create(null);',
 				...telemetryHelpers,
@@ -274,7 +276,7 @@ for (const [file, runtimeType] of Object.entries(telemetryRuntimeTypes)) {
 			request.options.referrerPolicy !== 'no-referrer' ||
 			request.options.headers?.['Content-Type'] !== 'application/json' ||
 			payload.event !== expectedEvents[index] ||
-			payload.runtimeVersion !== '2026.08' ||
+			payload.runtimeVersion !== runtimeVersion ||
 			payload.publishedVersion !== 1 ||
 			payloadKeys.join(',') !== 'event,publishedVersion,runtimeVersion'
 		) {
@@ -428,20 +430,212 @@ if (
 	process.exit(1);
 }
 
-const callbackDuplicateGate = runtimeSources['callback.js'].indexOf(
-	'if (cfg.hasSubmittedByIp && cfg.filterDuplicates) return;'
+const callbackConfigValidator = getNamedFunctionSource(
+	runtimeSources['callback.js'],
+	'validateRuntimeConfig'
 );
-const callbackLauncherDisplay = runtimeSources['callback.js'].indexOf(
-	"cbBtn.style.display = AUTO_OPEN ? 'none' : 'flex';"
+const validateCallbackConfig = new Function(
+	`${callbackConfigValidator}; return validateRuntimeConfig;`
+)();
+for (const [config, valid] of [
+	[{ isActive: false }, true],
+	[
+		{ isActive: true, verificationMode: 'OFF', launcherEnabled: true },
+		true
+	],
+	[
+		{ isActive: true, verificationMode: 'SMS', launcherEnabled: false },
+		true
+	],
+	[
+		{ isActive: true, verificationMode: 'EMAIL', launcherEnabled: true },
+		true
+	],
+	[{ isActive: true, launcherEnabled: true }, false],
+	[{ isActive: true, verificationMode: 'OFF' }, false],
+	[
+		{ isActive: true, verificationMode: 'LEGACY', launcherEnabled: true },
+		false
+	]
+]) {
+	let accepted = true;
+	try {
+		validateCallbackConfig(config);
+	} catch {
+		accepted = false;
+	}
+	if (accepted !== valid) {
+		console.error(
+			'widgets: callback.js does not require the new verification/launcher config contract'
+		);
+		process.exit(1);
+	}
+}
+
+const callbackApplyConfig = getNamedFunctionSource(
+	runtimeSources['callback.js'],
+	'applyRuntimeConfig'
+);
+const callbackDuplicateGate = callbackApplyConfig.indexOf(
+	'if (cfg.hasSubmittedByIp && cfg.filterDuplicates)'
+);
+const callbackReadyGate = callbackApplyConfig.indexOf(
+	'publicApi.ready = true;'
 );
 if (
 	callbackDuplicateGate === -1 ||
-	callbackLauncherDisplay === -1 ||
-	callbackDuplicateGate > callbackLauncherDisplay
+	callbackReadyGate === -1 ||
+	callbackDuplicateGate > callbackReadyGate
 ) {
 	console.error(
-		'widgets: callback.js displays the launcher before the duplicate gate'
+		'widgets: callback.js becomes ready before the duplicate gate'
 	);
+	process.exit(1);
+}
+
+const callbackStartVerification = getNamedFunctionSource(
+	runtimeSources['callback.js'],
+	'startVerification'
+);
+const callbackSubmitLead = getNamedFunctionSource(
+	runtimeSources['callback.js'],
+	'submitLead'
+);
+const callbackOpenModal = getNamedFunctionSource(
+	runtimeSources['callback.js'],
+	'openModal'
+);
+const callbackFireEvent = getNamedFunctionSource(
+	runtimeSources['callback.js'],
+	'fireEvent'
+);
+const callbackDestroy = getNamedFunctionSource(
+	runtimeSources['callback.js'],
+	'destroyWidget'
+);
+
+for (const [source, label] of [
+	["'/verification/start'", 'callback verification start endpoint'],
+	["verificationMode === 'SMS'", 'server-configured SMS request'],
+	['? { phone: getPhone() }', 'SMS-only start payload'],
+	[': { email: getEmail() };', 'email-only start payload'],
+	['state.challengeId = data.challengeId;', 'challenge state'],
+	['state.resendAvailableAt = resendAvailableAt;', 'resend deadline'],
+	['updateResendCountdown();', 'resend countdown']
+]) {
+	if (callbackStartVerification.includes(source)) continue;
+	console.error(`widgets: callback.js is missing ${label}`);
+	process.exit(1);
+}
+
+if (/\bchannel\s*:/.test(callbackStartVerification)) {
+	console.error(
+		'widgets: callback.js must not let the browser choose the verification channel'
+	);
+	process.exit(1);
+}
+
+for (const [source, label] of [
+	[
+		'payload.challengeId = state.challengeId;',
+		'lead challenge identifier'
+	],
+	['payload.code = code;', 'lead one-time code'],
+	["if (verificationMode === 'EMAIL')", 'EMAIL challenge binding'],
+	['payload.email = state.contact;', 'EMAIL-only verification contact'],
+	['data.success !== true', 'created-lead response validation'],
+	[
+		"typeof data.lead.id !== 'string'",
+		'created lead identifier validation'
+	],
+	["sendTelemetryEvent('COMPLETE');", 'post-create completion telemetry']
+]) {
+	if (callbackSubmitLead.includes(source)) continue;
+	console.error(`widgets: callback.js is missing ${label}`);
+	process.exit(1);
+}
+
+if (
+	callbackSubmitLead.indexOf("if (verificationMode === 'EMAIL')") >
+	callbackSubmitLead.indexOf('payload.email = state.contact;')
+) {
+	console.error(
+		'widgets: callback.js must include email only inside the EMAIL verification branch'
+	);
+	process.exit(1);
+}
+
+requireOrderedRuntimeSource('callback.js', 'submitLead', [
+	'data.success !== true',
+	'submitted = true;',
+	"sendTelemetryEvent('COMPLETE');"
+]);
+
+for (const [source, label] of [
+	['pendingOpen = true;', 'queued early open'],
+	['publicApi.ready !== true', 'readiness gate']
+]) {
+	if (callbackOpenModal.includes(source)) continue;
+	console.error(`widgets: callback.js is missing ${label}`);
+	process.exit(1);
+}
+
+if (
+	!callbackFireEvent.includes('detail: { key: KEY }') ||
+	!runtimeSources['callback.js'].includes("fireEvent('ready')")
+) {
+	console.error(
+		'widgets: callback.js does not expose keyed ready/open/close events'
+	);
+	process.exit(1);
+}
+
+for (const [source, label] of [
+	['key: KEY', 'public widget key'],
+	['ready: false', 'public readiness flag'],
+	['open: openModal', 'public open method'],
+	['close: closeModal', 'public close method'],
+	['refresh: refreshWidgetConfig', 'public refresh method'],
+	['destroy: destroyWidget', 'public destroy method'],
+	['cfg.launcherEnabled === true', 'launcherEnabled visibility gate'],
+	["codeInput.autocomplete = 'one-time-code';", 'OTP autocomplete hint'],
+	["codeInput.inputMode = 'numeric';", 'numeric OTP keyboard'],
+	[
+		'Duplicate script ignored; only one callback widget instance is supported per page.',
+		'deterministic duplicate-script warning'
+	],
+	[
+		"var RUNTIME_VERSION = '2026.08.28-callback-otp';",
+		'callback OTP runtime version marker'
+	],
+	["response.headers.get('Retry-After')", 'Retry-After response parsing'],
+	['error.retryAfterSeconds', 'OTP retry cooldown state']
+]) {
+	requireRuntimeSource('callback.js', source, label);
+}
+
+if (
+	/getWidgetAssetUrl\('callback-button\.png'\)\s*\+\s*getWidgetAssetUrl\('callback-button\.png'\)/.test(
+		runtimeSources['callback.js']
+	)
+) {
+	console.error(
+		'widgets: callback.js duplicates the launcher asset URL in img.src'
+	);
+	process.exit(1);
+}
+
+for (const [source, label] of [
+	['clearManagedAsyncWork();', 'timer cleanup'],
+	[
+		"window.removeEventListener('scroll', handleWindowScroll);",
+		'window listener cleanup'
+	],
+	['abortController(configRequestController);', 'config request cleanup'],
+	['disposeFormState();', 'form request cleanup']
+]) {
+	if (callbackDestroy.includes(source)) continue;
+	console.error(`widgets: callback.js is missing ${label}`);
 	process.exit(1);
 }
 

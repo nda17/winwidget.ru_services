@@ -317,6 +317,8 @@ function startService(port) {
 			CLOUDFLARE_AI_MODEL: '@cf/qwen/qwen3-30b-a3b-fp8',
 			WIDGETS_AI_SESSION_SECRET:
 				'messaging-session-secret-with-at-least-32-bytes',
+			WIDGETS_CALLBACK_OTP_SECRET:
+				'messaging-callback-otp-secret-at-least-32-bytes',
 			CLOUDFLARE_TURNSTILE_SITE_KEY: 'messaging-turnstile-site-key',
 			CLOUDFLARE_TURNSTILE_SECRET_KEY: 'messaging-turnstile-secret-key',
 			RABBITMQ_URL: restrictedRabbitUrl,

@@ -198,6 +198,22 @@ export class WidgetsDomainService {
 		);
 	}
 
+	startCallbackVerification(
+		publicKey: string,
+		input: { phone?: string; email?: string },
+		ip: string,
+		requestDomain: string | null,
+		directPageAccessAllowed: boolean
+	) {
+		return this.publicFlow.startCallbackVerification(
+			publicKey,
+			input,
+			ip,
+			requestDomain,
+			directPageAccessAllowed
+		);
+	}
+
 	submitLead(
 		type: WidgetType,
 		publicKey: string,

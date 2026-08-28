@@ -1,5 +1,5 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
-import { Prisma } from '@prisma/widgets-client';
+import { CallbackVerificationMode, Prisma } from '@prisma/widgets-client';
 import { WidgetsPrismaService } from '../prisma/widgets-prisma.service';
 import { WidgetEntity, WidgetType } from './widgets-domain.types';
 import type {
@@ -32,6 +32,8 @@ export interface WidgetLeadRecord {
 	answers?: Prisma.JsonValue;
 	url?: string | null;
 	ip?: string | null;
+	verificationMode?: CallbackVerificationMode;
+	verificationChallengeId?: string | null;
 }
 
 export interface CreateLeadData {
@@ -50,6 +52,8 @@ export interface CreateLeadData {
 	url?: string;
 	ip?: string;
 	resetToken?: string;
+	verificationMode?: CallbackVerificationMode;
+	verificationChallengeId?: string;
 }
 
 @Injectable()
@@ -335,7 +339,10 @@ export class WidgetsDomainRepository {
 						timeSlot: data.timeSlot || '',
 						timezone: data.timezone || '',
 						url: data.url,
-						ip: data.ip
+						ip: data.ip,
+						verificationMode:
+							data.verificationMode || CallbackVerificationMode.OFF,
+						verificationChallengeId: data.verificationChallengeId
 					}
 				}) as Promise<WidgetLeadRecord>;
 			case WidgetType.TIMER:

@@ -101,4 +101,78 @@ describe('WidgetsQuotaService read snapshot', () => {
 		expect(prisma.widgetUsageCounter.update).not.toHaveBeenCalled();
 		expect(prisma.widgetUsageLedgerEntry.create).not.toHaveBeenCalled();
 	});
+
+	it('returns an existing verified lead without spending quota even at the limit', async () => {
+		const now = new Date();
+		const existingLead = { id: 'lead-1' };
+		const transaction = {
+			$queryRaw: jest.fn().mockResolvedValue([{ userId: 'user-1' }]),
+			widgetOwnerProjection: {
+				findUnique: jest.fn().mockResolvedValue({
+					userId: 'user-1',
+					status: OwnerStatus.ACTIVE,
+					tombstoned: false,
+					deletedAt: null
+				})
+			},
+			widgetEntitlementProjection: {
+				findUnique: jest.fn().mockResolvedValue({
+					userId: 'user-1',
+					status: EntitlementStatus.ACTIVE,
+					plan: EntitlementPlan.HARD,
+					startsAt: new Date(now.getTime() - 60_000),
+					expiresAt: new Date(now.getTime() + 60_000),
+					maxWidgets: 10,
+					maxLeadsPerPeriod: 1,
+					unlimited: false,
+					tombstoned: false,
+					sourceOccurredAt: now,
+					aggregateVersion: 2
+				})
+			},
+			widgetUsageCounter: {
+				findUnique: jest.fn().mockResolvedValue({
+					userId: 'user-1',
+					entitlementVersion: 2,
+					widgetCount: 1,
+					leadCount: 1
+				}),
+				update: jest.fn()
+			},
+			widgetUsageLedgerEntry: { findUnique: jest.fn(), create: jest.fn() }
+		};
+		const prisma = {
+			$transaction: jest.fn(
+				(callback: (client: typeof transaction) => Promise<unknown>) =>
+					callback(transaction)
+			)
+		};
+		const service = new WidgetsQuotaService(
+			prisma as never,
+			{
+				get: jest.fn().mockReturnValue('60000')
+			} as unknown as ConfigService
+		);
+		const operation = jest.fn();
+		const findExisting = jest.fn().mockResolvedValue(existingLead);
+
+		await expect(
+			service.withLeadCreation(
+				'user-1',
+				{ idempotencyKey: 'callback-challenge-1' },
+				operation,
+				undefined,
+				findExisting
+			)
+		).resolves.toEqual({
+			value: existingLead,
+			newCount: 1,
+			limitReached: false
+		});
+		expect(operation).not.toHaveBeenCalled();
+		expect(transaction.widgetUsageCounter.update).not.toHaveBeenCalled();
+		expect(
+			transaction.widgetUsageLedgerEntry.create
+		).not.toHaveBeenCalled();
+	});
 });

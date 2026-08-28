@@ -71,6 +71,9 @@ describe('Widgets retention', () => {
 				maxBatches: 2
 			})
 		).resolves.toEqual({
+			callbackOtpChallengesDeleted: 0,
+			callbackOtpChallengesRedacted: 0,
+			callbackOtpRateBucketsDeleted: 0,
 			publishedOutboxDeleted: 0,
 			credentialSnapshotsDeleted: 0,
 			integrationReceiptsCompacted: 0,
@@ -141,7 +144,7 @@ describe('Widgets retention', () => {
 		service.onModuleInit();
 		await new Promise(resolve => setImmediate(resolve));
 
-		expect(prisma.$executeRaw).toHaveBeenCalledTimes(1);
+		expect(prisma.$executeRaw).toHaveBeenCalledTimes(4);
 		expect(service.isReady()).toBe(true);
 		expect(service.status()).toEqual(
 			expect.objectContaining({
@@ -156,5 +159,53 @@ describe('Widgets retention', () => {
 			})
 		);
 		await service.beforeApplicationShutdown();
+	});
+
+	it('deletes unconsumed OTP state and redacts expired consumed challenges in bounded batches', async () => {
+		const executeRaw = jest.fn().mockResolvedValue(0);
+		const prisma = {
+			$executeRaw: executeRaw
+		} as unknown as WidgetsPrismaService;
+
+		await runWidgetsRetentionCleanup(prisma, {
+			outboxDays: 7,
+			receiptDays: 90,
+			failureDetailDays: 30,
+			cleanupOutbox: false,
+			cleanupOtpState: true,
+			cleanupWorkerState: false,
+			now: new Date('2026-08-28T00:00:00.000Z'),
+			batchSize: 10,
+			maxBatches: 2
+		});
+
+		const sql = executeRaw.mock.calls
+			.map(([query]) =>
+				(query as { strings: readonly string[] }).strings.join('?')
+			)
+			.join('\n');
+		expect(executeRaw).toHaveBeenCalledTimes(3);
+		expect(sql).toContain(
+			'DELETE FROM "widgets"."callback_otp_challenges"'
+		);
+		expect(sql).toContain('challenge."consumed_at" IS NULL');
+		expect(sql).toContain('challenge."consumed_at" IS NOT NULL');
+		expect(sql).toContain('challenge."expires_at" <=');
+		expect(sql).toContain('challenge."revoked_at" <');
+		expect(sql).toContain('challenge."failed_at" <');
+		expect(sql).toContain(
+			'lead."verification_challenge_id" = challenge."id"'
+		);
+		expect(sql).toContain(
+			'DELETE FROM "widgets"."callback_otp_rate_buckets"'
+		);
+		expect(sql).toContain(
+			'UPDATE "widgets"."callback_otp_challenges" AS challenge'
+		);
+		expect(sql).toContain('"destination_hash" =');
+		expect(sql).toContain('"ip_hash" =');
+		expect(sql).toContain('"code_hash" =');
+		expect(sql).toContain('FOR UPDATE OF challenge SKIP LOCKED');
+		expect(sql).toContain('FOR UPDATE OF bucket SKIP LOCKED');
 	});
 });

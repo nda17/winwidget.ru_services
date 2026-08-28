@@ -13,6 +13,7 @@ const MAX_CALCULATOR_OPTIONS = 20;
 const MAX_CALCULATOR_PRICE = 1_000_000_000;
 const CALLBACK_TIME_SLOTS_MAX = 12;
 const CALLBACK_TIME_SLOT_MAX_LENGTH = 60;
+const CALLBACK_VERIFICATION_MODES = new Set(['OFF', 'SMS', 'EMAIL']);
 
 const numberValue = (value: unknown, fallback: number): number => {
 	const numeric = Number(value);
@@ -225,7 +226,22 @@ const normalizeQuiz = (raw: unknown): Prisma.InputJsonObject => {
 };
 
 const normalizeCallback = (raw: unknown): Prisma.InputJsonObject => {
-	const { defaults, result } = baseConfig(WidgetType.CALLBACK, raw);
+	const { defaults, value, result } = baseConfig(WidgetType.CALLBACK, raw);
+	if (
+		typeof value.verificationMode !== 'string' ||
+		!CALLBACK_VERIFICATION_MODES.has(value.verificationMode)
+	) {
+		throw new BadRequestException(
+			'Укажите режим проверки обратного звонка: OFF, SMS или EMAIL'
+		);
+	}
+	if (typeof value.launcherEnabled !== 'boolean') {
+		throw new BadRequestException(
+			'Укажите, должна ли отображаться кнопка виджета'
+		);
+	}
+	result.verificationMode = value.verificationMode;
+	result.launcherEnabled = value.launcherEnabled;
 	normalizeButtonLayout(result, defaults);
 	result.timeSlots = Array.isArray(result.timeSlots)
 		? [

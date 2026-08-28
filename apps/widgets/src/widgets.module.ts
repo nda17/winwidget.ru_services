@@ -65,6 +65,11 @@ import {
 	WidgetsAiConsultantManagementController,
 	WidgetsAiConsultantPublicController
 } from './http/widgets-ai-consultant.controller';
+import { WidgetsCallbackOtpService } from './callback/widgets-callback-otp.service';
+import {
+	WIDGETS_CALLBACK_OTP_TRANSPORT,
+	WidgetsCallbackOtpProvider
+} from './callback/widgets-callback-otp.transport';
 
 @Module({
 	imports: [
@@ -98,6 +103,12 @@ import {
 		WidgetsAiSessionTokenService,
 		WidgetsCloudflareTurnstileService,
 		WidgetsCloudflareAiProvider,
+		WidgetsCallbackOtpService,
+		WidgetsCallbackOtpProvider,
+		{
+			provide: WIDGETS_CALLBACK_OTP_TRANSPORT,
+			useExisting: WidgetsCallbackOtpProvider
+		},
 		{
 			provide: WIDGETS_AI_PROVIDER,
 			useExisting: WidgetsCloudflareAiProvider

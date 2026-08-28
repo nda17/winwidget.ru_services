@@ -210,6 +210,8 @@ const definitions: WidgetDefinition[] = [
 		defaultName: 'Обратный звонок',
 		defaultConfig: () => ({
 			...BUTTON,
+			verificationMode: 'OFF',
+			launcherEnabled: true,
 			bubbleEnabled: true,
 			bubbleText: 'Перезвоним!',
 			title: 'Заказать звонок',

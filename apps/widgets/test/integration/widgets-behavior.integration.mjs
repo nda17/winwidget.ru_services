@@ -107,6 +107,8 @@ try {
 			CLOUDFLARE_AI_API_ORIGIN: `http://127.0.0.1:${cloudflarePort}`,
 			WIDGETS_AI_SESSION_SECRET:
 				'behavior-session-secret-with-at-least-32-bytes',
+			WIDGETS_CALLBACK_OTP_SECRET:
+				'behavior-callback-otp-secret-at-least-32-bytes',
 			CLOUDFLARE_TURNSTILE_SITE_KEY: 'behavior-turnstile-site-key',
 			CLOUDFLARE_TURNSTILE_SECRET_KEY: 'behavior-turnstile-secret-key',
 			CLOUDFLARE_TURNSTILE_TIMEOUT_MS: '2000',
@@ -207,7 +209,12 @@ function widgetCases() {
 			collection: 'callbacks',
 			responseCollection: 'callbacks',
 			publicApi: 'callback',
-			config: { title: 'Behavior callback', filterDuplicates: false },
+			config: {
+				title: 'Behavior callback',
+				filterDuplicates: false,
+				verificationMode: 'OFF',
+				launcherEnabled: true
+			},
 			lead: {
 				phone: '+79990000003',
 				timeSlot: '9:00–11:00',
@@ -414,6 +421,13 @@ async function exerciseAllWidgetTypes() {
 			assert(
 				config.buttonImageUrl === widget.config.buttonImageUrl,
 				'Published wheel config lost its managed button image'
+			);
+		}
+		if (definition.key === 'callback') {
+			assert(
+				config.verificationMode === 'OFF' &&
+					config.launcherEnabled === true,
+				'Callback public verification contract drifted'
 			);
 		}
 		if (definition.key === 'aiConsultant') {

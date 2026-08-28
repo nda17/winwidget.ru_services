@@ -77,6 +77,7 @@ async function bootstrap(): Promise<void> {
 					'GET, POST, OPTIONS'
 				);
 				response.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+				response.setHeader('Access-Control-Expose-Headers', 'Retry-After');
 				if (request.method === 'OPTIONS')
 					return response.status(204).end();
 				next();
