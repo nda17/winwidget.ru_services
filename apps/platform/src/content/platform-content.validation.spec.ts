@@ -31,6 +31,14 @@ const aiConsultantHomeCardMigration = readFileSync(
 	'utf8'
 );
 
+const selectedHomeContentRestoreMigration = readFileSync(
+	resolve(
+		__dirname,
+		'../../prisma/migrations/20260828020000_restore_selected_home_content/migration.sql'
+	),
+	'utf8'
+);
+
 describe('Platform content validation', () => {
 	it('removes executable legal markup and every dangerous URL form', () => {
 		const sanitized = sanitizeLegalHtml(
@@ -263,6 +271,46 @@ describe('Platform content validation', () => {
 			'"platform"."refresh_current_semantic_fingerprint"('
 		);
 		expect(aiConsultantHomeCardMigration).toMatch(
+			/IF updated_rows = 1 THEN\s+PERFORM "platform"\."refresh_current_semantic_fingerprint"/
+		);
+	});
+
+	it('restores the selected persisted landing sections', () => {
+		expect(selectedHomeContentRestoreMigration.trimStart()).toMatch(
+			/^BEGIN;/
+		);
+		expect(selectedHomeContentRestoreMigration.trimEnd()).toMatch(
+			/COMMIT;$/
+		);
+		expect(selectedHomeContentRestoreMigration).toContain(
+			"E'Увеличение конверсии\\nсайта до'"
+		);
+		expect(selectedHomeContentRestoreMigration).toContain(
+			"'accentText', '30%'"
+		);
+		expect(selectedHomeContentRestoreMigration).toContain(
+			'Как это работает на практике'
+		);
+		expect(selectedHomeContentRestoreMigration).toContain('Лендинг акции');
+		expect(selectedHomeContentRestoreMigration).toContain(
+			'Установка проще, чем сварить кофе'
+		);
+		expect(selectedHomeContentRestoreMigration).toContain(
+			"E'Ловите\\nгорячие\\nлиды!'"
+		);
+		expect(selectedHomeContentRestoreMigration).not.toContain("'faq'");
+		expect(
+			selectedHomeContentRestoreMigration.match(
+				/COALESCE\(section_content -> 'items' -> [0-2], '\{\}'::JSONB\)/g
+			)
+		).toHaveLength(6);
+		expect(selectedHomeContentRestoreMigration).toContain(
+			"pg_catalog.jsonb_typeof(section_content -> 'items') <> 'array'"
+		);
+		expect(selectedHomeContentRestoreMigration).toContain(
+			'AND "content" IS DISTINCT FROM next_content'
+		);
+		expect(selectedHomeContentRestoreMigration).toMatch(
 			/IF updated_rows = 1 THEN\s+PERFORM "platform"\."refresh_current_semantic_fingerprint"/
 		);
 	});
