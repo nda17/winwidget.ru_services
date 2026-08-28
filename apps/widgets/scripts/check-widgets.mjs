@@ -455,6 +455,31 @@ requireRuntimePattern(
 	/['"]\/ai-consultant\/['"]\s*\+\s*encodeURIComponent\(KEY\)\s*\+\s*['"]\/messages['"]/,
 	'AI message endpoint'
 );
+requireRuntimePattern(
+	'ai-consultant.js',
+	/var AUTO_FOCUS_ENABLED\s*=\s*window\.__winwidgetPreviewDisableAutoFocus\s*!==\s*true;/,
+	'preview-only autofocus opt-out'
+);
+
+const aiSendMessageSource = getNamedFunctionSource(
+	runtimeSources['ai-consultant.js'],
+	'sendMessage'
+);
+const aiOpenChatSource = getNamedFunctionSource(
+	runtimeSources['ai-consultant.js'],
+	'openChat'
+);
+if (
+	!aiSendMessageSource.includes(
+		'if (isOpen && !destroyed && AUTO_FOCUS_ENABLED) input.focus();'
+	) ||
+	!aiOpenChatSource.includes('if (AUTO_FOCUS_ENABLED) input.focus();')
+) {
+	console.error(
+		'widgets: ai-consultant.js must not steal focus inside the settings preview'
+	);
+	process.exit(1);
+}
 
 for (const [source, label] of [
 	["button.id = 'waic-button'", 'canonical launcher selector'],

@@ -533,7 +533,11 @@ export class WidgetsLifecycleService {
 			warnings.push({
 				code: 'INSTALL_DOMAIN_REQUIRED',
 				message:
-					'Домен не указан — виджет будет работать только по прямой ссылке'
+					type === WidgetType.AI_CONSULTANT ||
+					type === WidgetType.STOP_OFFER ||
+					type === WidgetType.TIMER
+						? 'Домен не указан — виджет не появится на сайте'
+						: 'Домен не указан — виджет будет работать только по прямой ссылке'
 			});
 		}
 		if (!widget.publishedVersion) {

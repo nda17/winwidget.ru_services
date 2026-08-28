@@ -94,4 +94,54 @@ describe('WidgetsLifecycleService AI consultant readiness', () => {
 			).not.toThrow();
 		}
 	);
+
+	it.each([
+		WidgetType.AI_CONSULTANT,
+		WidgetType.STOP_OFFER,
+		WidgetType.TIMER
+	])('does not advertise a direct link without a domain for %s', type => {
+		const lifecycle = service() as unknown as {
+			readiness(
+				type: WidgetType,
+				widget: WidgetEntity
+			): {
+				warnings: Array<{ code: string; message: string }>;
+			};
+		};
+
+		const readiness = lifecycle.readiness(
+			type,
+			candidate('https://example.test/privacy')
+		);
+
+		expect(readiness.warnings).toContainEqual({
+			code: 'INSTALL_DOMAIN_REQUIRED',
+			message: 'Домен не указан — виджет не появится на сайте'
+		});
+		expect(JSON.stringify(readiness.warnings)).not.toContain(
+			'только по прямой ссылке'
+		);
+	});
+
+	it('keeps the direct-link warning for widgets that expose the control', () => {
+		const lifecycle = service() as unknown as {
+			readiness(
+				type: WidgetType,
+				widget: WidgetEntity
+			): {
+				warnings: Array<{ code: string; message: string }>;
+			};
+		};
+
+		const readiness = lifecycle.readiness(
+			WidgetType.WHEEL,
+			candidate('https://example.test/privacy')
+		);
+
+		expect(readiness.warnings).toContainEqual({
+			code: 'INSTALL_DOMAIN_REQUIRED',
+			message:
+				'Домен не указан — виджет будет работать только по прямой ссылке'
+		});
+	});
 });

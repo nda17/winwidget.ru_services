@@ -38,6 +38,8 @@
 	var PUBLISHED_VERSION = 0;
 	var telemetryEventsSent = Object.create(null);
 	var AUTO_OPEN = Boolean(window.winAiConsultantAutoOpen);
+	var AUTO_FOCUS_ENABLED =
+		window.__winwidgetPreviewDisableAutoFocus !== true;
 
 	function updatePublishedVersion(value) {
 		var nextVersion = Number(value);
@@ -801,7 +803,7 @@
 		} finally {
 			if (activeController === flowController) activeController = null;
 			setInFlight(false);
-			if (isOpen && !destroyed) input.focus();
+			if (isOpen && !destroyed && AUTO_FOCUS_ENABLED) input.focus();
 		}
 	}
 
@@ -813,7 +815,7 @@
 		button.setAttribute('aria-expanded', 'true');
 		sendTelemetryEvent('OPEN');
 		window.setTimeout(function () {
-			input.focus();
+			if (AUTO_FOCUS_ENABLED) input.focus();
 		}, 30);
 	}
 
