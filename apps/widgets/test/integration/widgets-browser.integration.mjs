@@ -527,6 +527,9 @@ function browserPage(browserCase) {
           return;
         }
 		if (testCase.type === 'ai-consultant') {
+			await waitFor(function () {
+				return shadow.querySelector('.waic-button-ready');
+			}, 'consultant ready');
 			var styleNodes = Array.prototype.slice.call(
 				shadow.querySelectorAll('style')
 			);
@@ -547,7 +550,7 @@ function browserPage(browserCase) {
 				!shadow.querySelector('.waic-privacy').textContent.includes(
 					'Не указывайте персональные данные'
 				) ||
-				!/^https?:\/\//.test(privacyLink.href)
+				!/^https?:\/\//.test(privacyLink.getAttribute('href') || '')
 			) {
 				throw new Error('AI consultant privacy notice drifted');
 			}
