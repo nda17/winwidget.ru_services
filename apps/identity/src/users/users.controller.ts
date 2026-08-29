@@ -1,10 +1,15 @@
 import {
 	BadRequestException,
 	Body,
+	CallHandler,
 	Controller,
 	Delete,
+	ExecutionContext,
 	Get,
 	HttpCode,
+	Injectable,
+	mixin,
+	NestInterceptor,
 	Param,
 	Patch,
 	Post,
@@ -15,11 +20,13 @@ import {
 	UseGuards,
 	UseInterceptors,
 	UsePipes,
-	ValidationPipe
+	ValidationPipe,
+	type Type
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { Role } from '@prisma/identity-client';
 import type { Request } from 'express';
+import type { Observable } from 'rxjs';
 import {
 	AVATAR_MAX_UPLOAD_BYTES,
 	AVATAR_MIME_TYPES
@@ -38,10 +45,13 @@ import { UsersService } from './users.service';
 
 export const AVATAR_UPLOAD_OPTIONS = {
 	limits: {
+		fieldNameSize: 64,
+		fieldSize: 64,
 		fileSize: AVATAR_MAX_UPLOAD_BYTES,
 		files: 1,
 		fields: 0,
-		parts: 2
+		parts: 2,
+		fieldNestingDepth: 0
 	},
 	fileFilter: (
 		_request: Express.Request,
@@ -59,6 +69,41 @@ export const AVATAR_UPLOAD_OPTIONS = {
 		}
 		callback(null, true);
 	}
+};
+
+const MULTER_FIELD_NESTING_ERROR_CODE = 'LIMIT_FIELD_NESTING';
+
+export const transformAvatarUploadException = (
+	error: unknown
+): unknown => {
+	if (
+		error instanceof Error &&
+		'code' in error &&
+		error.code === MULTER_FIELD_NESTING_ERROR_CODE
+	) {
+		return new BadRequestException(error.message);
+	}
+	return error;
+};
+
+export const AvatarUploadInterceptor = (): Type<NestInterceptor> => {
+	const BaseInterceptor = FileInterceptor('file', AVATAR_UPLOAD_OPTIONS);
+
+	@Injectable()
+	class IdentityAvatarUploadInterceptor extends BaseInterceptor {
+		override async intercept(
+			context: ExecutionContext,
+			next: CallHandler
+		): Promise<Observable<unknown>> {
+			try {
+				return await super.intercept(context, next);
+			} catch (error) {
+				throw transformAvatarUploadException(error);
+			}
+		}
+	}
+
+	return mixin(IdentityAvatarUploadInterceptor);
 };
 
 @Controller('users')
@@ -90,7 +135,7 @@ export class UsersController {
 	@Put('profile/avatar')
 	@HttpCode(200)
 	@Auth(Role.USER)
-	@UseInterceptors(FileInterceptor('file', AVATAR_UPLOAD_OPTIONS))
+	@UseInterceptors(AvatarUploadInterceptor())
 	uploadProfileAvatar(
 		@CurrentUser('id') userId: string,
 		@UploadedFile() file: Express.Multer.File | undefined,
@@ -253,7 +298,7 @@ export class UsersController {
 	@Put('user/:id/avatar')
 	@HttpCode(200)
 	@Auth(Role.ADMIN)
-	@UseInterceptors(FileInterceptor('file', AVATAR_UPLOAD_OPTIONS))
+	@UseInterceptors(AvatarUploadInterceptor())
 	uploadUserAvatar(
 		@CurrentUser('id') actorId: string,
 		@CurrentUser('rights') actorRights: Role[],

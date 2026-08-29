@@ -68,9 +68,10 @@ jobs:
           cache-dependency-path: apps/${{ matrix.app }}/pnpm-lock.yaml
       - name: Install ${{ matrix.app }}
         run: pnpm --dir "apps/${{ matrix.app }}" install --frozen-lockfile
-      - name: Audit Widgets production dependencies
-        if: matrix.app == 'widgets'
-        run: pnpm --dir apps/widgets audit --prod --audit-level high
+      - name: Audit production dependencies
+        run: >-
+          pnpm --dir "apps/${{ matrix.app }}" audit
+          --prod --audit-level high
       - name: Generate Prisma client
         if: matrix.app != 'api-gateway'
         run: pnpm --dir "apps/${{ matrix.app }}" run prisma:generate
@@ -141,11 +142,171 @@ jobs:
       - name: Run Widgets behavior integration
         run: pnpm --dir apps/widgets run test:integration:behavior
 
+  service-integration:
+    name: Service integration / ${{ matrix.app }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - app: campaigns
+            schema: campaigns
+          - app: notification-delivery
+            schema: notification_delivery
+          - app: reporting
+            schema: reporting
+    services:
+      postgres:
+        image: postgres:18-bookworm@sha256:1961f96e6029a02c3812d7cb329a3b03a3ac2bb067058dec17b0f5596aca9296
+        env:
+          POSTGRES_USER: services_ci
+          POSTGRES_PASSWORD: services_ci
+          POSTGRES_DB: services_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U services_ci -d services_ci"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 30
+      rabbitmq:
+        image: rabbitmq:4.2.9-management-alpine@sha256:0ab90fc05c41e9d2d8f11af5036e466c364adf5085ed83c477ab41aec0bdde86
+        env:
+          RABBITMQ_DEFAULT_USER: admin_ci
+          RABBITMQ_DEFAULT_PASS: admin_ci
+          RABBITMQ_DEFAULT_VHOST: winwidget
+        ports:
+          - 5672:5672
+        options: >-
+          --health-cmd "rabbitmq-diagnostics -q ping"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 30
+    env:
+      CAMPAIGNS_DATABASE_URL: postgresql://services_ci:services_ci@127.0.0.1:5432/services_ci?schema=campaigns
+      CAMPAIGNS_TEST_DATABASE_URL: postgresql://services_ci:services_ci@127.0.0.1:5432/services_ci?schema=campaigns
+      CAMPAIGNS_TEST_MIGRATION_DATABASE_URL: postgresql://services_ci:services_ci@127.0.0.1:5432/services_ci?schema=campaigns
+      CAMPAIGNS_INTEGRATION_ALLOW_MUTATION: 'true'
+      CAMPAIGNS_TEST_RABBITMQ_URL: amqp://restricted_ci:restricted_ci@127.0.0.1:5672/winwidget
+      NOTIFICATION_DELIVERY_DATABASE_URL: postgresql://services_ci:services_ci@127.0.0.1:5432/services_ci?schema=notification_delivery
+      NOTIFICATION_DELIVERY_INTEGRATION_ALLOW_PURGE: 'true'
+      NOTIFICATION_DELIVERY_TEST_RABBITMQ_URL: amqp://restricted_ci:restricted_ci@127.0.0.1:5672/winwidget
+      RABBITMQ_URL: amqp://admin_ci:admin_ci@127.0.0.1:5672/winwidget
+      REPORTING_DATABASE_URL: postgresql://services_ci:services_ci@127.0.0.1:5432/services_ci?schema=reporting
+      REPORTING_TEST_DATABASE_URL: postgresql://services_ci:services_ci@127.0.0.1:5432/services_ci?schema=reporting
+      REPORTING_TEST_MIGRATION_DATABASE_URL: postgresql://services_ci:services_ci@127.0.0.1:5432/services_ci?schema=reporting
+      REPORTING_INTEGRATION_ALLOW_MUTATION: 'true'
+      REPORTING_TEST_RABBITMQ_ADMIN_URL: amqp://admin_ci:admin_ci@127.0.0.1:5672/winwidget
+      REPORTING_TEST_RABBITMQ_URL: amqp://restricted_ci:restricted_ci@127.0.0.1:5672/winwidget
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Verify immutable revision
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.9
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 20
+          cache: pnpm
+          cache-dependency-path: apps/${{ matrix.app }}/pnpm-lock.yaml
+      - name: Install ${{ matrix.app }}
+        run: pnpm --dir "apps/${{ matrix.app }}" install --frozen-lockfile
+      - name: Prepare shared RabbitMQ exchanges
+        run: >-
+          pnpm --dir "apps/${{ matrix.app }}" exec node -e
+          'const amqp=require("amqplib");
+          (async()=>{const connection=await amqp.connect(process.env.RABBITMQ_URL);
+          const channel=await connection.createChannel();
+          await channel.assertExchange("winwidget.events","topic",{durable:true});
+          await channel.assertExchange("winwidget.dead-letter","topic",{durable:true});
+          await channel.close();await connection.close()})()
+          .catch(error=>{console.error(error.message);process.exit(1)})'
+      - name: Generate Prisma client
+        run: pnpm --dir "apps/${{ matrix.app }}" run prisma:generate
+      - name: Prepare service schema
+        run: >-
+          docker exec "${{ job.services.postgres.id }}"
+          psql -U services_ci -d services_ci -v ON_ERROR_STOP=1
+          -c "CREATE SCHEMA ${{ matrix.schema }} AUTHORIZATION services_ci"
+      - name: Prepare restricted RabbitMQ user
+        env:
+          INTEGRATION_APP: ${{ matrix.app }}
+          RABBITMQ_CONTAINER_ID: ${{ job.services.rabbitmq.id }}
+        run: |
+          case "$INTEGRATION_APP" in
+            campaigns)
+              configure='^(winwidget\.events|winwidget\.dead-letter|winwidget\.campaigns\..*)$'
+              write="$configure"
+              read="$configure"
+              ;;
+            reporting)
+              configure='^(winwidget\.events|winwidget\.dead-letter|winwidget\.reporting\..*)$'
+              write="$configure"
+              read="$configure"
+              ;;
+            notification-delivery)
+              configure='^winwidget\..*$'
+              write="$configure"
+              read="$configure"
+              ;;
+            *)
+              exit 1
+              ;;
+          esac
+          docker exec "$RABBITMQ_CONTAINER_ID" rabbitmqctl add_user restricted_ci restricted_ci
+          docker exec "$RABBITMQ_CONTAINER_ID" rabbitmqctl set_permissions \
+            -p winwidget restricted_ci "$configure" "$write" "$read"
+      - name: Apply service migrations
+        run: pnpm --dir "apps/${{ matrix.app }}" run prisma:migrate:deploy
+      - name: Build ${{ matrix.app }}
+        run: pnpm --dir "apps/${{ matrix.app }}" run build
+      - name: Run service integration
+        run: pnpm --dir "apps/${{ matrix.app }}" run test:integration
+
+  production-image:
+    name: Production image / ${{ matrix.app }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        app:
+          - billing
+          - campaigns
+          - identity
+          - notification-delivery
+          - operations
+          - platform
+          - reporting
+          - support
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Verify immutable revision
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+      - name: Build production image
+        run: >-
+          docker build
+          --build-arg "APP_REVISION=${{ github.sha }}"
+          --tag "winwidget-${{ matrix.app }}:ci-${{ github.sha }}"
+          "apps/${{ matrix.app }}"
+
   deploy-production:
     name: Deploy production
     needs:
       - lifecycle-contract
+      - production-image
       - service
+      - service-integration
       - widgets-integration
     if: github.event_name == 'push' && github.ref == 'refs/heads/prod'
     uses: nda17/winwidget.ru_infra/.github/workflows/deploy-production.yml@ec6fe29aea47e374b2a081d0c8d29feda6a19cab

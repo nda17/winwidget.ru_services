@@ -503,7 +503,6 @@ async function assertConcurrentDailySummaryPatches(port) {
 					'content-type': 'application/json'
 				},
 				body: JSON.stringify({
-					destinationChatId: '-100200',
 					messageThreadId: 77,
 					scheduleTime: '02:10',
 					expectedScheduleGeneration: '0'
@@ -511,7 +510,7 @@ async function assertConcurrentDailySummaryPatches(port) {
 			},
 			200
 		);
-		assert.equal(atomic.destinationChatId, '-100200');
+		assert.equal(atomic.destinationChatId, '-100100');
 		assert.equal(atomic.messageThreadId, 77);
 		assert.equal(atomic.scheduleTime, '02:10');
 		assert.equal(atomic.scheduleGeneration, '1');
@@ -526,7 +525,7 @@ async function assertConcurrentDailySummaryPatches(port) {
 			}),
 			findSettingsAuditOutbox()
 		]);
-		assert.equal(settings.destinationChatId, '-100200');
+		assert.equal(settings.destinationChatId, '-100100');
 		assert.equal(settings.scheduleTime, '02:10');
 		assert.equal(settings.timezone, 'Europe/Moscow');
 		assert.equal(settings.messageThreadId, 77);
@@ -537,7 +536,6 @@ async function assertConcurrentDailySummaryPatches(port) {
 		);
 		assert.equal(atomicEvents.length, 1);
 		assert.deepEqual(atomicEvents[0].payload?.metadata?.changedFields, [
-			'destinationChatId',
 			'messageThreadId',
 			'scheduleTime'
 		]);

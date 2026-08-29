@@ -4,6 +4,15 @@ export const DATABASE_RESTORE_TARGETS = DATABASE_BACKUP_TARGETS;
 export type DatabaseRestoreTarget =
 	(typeof DATABASE_RESTORE_TARGETS)[number];
 export const DATABASE_RESTORE_MAX_FILE_SIZE_BYTES = 49 * 1024 * 1024;
+export const DATABASE_RESTORE_UPLOAD_LIMITS = {
+	fieldNameSize: 64,
+	fieldSize: 1024,
+	fields: 2,
+	fileSize: DATABASE_RESTORE_MAX_FILE_SIZE_BYTES,
+	files: 1,
+	parts: 4,
+	fieldNestingDepth: 0
+} as const;
 
 export const DATABASE_RESTORE_SETTINGS: ReadonlyArray<{
 	id: DatabaseRestoreTarget;

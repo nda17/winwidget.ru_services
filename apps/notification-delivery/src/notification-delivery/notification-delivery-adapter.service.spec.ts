@@ -1,10 +1,10 @@
 import { NotificationDeliveryAdapterService } from './notification-delivery-adapter.service';
 import LeadNotificationEmail from '../../emails/lead-notification.email';
 import { EmailService } from '../email/email.service';
-import type { MailerService } from '@nestjs-modules/mailer';
 import type { NotificationDeliveryPrismaService } from './prisma/notification-delivery-prisma.service';
 import type { TelegramInfoTransportService } from '../telegram/telegram-info-transport.service';
 import { render } from '@react-email/render';
+import type { Transporter } from 'nodemailer';
 
 describe('NotificationDeliveryAdapterService', () => {
 	const email = {
@@ -130,7 +130,7 @@ describe('NotificationDeliveryAdapterService', () => {
 		const sendMail = jest.fn().mockResolvedValue(undefined);
 		const ownedEmail = new EmailService({
 			sendMail
-		} as unknown as MailerService);
+		} as unknown as Transporter);
 
 		await ownedEmail.sendEmail(
 			'owner@example.com',

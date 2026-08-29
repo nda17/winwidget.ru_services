@@ -1,4 +1,8 @@
-import { INestApplication, RequestMethod } from '@nestjs/common';
+import {
+	BadRequestException,
+	INestApplication,
+	RequestMethod
+} from '@nestjs/common';
 import {
 	GUARDS_METADATA,
 	METHOD_METADATA,
@@ -7,12 +11,14 @@ import {
 import { Test } from '@nestjs/testing';
 import { Role } from '@prisma/identity-client';
 import request from 'supertest';
+import { AVATAR_MAX_UPLOAD_BYTES } from '../avatar/avatar-storage.service';
 import { AvatarService } from '../avatar/avatar.service';
+import { IDENTITY_ROLES, IdentityAuthGuard } from '../auth/auth.guard';
 import {
-	IDENTITY_ROLES,
-	IdentityAuthGuard
-} from '../auth/auth.guard';
-import { UsersController } from './users.controller';
+	AVATAR_UPLOAD_OPTIONS,
+	transformAvatarUploadException,
+	UsersController
+} from './users.controller';
 import { UsersService } from './users.service';
 
 const PNG = Buffer.concat([
@@ -60,8 +66,12 @@ describe('Identity avatar HTTP contract', () => {
 
 	beforeEach(() => {
 		jest.clearAllMocks();
-		avatars.uploadSelf.mockResolvedValue({ avatarPath: 'https://cdn/avatar' });
-		avatars.uploadAdmin.mockResolvedValue({ avatarPath: 'https://cdn/avatar' });
+		avatars.uploadSelf.mockResolvedValue({
+			avatarPath: 'https://cdn/avatar'
+		});
+		avatars.uploadAdmin.mockResolvedValue({
+			avatarPath: 'https://cdn/avatar'
+		});
 		avatars.deleteSelf.mockResolvedValue({ avatarPath: null });
 		avatars.deleteAdmin.mockResolvedValue({ avatarPath: null });
 	});
@@ -118,15 +128,73 @@ describe('Identity avatar HTTP contract', () => {
 		expect(avatars.uploadSelf).not.toHaveBeenCalled();
 	});
 
+	it('rejects multipart text fields before the service', async () => {
+		await request(app.getHttpServer())
+			.put('/api/v1/users/profile/avatar')
+			.field('profile[name]', 'attacker-controlled')
+			.attach('file', PNG, {
+				filename: 'avatar.png',
+				contentType: 'image/png'
+			})
+			.expect(400);
+		expect(avatars.uploadSelf).not.toHaveBeenCalled();
+	});
+
+	it('rejects an oversized avatar before the service', async () => {
+		await request(app.getHttpServer())
+			.put('/api/v1/users/profile/avatar')
+			.attach('file', Buffer.alloc(AVATAR_MAX_UPLOAD_BYTES + 1), {
+				filename: 'avatar.png',
+				contentType: 'image/png'
+			})
+			.expect(413);
+		expect(avatars.uploadSelf).not.toHaveBeenCalled();
+	});
+
+	it('sets finite multipart limits for both avatar endpoints', () => {
+		expect(AVATAR_UPLOAD_OPTIONS.limits).toEqual({
+			fieldNameSize: 64,
+			fieldSize: 64,
+			fileSize: AVATAR_MAX_UPLOAD_BYTES,
+			files: 1,
+			fields: 0,
+			parts: 2,
+			fieldNestingDepth: 0
+		});
+	});
+
+	it('maps Multer field nesting errors to HTTP 400', () => {
+		const error = Object.assign(new Error('Field name nesting too deep'), {
+			code: 'LIMIT_FIELD_NESTING'
+		});
+
+		const transformed = transformAvatarUploadException(error);
+
+		expect(transformed).toBeInstanceOf(BadRequestException);
+		expect((transformed as BadRequestException).getStatus()).toBe(400);
+	});
+
+	it('does not hide unrelated upload errors', () => {
+		const error = new Error('Unexpected upload failure');
+
+		expect(transformAvatarUploadException(error)).toBe(error);
+	});
+
 	it('freezes PUT methods, paths, roles and the Identity auth guard', () => {
 		const self = UsersController.prototype.uploadProfileAvatar;
 		const admin = UsersController.prototype.uploadUserAvatar;
-		expect(Reflect.getMetadata(PATH_METADATA, UsersController)).toBe('users');
-		expect(Reflect.getMetadata(GUARDS_METADATA, UsersController)).toContain(
-			IdentityAuthGuard
+		expect(Reflect.getMetadata(PATH_METADATA, UsersController)).toBe(
+			'users'
 		);
-		expect(Reflect.getMetadata(PATH_METADATA, self)).toBe('profile/avatar');
-		expect(Reflect.getMetadata(METHOD_METADATA, self)).toBe(RequestMethod.PUT);
+		expect(
+			Reflect.getMetadata(GUARDS_METADATA, UsersController)
+		).toContain(IdentityAuthGuard);
+		expect(Reflect.getMetadata(PATH_METADATA, self)).toBe(
+			'profile/avatar'
+		);
+		expect(Reflect.getMetadata(METHOD_METADATA, self)).toBe(
+			RequestMethod.PUT
+		);
 		expect(Reflect.getMetadata(IDENTITY_ROLES, self)).toEqual([Role.USER]);
 		expect(Reflect.getMetadata(PATH_METADATA, admin)).toBe(
 			'user/:id/avatar'
@@ -134,6 +202,8 @@ describe('Identity avatar HTTP contract', () => {
 		expect(Reflect.getMetadata(METHOD_METADATA, admin)).toBe(
 			RequestMethod.PUT
 		);
-		expect(Reflect.getMetadata(IDENTITY_ROLES, admin)).toEqual([Role.ADMIN]);
+		expect(Reflect.getMetadata(IDENTITY_ROLES, admin)).toEqual([
+			Role.ADMIN
+		]);
 	});
 });

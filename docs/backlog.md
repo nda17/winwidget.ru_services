@@ -267,35 +267,20 @@ credentials в browser и проверить все семь типов на в�
 
 ## Инженерная эксплуатация
 
-### P1 — закрыть high-уязвимости Nest-зависимостей остальных сервисов
+### P2 — устранить оставшиеся moderate/low зависимости сервисов
 
-После исправления Widgets уязвимые transitive pins `multer@2.0.2` и
-`lodash@4.17.21` остаются в lockfile приложений `billing`, `campaigns`,
-`identity`, `notification-delivery`, `operations`, `platform`, `reporting` и
-`support`. Не распространять Widgets override автоматически: каждый сервис
-владеет своим dependency tree и должен пройти отдельные regression-проверки.
+Production audit всей service matrix от 30.08.2026 не содержит high/critical.
+В девяти доменных приложениях остаётся от четырёх до пяти moderate и одна low
+уязвимость; API Gateway findings не имеет. Общие findings включают
+`file-type@20.4.1` через `@nestjs/common` и
+`@nestjs/core@10.4.22`, а также `qs@6.14.2` и `body-parser@1.20.4`;
+Identity, Notification Delivery и Platform требуют отдельного разбора
+дополнительного moderate finding. Текущие upload endpoints ограничивают тип и
+размер файлов, SSE endpoints не используются, но зависимости должны быть
+обновлены планово.
 
-- Использовать parent-scoped overrides `@nestjs/config>lodash@4.18.1` и
-  `@nestjs/platform-express>multer@2.2.0`, пока major-переход на NestJS 11 и
-  Express 5 не согласован отдельно.
-- Для upload endpoints Identity и Operations задать конечные `fields`, `files`,
-  `parts`, `fieldSize`, `fileSize` и `fieldNestingDepth`; новый
-  `LIMIT_FIELD_NESTING` преобразовывать в HTTP 400, не в 500.
-- Добавить endpoint regressions, frozen install, production audit для всей
-  service matrix, unit/integration и production Docker build затронутых
-  приложений.
-
-### P2 — устранить оставшиеся moderate/low зависимости Widgets
-
-Production audit Widgets от 30.08.2026 после закрытия high findings оставляет
-четыре moderate и одну low уязвимость: `file-type@20.4.1` через
-`@nestjs/common`, `@nestjs/core@10.4.22`, `qs@6.14.2` и
-`body-parser@1.20.4`. Текущий Widgets upload принимает только PNG до 200 КБ и
-не передаёт пользовательские файлы в `file-type`; SSE endpoints в сервисе не
-используются, но зависимости должны быть обновлены планово.
-
-- Не применять слепой major override `file-type` и не смешивать с текущим
-  security hotfix переход NestJS 10 → 11 / Express 4 → 5.
+- Не применять слепой major override `file-type` и не совмещать плановый
+  переход NestJS 10 → 11 / Express 4 → 5 с другими security hotfix.
 - Проверить совместимые patch/minor upgrades `qs` и `body-parser`, подготовить
   отдельный NestJS 11 migration contract и повторить audit/integration/Docker
   gates.
@@ -303,11 +288,12 @@ Production audit Widgets от 30.08.2026 после закрытия high findin
 ### P2 — повысить сигнал CI и распараллелить verify
 
 - Перехватывать ожидаемые ERROR/WARN отрицательных tests через logger spy.
-- Разделить verify на service-specific jobs для Gateway и девяти доменных
-  сервисов.
-- Общие lockfile/workflow/Compose/env/Gateway/RabbitMQ/migration изменения
-  должны запускать все затронутые jobs fail closed.
-- Сохранить required aggregator и cross-service contract/integration gate.
+- Добавить стабильный required aggregator поверх matrix jobs и сохранить
+  cross-service contract/integration gate.
+- В integration jobs использовать отдельные migration/runtime PostgreSQL-роли
+  без DDL и cross-schema доступа у runtime; RabbitMQ permissions и topic
+  permissions должны совпадать с production least-privilege contract, а не
+  разрешать весь `winwidget.*` namespace.
 
 ### P2 — декомпозировать перегруженные orchestration-классы
 

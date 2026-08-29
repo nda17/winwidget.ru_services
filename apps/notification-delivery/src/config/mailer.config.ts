@@ -1,9 +1,17 @@
-import { MailerOptions } from '@nestjs-modules/mailer';
 import { ConfigService } from '@nestjs/config';
+import nodemailer, { type Transporter } from 'nodemailer';
+import type SMTPTransport from 'nodemailer/lib/smtp-transport';
+
+export const EMAIL_TRANSPORTER = Symbol('EMAIL_TRANSPORTER');
+
+interface EmailTransportConfig {
+	transport: SMTPTransport.Options;
+	defaults: SMTPTransport.Options;
+}
 
 export const getMailerConfig = async (
 	configService: ConfigService
-): Promise<MailerOptions> => {
+): Promise<EmailTransportConfig> => {
 	const isDevelopment = configService.get('MODE') === 'development';
 	const configuredPort = Number(configService.get<string>('SMTP_PORT'));
 	const port =
@@ -47,4 +55,11 @@ export const getMailerConfig = async (
 			from: '"winwidget.ru" <no-reply@winwidget.ru>'
 		}
 	};
+};
+
+export const createEmailTransporter = async (
+	configService: ConfigService
+): Promise<Transporter> => {
+	const { transport, defaults } = await getMailerConfig(configService);
+	return nodemailer.createTransport(transport, defaults);
 };

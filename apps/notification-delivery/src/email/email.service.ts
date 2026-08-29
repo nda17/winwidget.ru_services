@@ -3,9 +3,10 @@ import LeadNotificationEmail from '../../emails/lead-notification.email';
 import LimitReachedEmail from '../../emails/limit-reached.email';
 import PaymentSucceededEmail from '../../emails/payment-succeeded.email';
 import SubscriptionExpiryReminderEmail from '../../emails/subscription-expiry-reminder.email';
-import { MailerService } from '@nestjs-modules/mailer';
-import { Injectable } from '@nestjs/common';
+import { EMAIL_TRANSPORTER } from '../config/mailer.config';
+import { Inject, Injectable } from '@nestjs/common';
 import { render } from '@react-email/render';
+import type { Transporter } from 'nodemailer';
 import { join } from 'node:path';
 
 const EMAIL_LOGO_CID = 'winwidget-notification-logo';
@@ -39,7 +40,10 @@ interface SubscriptionExpiryReminderPayload {
 
 @Injectable()
 export class EmailService {
-	constructor(private readonly mailerService: MailerService) {}
+	constructor(
+		@Inject(EMAIL_TRANSPORTER)
+		private readonly mailer: Transporter
+	) {}
 
 	sendEmail(
 		to: string,
@@ -47,7 +51,7 @@ export class EmailService {
 		html: string,
 		options: { messageId?: string } = {}
 	) {
-		return this.mailerService.sendMail({
+		return this.mailer.sendMail({
 			to,
 			subject,
 			html,
