@@ -11,6 +11,15 @@ import { randomBytes } from 'node:crypto';
 import { inflateSync } from 'node:zlib';
 
 export const WIDGET_BUTTON_IMAGE_MAX_SIZE_BYTES = 200 * 1024;
+export const WIDGET_BUTTON_IMAGE_UPLOAD_LIMITS = {
+	fieldNameSize: 64,
+	fieldSize: 32,
+	fields: 1,
+	fileSize: WIDGET_BUTTON_IMAGE_MAX_SIZE_BYTES,
+	files: 1,
+	parts: 3,
+	fieldNestingDepth: 0
+} as const;
 const MAX_DIMENSION = 320;
 
 @Injectable()

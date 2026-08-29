@@ -14,6 +14,7 @@ RUN apk add --no-cache openssl \
 FROM base AS deps
 
 COPY apps/widgets/package.json apps/widgets/pnpm-lock.yaml ./
+COPY apps/widgets/vendor ./vendor
 RUN pnpm install --frozen-lockfile
 
 FROM deps AS assets
@@ -27,6 +28,7 @@ FROM base AS builder
 
 COPY --from=deps /app/node_modules ./node_modules
 COPY apps/widgets/package.json apps/widgets/pnpm-lock.yaml apps/widgets/tsconfig.json apps/widgets/tsconfig.build.json ./
+COPY apps/widgets/vendor ./vendor
 COPY apps/widgets/prisma ./prisma
 COPY apps/widgets/src ./src
 COPY --from=assets /app/public/widgets ./public/widgets

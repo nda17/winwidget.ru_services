@@ -68,6 +68,9 @@ jobs:
           cache-dependency-path: apps/${{ matrix.app }}/pnpm-lock.yaml
       - name: Install ${{ matrix.app }}
         run: pnpm --dir "apps/${{ matrix.app }}" install --frozen-lockfile
+      - name: Audit Widgets production dependencies
+        if: matrix.app == 'widgets'
+        run: pnpm --dir apps/widgets audit --prod --audit-level high
       - name: Generate Prisma client
         if: matrix.app != 'api-gateway'
         run: pnpm --dir "apps/${{ matrix.app }}" run prisma:generate
@@ -81,11 +84,69 @@ jobs:
       - name: Build
         run: pnpm --dir "apps/${{ matrix.app }}" run build
 
+  widgets-integration:
+    name: Widgets security integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: widgets_ci
+          POSTGRES_PASSWORD: widgets_ci
+          POSTGRES_DB: widgets_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U widgets_ci -d widgets_ci"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 30
+    env:
+      WIDGETS_DATABASE_URL: postgresql://widgets_ci:widgets_ci@127.0.0.1:5432/widgets_ci
+      WIDGETS_TEST_DATABASE_URL: postgresql://widgets_ci:widgets_ci@127.0.0.1:5432/widgets_ci
+      WIDGETS_INTEGRATION_ALLOW_MUTATION: 'true'
+      WIDGETS_BROWSER_EXECUTABLE: /usr/bin/google-chrome
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Verify immutable revision
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.9
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 20
+          cache: pnpm
+          cache-dependency-path: apps/widgets/pnpm-lock.yaml
+      - name: Install Widgets
+        run: pnpm --dir apps/widgets install --frozen-lockfile
+      - name: Generate Prisma client
+        run: pnpm --dir apps/widgets run prisma:generate
+      - name: Prepare Widgets schema
+        run: >-
+          docker exec "${{ job.services.postgres.id }}"
+          psql -U widgets_ci -d widgets_ci -v ON_ERROR_STOP=1
+          -c "CREATE SCHEMA widgets AUTHORIZATION widgets_ci"
+      - name: Apply Widgets migrations
+        run: pnpm --dir apps/widgets run prisma:migrate:deploy
+      - name: Build Widgets
+        run: pnpm --dir apps/widgets run build
+      - name: Verify browser executable
+        run: test -x "$WIDGETS_BROWSER_EXECUTABLE"
+      - name: Run Widgets behavior integration
+        run: pnpm --dir apps/widgets run test:integration:behavior
+
   deploy-production:
     name: Deploy production
     needs:
       - lifecycle-contract
       - service
+      - widgets-integration
     if: github.event_name == 'push' && github.ref == 'refs/heads/prod'
     uses: nda17/winwidget.ru_infra/.github/workflows/deploy-production.yml@ec6fe29aea47e374b2a081d0c8d29feda6a19cab
     with:

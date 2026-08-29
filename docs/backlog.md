@@ -267,23 +267,38 @@ credentials в browser и проверить все семь типов на в�
 
 ## Инженерная эксплуатация
 
-### P1 — устранить high-уязвимости production-зависимостей Widgets
+### P1 — закрыть high-уязвимости Nest-зависимостей остальных сервисов
 
-`pnpm --dir apps/widgets audit --prod --audit-level high` от 28.08.2026
-подтвердил семь high findings в существующем baseline: `xlsx@0.18.5`,
-транзитивный `multer@2.0.2` через NestJS и `lodash@4.17.21` через
-`@nestjs/config`. Добавленный callback-функционал эти зависимости не вводит;
-новый `nodemailer` уже закреплён на исправленной версии `9.0.3`.
+После исправления Widgets уязвимые transitive pins `multer@2.0.2` и
+`lodash@4.17.21` остаются в lockfile приложений `billing`, `campaigns`,
+`identity`, `notification-delivery`, `operations`, `platform`, `reporting` и
+`support`. Не распространять Widgets override автоматически: каждый сервис
+владеет своим dependency tree и должен пройти отдельные regression-проверки.
 
-- Отдельно выбрать поддерживаемый источник и версию SheetJS: npm-пакет `xlsx`
-  не объявляет исправленной версии, поэтому слепой override запрещён.
-- Обновить NestJS/`@nestjs/config` либо применить только доказанно совместимые
-  overrides до исправленных `multer` и `lodash`.
-- Добавить regression-тесты загрузки файлов, экспорта XLSX, лимитов multipart и
-  обработки глубоко вложенных полей; затем повторить unit/integration,
-  production Docker build и dependency audit.
-- До исправления не расширять публичные upload/import endpoints и сохранять
-  действующие ограничения размера/типа входных файлов.
+- Использовать parent-scoped overrides `@nestjs/config>lodash@4.18.1` и
+  `@nestjs/platform-express>multer@2.2.0`, пока major-переход на NestJS 11 и
+  Express 5 не согласован отдельно.
+- Для upload endpoints Identity и Operations задать конечные `fields`, `files`,
+  `parts`, `fieldSize`, `fileSize` и `fieldNestingDepth`; новый
+  `LIMIT_FIELD_NESTING` преобразовывать в HTTP 400, не в 500.
+- Добавить endpoint regressions, frozen install, production audit для всей
+  service matrix, unit/integration и production Docker build затронутых
+  приложений.
+
+### P2 — устранить оставшиеся moderate/low зависимости Widgets
+
+Production audit Widgets от 30.08.2026 после закрытия high findings оставляет
+четыре moderate и одну low уязвимость: `file-type@20.4.1` через
+`@nestjs/common`, `@nestjs/core@10.4.22`, `qs@6.14.2` и
+`body-parser@1.20.4`. Текущий Widgets upload принимает только PNG до 200 КБ и
+не передаёт пользовательские файлы в `file-type`; SSE endpoints в сервисе не
+используются, но зависимости должны быть обновлены планово.
+
+- Не применять слепой major override `file-type` и не смешивать с текущим
+  security hotfix переход NestJS 10 → 11 / Express 4 → 5.
+- Проверить совместимые patch/minor upgrades `qs` и `body-parser`, подготовить
+  отдельный NestJS 11 migration contract и повторить audit/integration/Docker
+  gates.
 
 ### P2 — повысить сигнал CI и распараллелить verify
 

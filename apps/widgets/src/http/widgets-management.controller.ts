@@ -17,7 +17,6 @@ import {
 	UsePipes,
 	ValidationPipe
 } from '@nestjs/common';
-import { FileInterceptor } from '@nestjs/platform-express';
 import type { Request, Response } from 'express';
 import { WidgetsRoles } from '../auth/widgets-auth.decorator';
 import {
@@ -30,12 +29,12 @@ import {
 	WidgetType,
 	WIDGET_DEFINITIONS
 } from '../domain/widgets-domain.types';
-import { WIDGET_BUTTON_IMAGE_MAX_SIZE_BYTES } from '../domain/widgets-image.service';
 import { CreateWidgetDto, UpdateWidgetDto } from './widgets.dto';
 import {
 	CurrentWidgetsActor,
 	requestCorrelationId,
-	typeFromRequestPath
+	typeFromRequestPath,
+	WidgetButtonImageInterceptor
 } from './widgets-http.util';
 
 const COLLECTIONS = WIDGET_DEFINITIONS.map(item => item.collection);
@@ -121,11 +120,7 @@ export class WidgetsManagementController {
 
 	@Post(IMAGE_PATHS)
 	@HttpCode(200)
-	@UseInterceptors(
-		FileInterceptor('file', {
-			limits: { fileSize: WIDGET_BUTTON_IMAGE_MAX_SIZE_BYTES }
-		})
-	)
+	@UseInterceptors(WidgetButtonImageInterceptor())
 	uploadImage(
 		@Req() request: Request,
 		@CurrentWidgetsActor() actor: IntrospectedWidgetsActor,

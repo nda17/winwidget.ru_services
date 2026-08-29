@@ -1,16 +1,61 @@
 import {
 	BadRequestException,
+	CallHandler,
 	createParamDecorator,
-	ExecutionContext
+	ExecutionContext,
+	Injectable,
+	mixin,
+	NestInterceptor,
+	Type
 } from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
 import type { Request } from 'express';
 import { randomUUID } from 'node:crypto';
+import type { Observable } from 'rxjs';
 import type { WidgetsRequest } from '../auth/widgets-request';
 import {
 	parseWidgetType,
 	WidgetType,
 	WIDGET_DEFINITIONS
 } from '../domain/widgets-domain.types';
+import { WIDGET_BUTTON_IMAGE_UPLOAD_LIMITS } from '../domain/widgets-image.service';
+
+const MULTER_FIELD_NESTING_ERROR_CODE = 'LIMIT_FIELD_NESTING';
+
+export const transformWidgetUploadException = (
+	error: unknown
+): unknown => {
+	if (
+		error instanceof Error &&
+		'code' in error &&
+		error.code === MULTER_FIELD_NESTING_ERROR_CODE
+	) {
+		return new BadRequestException(error.message);
+	}
+	return error;
+};
+
+export const WidgetButtonImageInterceptor = (): Type<NestInterceptor> => {
+	const BaseInterceptor = FileInterceptor('file', {
+		limits: WIDGET_BUTTON_IMAGE_UPLOAD_LIMITS
+	});
+
+	@Injectable()
+	class WidgetButtonImageUploadInterceptor extends BaseInterceptor {
+		override async intercept(
+			context: ExecutionContext,
+			next: CallHandler
+		): Promise<Observable<unknown>> {
+			try {
+				return await super.intercept(context, next);
+			} catch (error) {
+				throw transformWidgetUploadException(error);
+			}
+		}
+	}
+
+	return mixin(WidgetButtonImageUploadInterceptor);
+};
 
 export const CurrentWidgetsActor = createParamDecorator(
 	(_data: unknown, context: ExecutionContext) =>

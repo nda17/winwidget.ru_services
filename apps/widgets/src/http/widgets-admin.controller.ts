@@ -16,7 +16,6 @@ import {
 	UsePipes,
 	ValidationPipe
 } from '@nestjs/common';
-import { FileInterceptor } from '@nestjs/platform-express';
 import type { Request } from 'express';
 import { WidgetsRoles } from '../auth/widgets-auth.decorator';
 import {
@@ -25,7 +24,6 @@ import {
 } from '../auth/widgets-auth.guard';
 import { WidgetsDomainService } from '../domain/widgets-domain.service';
 import { parseWidgetType } from '../domain/widgets-domain.types';
-import { WIDGET_BUTTON_IMAGE_MAX_SIZE_BYTES } from '../domain/widgets-image.service';
 import type { IntrospectedWidgetsActor } from '../internal/widgets-identity.client';
 import { WidgetsAdminMonitoringService } from '../monitoring/widgets-admin-monitoring.service';
 import { WidgetsTelemetryService } from '../telemetry/widgets-telemetry.service';
@@ -36,7 +34,8 @@ import {
 } from './widgets.dto';
 import {
 	CurrentWidgetsActor,
-	requestCorrelationId
+	requestCorrelationId,
+	WidgetButtonImageInterceptor
 } from './widgets-http.util';
 
 @Controller('widgets/admin')
@@ -261,11 +260,7 @@ export class WidgetsAdminController {
 	@Post(':type/:id/button-image')
 	@HttpCode(200)
 	@WidgetsRoles('DEV')
-	@UseInterceptors(
-		FileInterceptor('file', {
-			limits: { fileSize: WIDGET_BUTTON_IMAGE_MAX_SIZE_BYTES }
-		})
-	)
+	@UseInterceptors(WidgetButtonImageInterceptor())
 	async image(
 		@Param('type') type: string,
 		@Param('id') id: string,

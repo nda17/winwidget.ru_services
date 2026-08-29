@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { createServer } from 'node:http';
 import { PrismaClient } from '@prisma/widgets-client';
+import * as XLSX from 'xlsx';
 import { runWidgetsBrowserIntegration } from './widgets-browser.integration.mjs';
 
 const databaseUrl = process.env.WIDGETS_TEST_DATABASE_URL?.trim();
@@ -354,6 +355,8 @@ async function exerciseAllWidgetTypes() {
 		created[definition.key] = { ...definition, ...updated };
 	}
 
+	await assertUploadLimits(created.wheel);
+	await assertAdminUploadLimit(created.wheel);
 	created.wheel = await uploadWheelImage(created.wheel);
 	created.aiConsultant = await publish(created.aiConsultant);
 	const directAiHeaders = {
@@ -701,6 +704,130 @@ async function uploadWheelImage(widget) {
 	return { ...widget, ...payload };
 }
 
+async function assertUploadLimits(widget) {
+	const before = s3Requests.length;
+	const nested = new FormData();
+	nested.set(
+		'expectedDraftRevision[nested]',
+		String(widget.draftRevision)
+	);
+	nested.set(
+		'file',
+		new Blob([transparentPng()], { type: 'image/png' }),
+		'button.png'
+	);
+	const nestedResponse = await fetch(
+		url(`/api/v1/widgets/${widget.id}/button-image`),
+		{
+			method: 'POST',
+			headers: authenticatedHeaders(
+				'behavior-user',
+				nextCorrelation('image-nested-field')
+			),
+			body: nested,
+			signal: AbortSignal.timeout(10_000)
+		}
+	);
+	const nestedPayload = await parseResponse(nestedResponse);
+	assertStatus(
+		nestedResponse,
+		400,
+		'wheel image nested multipart field',
+		nestedPayload
+	);
+
+	const tooManyFields = new FormData();
+	tooManyFields.set('expectedDraftRevision', String(widget.draftRevision));
+	tooManyFields.set('unexpected', 'blocked');
+	const fieldsResponse = await fetch(
+		url(`/api/v1/widgets/${widget.id}/button-image`),
+		{
+			method: 'POST',
+			headers: authenticatedHeaders(
+				'behavior-user',
+				nextCorrelation('image-fields-limit')
+			),
+			body: tooManyFields,
+			signal: AbortSignal.timeout(10_000)
+		}
+	);
+	const fieldsPayload = await parseResponse(fieldsResponse);
+	assertStatus(
+		fieldsResponse,
+		400,
+		'wheel image multipart fields limit',
+		fieldsPayload
+	);
+
+	const oversized = new FormData();
+	oversized.set('expectedDraftRevision', String(widget.draftRevision));
+	oversized.set(
+		'file',
+		new Blob([Buffer.alloc(200 * 1024 + 1)], { type: 'image/png' }),
+		'button.png'
+	);
+	const oversizedResponse = await fetch(
+		url(`/api/v1/widgets/${widget.id}/button-image`),
+		{
+			method: 'POST',
+			headers: authenticatedHeaders(
+				'behavior-user',
+				nextCorrelation('image-file-size-limit')
+			),
+			body: oversized,
+			signal: AbortSignal.timeout(10_000)
+		}
+	);
+	const oversizedPayload = await parseResponse(oversizedResponse);
+	assertStatus(
+		oversizedResponse,
+		413,
+		'wheel image multipart file-size limit',
+		oversizedPayload
+	);
+	assert(
+		s3Requests.length === before,
+		'Rejected multipart uploads reached object storage'
+	);
+}
+
+async function assertAdminUploadLimit(widget) {
+	const before = s3Requests.length;
+	const nested = new FormData();
+	nested.set(
+		'expectedDraftRevision[nested]',
+		String(widget.draftRevision)
+	);
+	nested.set(
+		'file',
+		new Blob([transparentPng()], { type: 'image/png' }),
+		'button.png'
+	);
+	const response = await fetch(
+		url(`/api/v1/widgets/admin/wheel/${widget.id}/button-image`),
+		{
+			method: 'POST',
+			headers: authenticatedHeaders(
+				'behavior-dev',
+				nextCorrelation('admin-image-nested-field')
+			),
+			body: nested,
+			signal: AbortSignal.timeout(10_000)
+		}
+	);
+	const payload = await parseResponse(response);
+	assertStatus(
+		response,
+		400,
+		'admin image nested multipart field',
+		payload
+	);
+	assert(
+		s3Requests.length === before,
+		'Rejected admin multipart upload reached object storage'
+	);
+}
+
 function assertManagedWheelImageRead(widget) {
 	const imageUrl = widget.config?.buttonImageUrl;
 	assert(
@@ -849,6 +976,56 @@ async function assertLeadPaginationAndExports(wheel) {
 	);
 	const magic = Buffer.from(xlsx.data).subarray(0, 2).toString('ascii');
 	assert(magic === 'PK', 'XLSX export is not an Office ZIP archive');
+	const workbook = XLSX.read(Buffer.from(xlsx.data), { type: 'buffer' });
+	assert(
+		workbook.SheetNames.length === 1 &&
+			workbook.SheetNames[0] === 'Заявки',
+		'XLSX export worksheet name drifted'
+	);
+	const sheet = workbook.Sheets[workbook.SheetNames[0]];
+	const rows = XLSX.utils.sheet_to_json(sheet, {
+		header: 1,
+		defval: ''
+	});
+	const expectedHeaders = [
+		'№',
+		'Дата',
+		'Телефон',
+		'Email',
+		'Бонус',
+		'Страница'
+	];
+	assert(
+		rows.length === 3 &&
+			Array.isArray(rows[0]) &&
+			JSON.stringify(rows[0]) === JSON.stringify(expectedHeaders),
+		'XLSX export rows or headers drifted'
+	);
+	const exportedRows = rows.slice(1);
+	assert(
+		exportedRows.every(
+			row => Array.isArray(row) && typeof row[1] === 'string' && row[1]
+		),
+		'XLSX export dates are missing'
+	);
+	assert(
+		JSON.stringify(exportedRows.map(row => row[2]).sort()) ===
+			JSON.stringify(['+79990000001', '+79990000008']),
+		'XLSX export phones drifted'
+	);
+	assert(
+		JSON.stringify(exportedRows.map(row => row[4]).sort()) ===
+			JSON.stringify(['10%', '20%']),
+		'XLSX export bonuses drifted'
+	);
+	assert(
+		JSON.stringify(exportedRows.map(row => row[5]).sort()) ===
+			JSON.stringify([
+				'https://shop.example.test/wheel',
+				'https://shop.example.test/wheel-2'
+			]),
+		'XLSX export URLs drifted'
+	);
 }
 
 async function assertLifecycle(wheel) {
@@ -1018,8 +1195,10 @@ async function assertRuntimeTelemetry(widgets) {
 }
 
 async function runtimeEvent(widget, event, stepKey) {
+	const publicType =
+		widget.type === 'wheel' ? widget.type : widget.publicApi;
 	await jsonRequest(
-		`/api/v1/widget-events/${widget.type}/${widget.publicKey}`,
+		`/api/v1/widget-events/${publicType}/${widget.publicKey}`,
 		{
 			method: 'POST',
 			expectedStatus: 204,
