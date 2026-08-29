@@ -5,7 +5,11 @@ import { NotificationDeliveryAdapterService } from './notification-delivery-adap
 import { NotificationDeliveryHealthController } from './notification-delivery-health.controller';
 import { NotificationDeliveryHealthService } from './notification-delivery-health.service';
 import { NotificationDeliveryHeartbeatService } from './notification-delivery-heartbeat.service';
+import { NotificationDeliveryFailureService } from './notification-delivery-failure.service';
+import { NotificationDeliveryMessageMetadataService } from './notification-delivery-message-metadata.service';
 import { NotificationDeliveryOutboxPublisherService } from './notification-delivery-outbox-publisher.service';
+import { NotificationDeliveryOutcomeService } from './notification-delivery-outcome.service';
+import { NotificationDeliveryReceiptService } from './notification-delivery-receipt.service';
 import { NotificationDeliveryRetentionService } from './notification-delivery-retention.service';
 import { NotificationDeliveryWorkerService } from './notification-delivery-worker.service';
 import { NotificationDeliveryPrismaModule } from './prisma/notification-delivery-prisma.module';
@@ -27,6 +31,10 @@ import { ConfigModule } from '@nestjs/config';
 	providers: [
 		NotificationDeliveryAdapterService,
 		NotificationDeliveryHeartbeatService,
+		NotificationDeliveryMessageMetadataService,
+		NotificationDeliveryOutcomeService,
+		NotificationDeliveryReceiptService,
+		NotificationDeliveryFailureService,
 		NotificationDeliveryWorkerService,
 		NotificationDeliveryOutboxPublisherService,
 		NotificationDeliveryRetentionService,

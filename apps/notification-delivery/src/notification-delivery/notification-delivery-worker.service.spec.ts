@@ -1,8 +1,14 @@
 import {
 	NotificationDeliveryExchange,
-	NotificationDeliveryReceiptStatus
+	NotificationDeliveryReceiptStatus,
+	Prisma
 } from '@prisma/notification-delivery-client';
+import { NotificationDeliveryFailureService } from './notification-delivery-failure.service';
+import { NotificationDeliveryMessageMetadataService } from './notification-delivery-message-metadata.service';
+import { NotificationDeliveryOutcomeService } from './notification-delivery-outcome.service';
+import { NotificationDeliveryReceiptService } from './notification-delivery-receipt.service';
 import { NotificationDeliveryWorkerService } from './notification-delivery-worker.service';
+import type { NotificationDeliveryEventPayload } from './notification-delivery-contract';
 import type { NotificationDeliveryAdapterService } from './notification-delivery-adapter.service';
 import type { NotificationDeliveryHeartbeatService } from './notification-delivery-heartbeat.service';
 import type { NotificationDeliveryPrismaService } from './prisma/notification-delivery-prisma.service';
@@ -232,12 +238,26 @@ describe('NotificationDeliveryWorkerService', () => {
 					: undefined
 			)
 		} as unknown as ConfigService;
+		const metadata = new NotificationDeliveryMessageMetadataService();
+		const outcomes = new NotificationDeliveryOutcomeService();
+		const receipts = new NotificationDeliveryReceiptService(
+			prisma,
+			metadata,
+			outcomes
+		);
+		const failures = new NotificationDeliveryFailureService(
+			prisma,
+			receipts,
+			outcomes,
+			metadata
+		);
 		const service = new NotificationDeliveryWorkerService(
 			rabbitMq,
 			adapter,
-			prisma,
 			configService,
-			heartbeat
+			heartbeat,
+			receipts,
+			failures
 		);
 
 		return {
@@ -246,7 +266,8 @@ describe('NotificationDeliveryWorkerService', () => {
 			adapter,
 			prisma,
 			transaction,
-			heartbeat
+			heartbeat,
+			outcomes
 		};
 	};
 
@@ -271,14 +292,16 @@ describe('NotificationDeliveryWorkerService', () => {
 	] as const)(
 		'emits $kind outcomes on $eventType',
 		async ({ kind, eventType, reference }) => {
-			const { service, transaction } = createService();
+			const { outcomes, transaction } = createService();
 
-			await (service as any).createNotificationDeliveryOutcome(
-				transaction,
+			await outcomes.createDeliveryOutcome(
+				transaction as unknown as Prisma.TransactionClient,
 				{
 					kind,
 					eventId,
-					payload: { reference },
+					payload: {
+						reference
+					} as unknown as NotificationDeliveryEventPayload,
 					status: 'DELIVERED',
 					failure: null
 				}
@@ -418,6 +441,122 @@ describe('NotificationDeliveryWorkerService', () => {
 		expect(rabbitMq.nack).not.toHaveBeenCalled();
 	});
 
+	it('requeues after provider success when the delivered receipt CAS is lost', async () => {
+		const { service, rabbitMq, adapter, transaction } = createService();
+		(
+			transaction.notificationDeliveryReceipt.updateMany as jest.Mock
+		).mockResolvedValueOnce({ count: 0 });
+
+		await (service as any).handle('payment-email', createPaymentMessage());
+
+		expect(adapter.deliver).toHaveBeenCalledTimes(1);
+		expect(rabbitMq.ack).not.toHaveBeenCalled();
+		expect(rabbitMq.nack).toHaveBeenCalledWith(expect.anything(), true);
+	});
+
+	it('schedules active-claim recovery before acknowledging the delivery', async () => {
+		const { service, rabbitMq, adapter, prisma } = createService();
+		const message = createPaymentMessage();
+		const activeLockToken = '22222222-2222-4222-8222-222222222222';
+		(
+			prisma.notificationDeliveryReceipt.create as jest.Mock
+		).mockRejectedValueOnce(
+			new Prisma.PrismaClientKnownRequestError('duplicate receipt', {
+				code: 'P2002',
+				clientVersion: '5.22.0'
+			})
+		);
+		(
+			prisma.notificationDeliveryReceipt.findUnique as jest.Mock
+		).mockResolvedValueOnce({
+			status: NotificationDeliveryReceiptStatus.PROCESSING,
+			lockToken: activeLockToken,
+			leaseExpiresAt: new Date(Date.now() + 60_000)
+		});
+
+		await (service as any).handle('payment-email', message);
+
+		expect(adapter.deliver).not.toHaveBeenCalled();
+		expect(
+			prisma.notificationDeliveryOutboxEvent.createMany
+		).toHaveBeenCalledWith({
+			data: [
+				expect.objectContaining({
+					deduplicationKey: `notification:${eventId}:payment-email:claim:${activeLockToken}`,
+					routingKey: 'manual.payment-email',
+					availableAt: expect.any(Date)
+				})
+			],
+			skipDuplicates: true
+		});
+		expect(
+			(prisma.notificationDeliveryOutboxEvent.createMany as jest.Mock).mock
+				.invocationCallOrder[0]
+		).toBeLessThan(
+			(rabbitMq.ack as jest.Mock).mock.invocationCallOrder[0]
+		);
+		expect(rabbitMq.nack).not.toHaveBeenCalled();
+	});
+
+	it('requeues an active claim when recovery scheduling fails', async () => {
+		const { service, rabbitMq, adapter, prisma } = createService();
+		(
+			prisma.notificationDeliveryReceipt.create as jest.Mock
+		).mockRejectedValueOnce(
+			new Prisma.PrismaClientKnownRequestError('duplicate receipt', {
+				code: 'P2002',
+				clientVersion: '5.22.0'
+			})
+		);
+		(
+			prisma.notificationDeliveryReceipt.findUnique as jest.Mock
+		).mockResolvedValueOnce({
+			status: NotificationDeliveryReceiptStatus.PROCESSING,
+			lockToken: '22222222-2222-4222-8222-222222222222',
+			leaseExpiresAt: new Date(Date.now() + 60_000)
+		});
+		(
+			prisma.notificationDeliveryOutboxEvent.createMany as jest.Mock
+		).mockRejectedValueOnce(new Error('outbox unavailable'));
+
+		await (service as any).handle('payment-email', createPaymentMessage());
+
+		expect(adapter.deliver).not.toHaveBeenCalled();
+		expect(rabbitMq.ack).not.toHaveBeenCalled();
+		expect(rabbitMq.nack).toHaveBeenCalledWith(expect.anything(), true);
+	});
+
+	it('acknowledges a stale retry token without calling the provider', async () => {
+		const { service, rabbitMq, adapter, prisma } = createService();
+		const message = createPaymentMessage();
+		message.properties.headers = {
+			'x-retry-attempt': 1,
+			'x-delivery-token': '33333333-3333-4333-8333-333333333333'
+		};
+		(
+			prisma.notificationDeliveryReceipt.create as jest.Mock
+		).mockRejectedValueOnce(
+			new Prisma.PrismaClientKnownRequestError('duplicate receipt', {
+				code: 'P2002',
+				clientVersion: '5.22.0'
+			})
+		);
+		(
+			prisma.notificationDeliveryReceipt.findUnique as jest.Mock
+		).mockResolvedValueOnce({
+			status: NotificationDeliveryReceiptStatus.RETRY_SCHEDULED,
+			retryAttempt: 1,
+			retryToken: '44444444-4444-4444-8444-444444444444',
+			retryAvailableAt: new Date(Date.now() - 1_000)
+		});
+
+		await (service as any).handle('payment-email', message);
+
+		expect(adapter.deliver).not.toHaveBeenCalled();
+		expect(rabbitMq.ack).toHaveBeenCalledTimes(1);
+		expect(rabbitMq.nack).not.toHaveBeenCalled();
+	});
+
 	it('emits a durable delivered outcome for campaign orchestration', async () => {
 		const { service, rabbitMq, adapter, transaction } = createService();
 
@@ -509,6 +648,108 @@ describe('NotificationDeliveryWorkerService', () => {
 			})
 		});
 		expect(rabbitMq.ack).toHaveBeenCalledTimes(1);
+	});
+
+	it('releases the claim and requeues when failure finalization cannot commit', async () => {
+		const { service, rabbitMq, adapter, prisma } = createService();
+		(adapter.deliver as jest.Mock).mockRejectedValue(
+			Object.assign(new Error('SMTP unavailable'), {
+				code: 'ECONNECTION'
+			})
+		);
+		(prisma.$transaction as jest.Mock).mockRejectedValueOnce(
+			new Error('transaction unavailable')
+		);
+
+		await (service as any).handle('payment-email', createPaymentMessage());
+
+		expect(
+			prisma.notificationDeliveryReceipt.deleteMany
+		).toHaveBeenCalledWith({
+			where: expect.objectContaining({
+				eventId,
+				consumer: 'payment-email',
+				status: NotificationDeliveryReceiptStatus.PROCESSING,
+				lockToken: expect.any(String)
+			})
+		});
+		expect(rabbitMq.ack).not.toHaveBeenCalled();
+		expect(rabbitMq.nack).toHaveBeenCalledWith(expect.anything(), true);
+	});
+
+	it('dead-letters a recognized transient failure after its retry budget is exhausted', async () => {
+		const { service, rabbitMq, adapter, transaction } = createService();
+		const message = createPaymentMessage();
+		message.properties.headers = {
+			'x-retry-attempt': 3,
+			'x-first-failed-at': new Date().toISOString()
+		};
+		(adapter.deliver as jest.Mock).mockRejectedValue(
+			Object.assign(new Error('SMTP unavailable'), {
+				code: 'ECONNECTION'
+			})
+		);
+
+		await (service as any).handle('payment-email', message);
+
+		expect(
+			transaction.notificationDeliveryReceipt.updateMany
+		).toHaveBeenCalledWith(
+			expect.objectContaining({
+				data: expect.objectContaining({
+					status: NotificationDeliveryReceiptStatus.DEAD_LETTERED
+				})
+			})
+		);
+		expect(
+			transaction.notificationDeliveryFailure.upsert
+		).toHaveBeenCalledWith(
+			expect.objectContaining({
+				create: expect.objectContaining({
+					attempts: 4,
+					normalizedCode: 'SMTP_ECONNECTION',
+					retryable: false,
+					safeReason: expect.stringContaining(
+						'automatic retry budget exhausted'
+					)
+				})
+			})
+		);
+		expect(rabbitMq.ack).toHaveBeenCalledTimes(1);
+		expect(rabbitMq.nack).not.toHaveBeenCalled();
+	});
+
+	it('dead-letters a transient failure after the automatic retry window expires', async () => {
+		const { service, rabbitMq, adapter, transaction } = createService();
+		const message = createPaymentMessage();
+		message.properties.headers = {
+			'x-retry-attempt': 0,
+			'x-first-failed-at': new Date(
+				Date.now() - 24 * 60 * 60 * 1000 - 60_000
+			).toISOString()
+		};
+		(adapter.deliver as jest.Mock).mockRejectedValue(
+			Object.assign(new Error('SMTP unavailable'), {
+				code: 'ECONNECTION'
+			})
+		);
+
+		await (service as any).handle('payment-email', message);
+
+		expect(
+			transaction.notificationDeliveryFailure.upsert
+		).toHaveBeenCalledWith(
+			expect.objectContaining({
+				create: expect.objectContaining({
+					attempts: 1,
+					normalizedCode: 'AUTOMATIC_RETRY_WINDOW_EXPIRED',
+					retryable: false,
+					safeReason: 'Automatic retry window expired'
+				})
+			})
+		);
+		expect(rabbitMq.ack).toHaveBeenCalledTimes(1);
+		expect(rabbitMq.nack).not.toHaveBeenCalled();
 	});
 
 	it('persists terminal failure, receipt and DLQ outbox in one transaction', async () => {
