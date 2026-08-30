@@ -14,12 +14,6 @@ const apps = new Set([
 	'support',
 	'widgets'
 ]);
-const temporaryNest10Advisories = new Set([
-	'GHSA-5v7r-6r5c-r473',
-	'GHSA-j47w-4g3g-c36v',
-	'GHSA-36xv-jgw5-4q75'
-]);
-
 if (!apps.has(app)) {
 	console.error(
 		`Unsupported production audit target: ${app || '<missing>'}`
@@ -78,19 +72,13 @@ const findings = Object.values(report.advisories ?? {}).map(advisory => ({
 	module: advisory.module_name,
 	severity: advisory.severity
 }));
-const allowed =
-	app === 'api-gateway' ? new Set() : temporaryNest10Advisories;
-const unexpected = findings.filter(finding => !allowed.has(finding.id));
-
-if (unexpected.length > 0) {
-	for (const finding of unexpected) {
+if (findings.length > 0) {
+	for (const finding of findings) {
 		console.error(
-			`${app}: unexpected ${finding.severity} advisory ${finding.id} in ${finding.module}`
+			`${app}: ${finding.severity} advisory ${finding.id} in ${finding.module}`
 		);
 	}
 	process.exit(1);
 }
 
-console.log(
-	`${app}: ${findings.length} known production advisories, 0 unexpected`
-);
+console.log(`${app}: 0 production advisories`);

@@ -71,7 +71,7 @@ framework/runtime prerequisites и adapter behavior. До rollout проверя
   подтверждается статическим поиском.
 
 Целевой production graph обязан содержать Express `5.2.1`, body-parser
-`2.2.1`, path-to-regexp `8.4.2`, file-type `21.3.4` и Multer `2.2.0`. Express
+`2.3.0`, path-to-regexp `8.4.2`, file-type `21.3.4` и Multer `2.2.0`. Express
 4, body-parser 1, file-type 20 и Multer 1 в восьми runtime graph запрещены.
 Blind override `file-type` не используется.
 

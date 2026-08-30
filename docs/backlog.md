@@ -162,9 +162,6 @@ recovery evidence не вынесены из восстанавливаемой 
   key не передавать API/restore-worker, а binding обязан включать target,
   database/schema, artifact SHA-256, manifest/services SHA, backup job/time и
   tool/image revision;
-- выполнить exact-SHA Linux/Docker/PostgreSQL 18 rehearsal всех targets,
-  включая несовместимый dump, нехватку места, cancel race, restart checkpoint,
-  ACL drift и изоляцию чужих БД;
 - проверить one-shot permit, signed receipt и обязательное закрытие API после
   success, timeout и отмены workflow;
 - отрепетировать реализованные `RECOVERY_REQUIRED` recovery-actions с
@@ -197,17 +194,6 @@ fail-closed shutdown. До этого не расширять текущую tru
 первой ротации добавить current/previous keyring и проверку подписи по key ID,
 зафиксировать approve/rehearsal procedure и удалять прежний ключ только после
 доказанного отсутствия незавершённых receipt, подписанных этим ключом.
-
-### P2 — lease-guarded compensation writer fence
-
-Pre-authorization compensation сейчас повторно применяет physical writer fence
-после ошибки, но потерявший lease процесс может сделать это уже поверх новой
-generation. Это не открывает writer roles и остаётся fail-closed, однако может
-перезаписать operation marker, закрыть активные sessions нового recovery и
-создать production availability incident. До включения destructive restore
-добавить DB guard exact current lease перед re-fence, отказ при более новом
-target marker и two-worker fault test: старый process теряет lease, новый
-записывает generation, поздний compensation не меняет marker и sessions.
 
 ### P2 — durable upload intent для безопасной очистки no-DB restore dump
 
@@ -348,23 +334,17 @@ replicas.
 
 ## Инженерная эксплуатация
 
-### P2 — устранить оставшиеся moderate/low зависимости сервисов
+### P2 — dependency review Billing после проверки платёжного контура
 
-Production audit всей service matrix от 30.08.2026 не содержит high/critical.
-В девяти доменных приложениях остаётся от четырёх до пяти moderate и одна low
-уязвимость; API Gateway findings не имеет. Общие findings включают
-`file-type@20.4.1` через `@nestjs/common` и
-`@nestjs/core@10.4.22`, а также `qs@6.14.2` и `body-parser@1.20.4`;
-Identity, Notification Delivery и Platform требуют отдельного разбора
-дополнительного moderate finding. Текущие upload endpoints ограничивают тип и
-размер файлов, SSE endpoints не используются, но зависимости должны быть
-обновлены планово.
+API Gateway и восемь неплатёжных приложений переведены на NestJS 11 / Express 5
+и имеют нулевой production audit от low до critical. Billing намеренно не
+включён в общий major-переход и остаётся на NestJS 10 / Express 4 до отдельной
+проверки платёжного контура владельцем продукта.
 
-- Не применять слепой major override `file-type` и не совмещать плановый
-  переход NestJS 10 → 11 / Express 4 → 5 с другими security hotfix.
-- Проверить совместимые patch/minor upgrades `qs` и `body-parser`, подготовить
-  отдельный NestJS 11 migration contract и повторить audit/integration/Docker
-  gates.
+- Не переносить общие overrides или major-версии в Billing без отдельного
+  payment review.
+- При закрытии review повторить frozen install, audit от low, unit/integration,
+  PostgreSQL 18 и production Docker gates только для точного Billing SHA.
 
 ### P2 — повысить сигнал CI и распараллелить verify
 
