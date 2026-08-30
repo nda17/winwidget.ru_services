@@ -900,7 +900,7 @@ async function runRabbitSmoke(port) {
 					settings?.operationalAlertsThreadId === 2024
 				);
 			});
-
+			await assertReportingSettingsManualRetry(port, publisher);
 
 			const aggregateId = `integration-user-${randomUUID()}`;
 			const baseEventId = randomUUID();
@@ -1079,6 +1079,129 @@ async function runRabbitSmoke(port) {
 		await admin.close();
 		await restricted.close();
 	}
+}
+
+async function assertReportingSettingsManualRetry(port, publisher) {
+	const eventId = randomUUID();
+	const conflictThreadId = 3030;
+	const settings = await prisma.reportingSettings.findUniqueOrThrow({
+		where: { id: 'daily-summary' }
+	});
+	const changedAt = new Date(
+		(settings.operationalAlertsChangedAt?.getTime() ?? Date.now()) + 1_000
+	).toISOString();
+	await prisma.reportingSettings.update({
+		where: { id: 'daily-summary' },
+		data: { messageThreadId: conflictThreadId }
+	});
+	await publishOperationsNotificationRouting(
+		publisher,
+		eventId,
+		conflictThreadId,
+		changedAt
+	);
+	await waitFor('Reporting settings terminal failure', async () => {
+		const [failure, receipt] = await Promise.all([
+			prisma.reportingConsumerFailure.findUnique({
+				where: {
+					eventId_consumer: {
+						eventId,
+						consumer: 'reporting-settings-v1'
+					}
+				}
+			}),
+			prisma.consumerReceipt.findUnique({
+				where: {
+					eventId_consumer: {
+						eventId,
+						consumer: 'reporting-settings-v1'
+					}
+				}
+			})
+		]);
+		return (
+			failure?.status === 'OPEN' &&
+			failure.manualRetryCount === 0 &&
+			receipt?.status === 'DEAD_LETTERED' &&
+			receipt.retryCycle === 0
+		);
+	});
+
+	await prisma.reportingSettings.update({
+		where: { id: 'daily-summary' },
+		data: { messageThreadId: conflictThreadId + 1 }
+	});
+	const retry = await requestJson(
+		port,
+		`/api/v1/admin/reporting/delivery-failures/${eventId}/reportingSettings/retry`,
+		{
+			method: 'POST',
+			headers: { authorization: 'Bearer integration-admin' }
+		},
+		202
+	);
+	assert.equal(retry.eventId, eventId);
+	assert.equal(retry.consumerKind, 'reportingSettings');
+	assert.equal(retry.status, 'retry-requested');
+	assert.equal(retry.manualRetryCount, 1);
+	assert.ok(retry.retryRequestedAt);
+
+	await waitFor('Reporting settings manual retry resolution', async () => {
+		const [failure, receipt, projectedSettings] = await Promise.all([
+			prisma.reportingConsumerFailure.findUnique({
+				where: {
+					eventId_consumer: {
+						eventId,
+						consumer: 'reporting-settings-v1'
+					}
+				}
+			}),
+			prisma.consumerReceipt.findUnique({
+				where: {
+					eventId_consumer: {
+						eventId,
+						consumer: 'reporting-settings-v1'
+					}
+				}
+			}),
+			prisma.reportingSettings.findUnique({
+				where: { id: 'daily-summary' }
+			})
+		]);
+		return (
+			failure?.status === 'RESOLVED' &&
+			failure.manualRetryCount === 1 &&
+			receipt?.status === 'DELIVERED' &&
+			receipt.retryCycle === 1 &&
+			projectedSettings?.operationalAlertsThreadId === conflictThreadId &&
+			projectedSettings.operationalAlertsChangedAt?.toISOString() ===
+				changedAt
+		);
+	});
+	await waitFor(
+		'Reporting settings retry Outbox publication',
+		async () => {
+			const [deadLetter, manualRetry, audits] = await Promise.all([
+				prisma.reportingOutboxEvent.findUnique({
+					where: {
+						deduplicationKey: `consumer-dead-letter:reporting-settings-v1:${eventId}:0`
+					}
+				}),
+				prisma.reportingOutboxEvent.findUnique({
+					where: {
+						deduplicationKey: `consumer-manual-retry:reporting-settings-v1:${eventId}:1`
+					}
+				}),
+				findDeliveryRetryAuditOutbox(eventId)
+			]);
+			return (
+				deadLetter?.status === 'PUBLISHED' &&
+				manualRetry?.status === 'PUBLISHED' &&
+				audits.length === 1 &&
+				audits[0].status === 'PUBLISHED'
+			);
+		}
+	);
 }
 
 async function findDeliveryRetryAuditOutbox(eventId) {
@@ -1273,14 +1396,15 @@ async function publishProjection(channel, input) {
 async function publishOperationsNotificationRouting(
 	channel,
 	eventId,
-	operationalAlertsThreadId
+	operationalAlertsThreadId,
+	changedAt = new Date().toISOString()
 ) {
 	const eventType = 'operations.notification-routing.changed.v1';
 	const payload = {
 		schemaVersion: 1,
 		eventId,
 		operationalAlertsThreadId,
-		changedAt: new Date().toISOString()
+		changedAt
 	};
 	channel.publish(
 		'winwidget.events',

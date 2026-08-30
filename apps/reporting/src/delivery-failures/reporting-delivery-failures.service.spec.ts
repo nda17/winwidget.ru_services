@@ -27,19 +27,37 @@ const PAYLOAD = {
 	}
 } as const;
 const PAYLOAD_HASH = reportingPayloadHash(PAYLOAD);
+const SETTINGS_PAYLOAD = {
+	schemaVersion: 1,
+	eventId: EVENT_ID,
+	operationalAlertsThreadId: 2024,
+	changedAt: '2026-07-31T00:00:00.000Z'
+} as const;
+const SETTINGS_PAYLOAD_HASH = reportingPayloadHash(SETTINGS_PAYLOAD);
+
+interface FailureFixtureInput {
+	consumer?: string;
+	consumerKind?: string;
+	eventType?: string;
+	payload?: unknown;
+	payloadHash?: string;
+}
 
 describe('ReportingDeliveryFailuresService', () => {
 	function harness(
-		status: ReportingConsumerFailureStatus = ReportingConsumerFailureStatus.OPEN
+		status: ReportingConsumerFailureStatus = ReportingConsumerFailureStatus.OPEN,
+		input: FailureFixtureInput = {}
 	) {
+		const payload = input.payload ?? PAYLOAD;
+		const payloadHash = input.payloadHash ?? reportingPayloadHash(payload);
 		const failure = {
 			id: FAILURE_ID,
 			eventId: EVENT_ID,
-			consumer: 'reporting-billing-payment-v1',
-			consumerKind: 'billingPayment',
-			eventType: 'billing.payment.changed.v1',
-			payload: PAYLOAD,
-			payloadHash: PAYLOAD_HASH,
+			consumer: input.consumer ?? 'reporting-billing-payment-v1',
+			consumerKind: input.consumerKind ?? 'billingPayment',
+			eventType: input.eventType ?? 'billing.payment.changed.v1',
+			payload,
+			payloadHash,
 			status,
 			manualRetryCount:
 				status === ReportingConsumerFailureStatus.RETRY_REQUESTED ? 1 : 0,
@@ -57,7 +75,7 @@ describe('ReportingDeliveryFailuresService', () => {
 				findUnique: jest.fn().mockResolvedValue({
 					id: '33333333-3333-4333-8333-333333333333',
 					status: ReportingConsumerReceiptStatus.DEAD_LETTERED,
-					payloadHash: PAYLOAD_HASH,
+					payloadHash,
 					retryCycle: 0
 				}),
 				updateMany: jest.fn().mockResolvedValue({ count: 1 })
@@ -77,6 +95,16 @@ describe('ReportingDeliveryFailuresService', () => {
 			transaction,
 			failure
 		};
+	}
+
+	function settingsHarness(payload: unknown = SETTINGS_PAYLOAD) {
+		return harness(ReportingConsumerFailureStatus.OPEN, {
+			consumer: 'reporting-settings-v1',
+			consumerKind: 'reportingSettings',
+			eventType: 'operations.notification-routing.changed.v1',
+			payload,
+			payloadHash: reportingPayloadHash(payload)
+		});
 	}
 
 	it('creates the manual retry and audit Outbox rows in one transaction', async () => {
@@ -137,6 +165,76 @@ describe('ReportingDeliveryFailuresService', () => {
 				})
 			})
 		);
+	});
+
+	it('creates a manual retry for an Operations notification routing failure', async () => {
+		const { service, transaction } = settingsHarness();
+
+		await expect(
+			service.retryFailure(EVENT_ID, 'reportingSettings', 'admin-1')
+		).resolves.toEqual(
+			expect.objectContaining({
+				eventId: EVENT_ID,
+				consumerKind: 'reportingSettings',
+				status: 'retry-requested',
+				manualRetryCount: 1
+			})
+		);
+		expect(
+			transaction.reportingConsumerFailure.updateMany
+		).toHaveBeenCalledWith(
+			expect.objectContaining({
+				data: expect.objectContaining({
+					status: ReportingConsumerFailureStatus.RETRY_REQUESTED,
+					manualRetryCount: 1
+				})
+			})
+		);
+		expect(transaction.consumerReceipt.updateMany).toHaveBeenCalledWith(
+			expect.objectContaining({
+				where: expect.objectContaining({
+					payloadHash: SETTINGS_PAYLOAD_HASH,
+					retryCycle: 0
+				}),
+				data: expect.objectContaining({
+					status: ReportingConsumerReceiptStatus.RETRY_SCHEDULED,
+					retryCycle: 1
+				})
+			})
+		);
+		expect(
+			transaction.reportingOutboxEvent.create
+		).toHaveBeenNthCalledWith(
+			1,
+			expect.objectContaining({
+				data: expect.objectContaining({
+					exchange: ReportingOutboxExchange.MANUAL_RETRY,
+					eventType: 'operations.notification-routing.changed.v1',
+					routingKey: 'manual.reportingSettings',
+					payload: SETTINGS_PAYLOAD,
+					headers: expect.objectContaining({
+						'x-retry-attempt': 0,
+						'x-retry-cycle': 1,
+						'x-manual-retry': true
+					})
+				})
+			})
+		);
+	});
+
+	it('rejects a reporting settings payload with another event identity', async () => {
+		const { service, transaction } = settingsHarness({
+			...SETTINGS_PAYLOAD,
+			eventId: '44444444-4444-4444-8444-444444444444'
+		});
+
+		await expect(
+			service.retryFailure(EVENT_ID, 'reportingSettings', 'admin-1')
+		).rejects.toThrow('payload identity is invalid');
+		expect(
+			transaction.reportingConsumerFailure.updateMany
+		).not.toHaveBeenCalled();
+		expect(transaction.reportingOutboxEvent.create).not.toHaveBeenCalled();
 	});
 
 	it('is idempotent while the same manual retry is already pending', async () => {

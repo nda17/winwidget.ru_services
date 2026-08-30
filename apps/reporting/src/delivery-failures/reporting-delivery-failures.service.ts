@@ -15,8 +15,10 @@ import {
 import { ReportingPrismaService } from '../prisma/reporting-prisma.service';
 import {
 	NotificationDeliveryOutcomeEvent,
+	OperationsNotificationRoutingChangedEvent,
 	ReportingSourceEvent,
 	parseNotificationDeliveryOutcome,
+	parseOperationsNotificationRoutingChangedEvent,
 	parseReportingSourceEvent,
 	reportingPayloadHash
 } from '../projections/reporting-event.contract';
@@ -229,22 +231,30 @@ export class ReportingDeliveryFailuresService {
 		payloadHash: string,
 		eventId: string,
 		consumerKind: ReportingConsumerKind
-	): ReportingSourceEvent | NotificationDeliveryOutcomeEvent {
+	):
+		| ReportingSourceEvent
+		| OperationsNotificationRoutingChangedEvent
+		| NotificationDeliveryOutcomeEvent {
 		const expectedEventType = REPORTING_ROUTING_KEYS[consumerKind];
 		if (eventType !== expectedEventType) {
 			throw new ConflictException(
 				'Reporting delivery failure event contract is invalid'
 			);
 		}
-		let payload: ReportingSourceEvent | NotificationDeliveryOutcomeEvent;
+		let payload:
+			| ReportingSourceEvent
+			| OperationsNotificationRoutingChangedEvent
+			| NotificationDeliveryOutcomeEvent;
 		try {
 			payload =
 				consumerKind === 'deliveryOutcome'
 					? parseNotificationDeliveryOutcome(value)
-					: parseReportingSourceEvent(
-							value,
-							expectedEventType as ReportingSourceEvent['eventType']
-						);
+					: consumerKind === 'reportingSettings'
+						? parseOperationsNotificationRoutingChangedEvent(value)
+						: parseReportingSourceEvent(
+								value,
+								expectedEventType as ReportingSourceEvent['eventType']
+							);
 		} catch {
 			throw new ConflictException(
 				'Reporting delivery failure payload contract is invalid'
