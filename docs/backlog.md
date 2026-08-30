@@ -319,12 +319,30 @@ Identity, Notification Delivery и Platform требуют отдельного 
   permissions должны совпадать с production least-privilege contract, а не
   разрешать весь `winwidget.*` namespace.
 
-### P2 — очистка legacy delivery-данных Notification Delivery
+### P2 — формализовать retention Notification Delivery
 
-Определить retention и после backup/read-only аудита архивировать либо удалить
-legacy receipts/failures типов `email`, `telegram`, `payment-email`,
-`payment-telegram`, `limit-email`, `limit-telegram`. До удаления доказать, что
-их не читают Operations, retry flows и audit/reporting процессы.
+Kinds `email`, `telegram`, `payment-email`, `payment-telegram`, `limit-email`,
+`limit-telegram` являются активными и не должны считаться legacy-признаком.
+Не удалять receipts/failures по `consumer` или времени database cutover:
+сохранённый marker содержит только итоговый timestamp и агрегатные checksums,
+без row-level lineage. Обнаруженные 10 receipts и 1 failure оставить под
+действующей политикой: удаление только `DELIVERED` receipts старше 90 дней,
+redaction деталей resolved failures старше 30 дней.
+
+До расширения retention согласовать и зафиксировать отдельно:
+
+- dedup horizon для `DELIVERED` receipts;
+- срок хранения resolved/closed failures и `control_actions` как audit history;
+- бессрочное сохранение либо отдельный recovery-процесс для unresolved/retrying
+  failures, `PROCESSING`/`RETRY_SCHEDULED` receipts и непубликованного Outbox;
+- требования по ПДн, аудиту и архивированию.
+
+Реализацию выполнять только с service-owned backup и проверенным isolated
+restore, read-only dry-run/counts, CAS-safe batched cleanup, транзакционным
+порядком зависимостей и post-cleanup Operations/worker smoke. Одноразовая
+legacy-очистка допустима только при наличии авторитетного immutable списка
+event IDs или row-level snapshot manifest; фильтры только по kind/timestamp
+запрещены.
 
 ### P2 — условное выделение Backup service
 
