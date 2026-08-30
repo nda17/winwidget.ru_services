@@ -1,4 +1,5 @@
 import { CampaignsOutboxPublisherService } from './campaigns-outbox-publisher.service';
+import { CampaignsDispatchCoordinatorService } from './campaigns-dispatch-coordinator.service';
 import {
 	CAMPAIGN_EMAIL_REQUESTED_EVENT_TYPE,
 	CAMPAIGNS_RETRY_EXCHANGE
@@ -8,7 +9,8 @@ import {
 	CampaignDeliveryStatus,
 	CampaignOutboxExchange,
 	CampaignOutboxStatus,
-	CampaignStatus
+	CampaignStatus,
+	Prisma
 } from '@prisma/campaigns-client';
 
 const CAMPAIGN_ID = '1df14a11-3ccc-439d-a89d-cb32a555495d';
@@ -66,7 +68,7 @@ function delivery(
 	};
 }
 
-describe('CampaignsOutboxPublisherService dispatch races', () => {
+describe('CampaignsDispatchCoordinatorService dispatch races', () => {
 	it('defers a delivery Outbox while its campaign is still SNAPSHOTTING', async () => {
 		const transaction = {
 			$executeRaw: jest.fn().mockResolvedValue(1),
@@ -96,21 +98,15 @@ describe('CampaignsOutboxPublisherService dispatch races', () => {
 					callback(transaction)
 			)
 		};
-		const rabbitMq = { publish: jest.fn() };
-		const service = new CampaignsOutboxPublisherService(
+		const service = new CampaignsDispatchCoordinatorService(
 			prisma as never,
-			rabbitMq as never,
-			{ publisherEnabled: true } as never,
 			{ get: jest.fn() } as never
 		);
 
-		const prepared = await (
-			service as unknown as {
-				prepareDispatch: (
-					event: ReturnType<typeof outboxEvent>
-				) => Promise<boolean>;
-			}
-		).prepareDispatch(outboxEvent());
+		const prepared = await service.prepareDispatch(
+			outboxEvent() as never,
+			'publisher'
+		);
 
 		expect(prepared).toBe(false);
 		expect(transaction.campaignDelivery.update).not.toHaveBeenCalled();
@@ -124,7 +120,6 @@ describe('CampaignsOutboxPublisherService dispatch races', () => {
 				})
 			})
 		);
-		expect(rabbitMq.publish).not.toHaveBeenCalled();
 	});
 
 	it('cancels a pending delivery atomically when cancellation wins the dispatch race', async () => {
@@ -157,21 +152,15 @@ describe('CampaignsOutboxPublisherService dispatch races', () => {
 					callback(transaction)
 			)
 		};
-		const rabbitMq = { publish: jest.fn() };
-		const service = new CampaignsOutboxPublisherService(
+		const service = new CampaignsDispatchCoordinatorService(
 			prisma as never,
-			rabbitMq as never,
-			{ publisherEnabled: true } as never,
 			{ get: jest.fn() } as never
 		);
 
-		const prepared = await (
-			service as unknown as {
-				prepareDispatch: (
-					event: ReturnType<typeof outboxEvent>
-				) => Promise<boolean>;
-			}
-		).prepareDispatch(outboxEvent());
+		const prepared = await service.prepareDispatch(
+			outboxEvent() as never,
+			'publisher'
+		);
 
 		expect(prepared).toBe(false);
 		expect(transaction.campaignDelivery.update).toHaveBeenCalledWith({
@@ -201,6 +190,298 @@ describe('CampaignsOutboxPublisherService dispatch races', () => {
 				})
 			})
 		);
+	});
+
+	it('uses a serializable transaction and claim CAS when a request is stale', async () => {
+		const transaction = {
+			$executeRaw: jest.fn().mockResolvedValue(1),
+			campaignDelivery: {
+				findUnique: jest
+					.fn()
+					.mockResolvedValueOnce({ campaignId: CAMPAIGN_ID })
+					.mockResolvedValueOnce({
+						...delivery(
+							CampaignDeliveryStatus.PENDING,
+							CampaignStatus.QUEUED
+						),
+						dispatchGeneration: 2
+					})
+			},
+			campaignOutboxEvent: {
+				updateMany: jest.fn().mockResolvedValue({ count: 1 })
+			}
+		};
+		const prisma = {
+			$transaction: jest.fn(
+				(callback: (tx: typeof transaction) => unknown) =>
+					callback(transaction)
+			)
+		};
+		const service = new CampaignsDispatchCoordinatorService(
+			prisma as never,
+			{ get: jest.fn() } as never
+		);
+
+		await expect(
+			service.prepareDispatch(outboxEvent() as never, 'publisher')
+		).resolves.toBe(false);
+
+		expect(prisma.$transaction).toHaveBeenCalledWith(
+			expect.any(Function),
+			{
+				isolationLevel: Prisma.TransactionIsolationLevel.Serializable
+			}
+		);
+		expect(
+			transaction.campaignOutboxEvent.updateMany
+		).toHaveBeenCalledWith({
+			where: {
+				id: OUTBOX_ID,
+				status: CampaignOutboxStatus.PUBLISHING,
+				lockedBy: 'publisher',
+				lockToken: LOCK_TOKEN
+			},
+			data: expect.objectContaining({
+				status: CampaignOutboxStatus.CANCELLED,
+				lastError: 'STALE_CAMPAIGN_DELIVERY_REQUEST'
+			})
+		});
+	});
+
+	it('defers under the same claim when the campaign rate slot is busy', async () => {
+		const nextAvailableAt = new Date(Date.now() + 30_000);
+		const transaction = {
+			$executeRaw: jest.fn().mockResolvedValue(1),
+			campaignDelivery: {
+				findUnique: jest
+					.fn()
+					.mockResolvedValueOnce({ campaignId: CAMPAIGN_ID })
+					.mockResolvedValueOnce(
+						delivery(CampaignDeliveryStatus.PENDING, CampaignStatus.QUEUED)
+					),
+				update: jest.fn()
+			},
+			campaignRateLimit: {
+				findUnique: jest.fn().mockResolvedValue({ nextAvailableAt }),
+				upsert: jest.fn()
+			},
+			campaignOutboxEvent: {
+				updateMany: jest.fn().mockResolvedValue({ count: 1 })
+			},
+			campaign: { updateMany: jest.fn() }
+		};
+		const prisma = {
+			$transaction: jest.fn(
+				(callback: (tx: typeof transaction) => unknown) =>
+					callback(transaction)
+			)
+		};
+		const service = new CampaignsDispatchCoordinatorService(
+			prisma as never,
+			{ get: jest.fn() } as never
+		);
+
+		await expect(
+			service.prepareDispatch(outboxEvent() as never, 'publisher')
+		).resolves.toBe(false);
+
+		expect(transaction.campaignRateLimit.upsert).not.toHaveBeenCalled();
+		expect(transaction.campaignDelivery.update).not.toHaveBeenCalled();
+		expect(
+			transaction.campaignOutboxEvent.updateMany
+		).toHaveBeenCalledWith({
+			where: {
+				id: OUTBOX_ID,
+				status: CampaignOutboxStatus.PUBLISHING,
+				lockedBy: 'publisher',
+				lockToken: LOCK_TOKEN
+			},
+			data: expect.objectContaining({
+				status: CampaignOutboxStatus.PENDING,
+				lockedBy: null,
+				lockToken: null,
+				leaseExpiresAt: null
+			})
+		});
+	});
+
+	it('quarantines a matching active delivery and finalizes its campaign atomically', async () => {
+		const transaction = {
+			$executeRaw: jest.fn().mockResolvedValue(1),
+			campaignDelivery: {
+				findUnique: jest
+					.fn()
+					.mockResolvedValueOnce({ campaignId: CAMPAIGN_ID })
+					.mockResolvedValueOnce(
+						delivery(
+							CampaignDeliveryStatus.PROCESSING,
+							CampaignStatus.RUNNING
+						)
+					),
+				update: jest.fn().mockResolvedValue(undefined),
+				count: jest.fn().mockResolvedValue(0)
+			},
+			campaign: {
+				update: jest
+					.fn()
+					.mockResolvedValueOnce({
+						status: CampaignStatus.RUNNING,
+						sentCount: 1
+					})
+					.mockResolvedValueOnce(undefined)
+			},
+			campaignOutboxEvent: {
+				updateMany: jest.fn().mockResolvedValue({ count: 1 })
+			}
+		};
+		const prisma = {
+			$transaction: jest.fn(
+				(callback: (tx: typeof transaction) => unknown) =>
+					callback(transaction)
+			)
+		};
+		const service = new CampaignsDispatchCoordinatorService(
+			prisma as never,
+			{ get: jest.fn() } as never
+		);
+
+		await service.quarantineInvalidContract(
+			outboxEvent() as never,
+			'publisher',
+			'payload mismatch'
+		);
+
+		expect(transaction.campaignDelivery.update).toHaveBeenCalledWith({
+			where: { id: DELIVERY_ID },
+			data: {
+				status: CampaignDeliveryStatus.FAILED,
+				lastErrorCode: 'INVALID_OUTBOX_CONTRACT',
+				lastErrorReason:
+					'Campaign delivery request failed internal contract validation'
+			}
+		});
+		expect(transaction.campaign.update).toHaveBeenNthCalledWith(
+			2,
+			expect.objectContaining({
+				data: expect.objectContaining({
+					status: CampaignStatus.PARTIAL_FAILED
+				})
+			})
+		);
+		expect(
+			transaction.campaignOutboxEvent.updateMany
+		).toHaveBeenCalledWith({
+			where: {
+				id: OUTBOX_ID,
+				status: CampaignOutboxStatus.PUBLISHING,
+				lockedBy: 'publisher',
+				lockToken: LOCK_TOKEN
+			},
+			data: expect.objectContaining({
+				status: CampaignOutboxStatus.CANCELLED,
+				attempts: { increment: 1 },
+				lastError: 'INVALID_OUTBOX_CONTRACT: payload mismatch'
+			})
+		});
+	});
+});
+
+describe('CampaignsOutboxPublisherService publication lifecycle', () => {
+	it('marks a confirmed publication through the original claim CAS', async () => {
+		const updateMany = jest.fn().mockResolvedValue({ count: 1 });
+		const prisma = {
+			campaignOutboxEvent: { updateMany }
+		};
+		const rabbitMq = { publish: jest.fn().mockResolvedValue(undefined) };
+		const dispatchCoordinator = {
+			prepareDispatch: jest.fn().mockResolvedValue(true),
+			quarantineInvalidContract: jest.fn()
+		};
+		const service = new CampaignsOutboxPublisherService(
+			prisma as never,
+			rabbitMq as never,
+			{ publisherEnabled: true } as never,
+			{ get: jest.fn() } as never,
+			dispatchCoordinator as never
+		);
+		const event = outboxEvent({
+			exchange: CampaignOutboxExchange.RETRY,
+			eventType: 'campaigns.retry-test.v1',
+			routingKey: 'snapshot.retry.1',
+			aggregateType: null,
+			aggregateId: null,
+			generation: null,
+			headers: {
+				'x-correlation-id': CAMPAIGN_ID,
+				ignored: { nested: true }
+			}
+		});
+
+		await (
+			service as unknown as {
+				publish: (input: ReturnType<typeof outboxEvent>) => Promise<void>;
+			}
+		).publish(event);
+
+		expect(dispatchCoordinator.prepareDispatch).toHaveBeenCalledWith(
+			event,
+			expect.any(String)
+		);
+		expect(rabbitMq.publish).toHaveBeenCalledWith(
+			CAMPAIGNS_RETRY_EXCHANGE,
+			'snapshot.retry.1',
+			event.payload,
+			{
+				messageId: EVENT_ID,
+				type: 'campaigns.retry-test.v1',
+				correlationId: CAMPAIGN_ID,
+				headers: {
+					'x-correlation-id': CAMPAIGN_ID,
+					'x-outbox-event-id': OUTBOX_ID,
+					'x-publish-attempt': 1
+				}
+			}
+		);
+		expect(updateMany).toHaveBeenCalledWith({
+			where: {
+				id: OUTBOX_ID,
+				status: CampaignOutboxStatus.PUBLISHING,
+				lockedBy: expect.any(String),
+				lockToken: LOCK_TOKEN
+			},
+			data: expect.objectContaining({
+				status: CampaignOutboxStatus.PUBLISHED,
+				attempts: { increment: 1 },
+				lockToken: null,
+				lastError: null
+			})
+		});
+	});
+
+	it('delegates invalid delivery contract finalization without publishing', async () => {
+		const rabbitMq = { publish: jest.fn() };
+		const dispatchCoordinator = {
+			prepareDispatch: jest.fn().mockResolvedValue(true),
+			quarantineInvalidContract: jest.fn().mockResolvedValue(undefined)
+		};
+		const service = new CampaignsOutboxPublisherService(
+			{} as never,
+			rabbitMq as never,
+			{ publisherEnabled: true } as never,
+			{ get: jest.fn() } as never,
+			dispatchCoordinator as never
+		);
+		const event = outboxEvent();
+
+		await (
+			service as unknown as {
+				publish: (input: ReturnType<typeof outboxEvent>) => Promise<void>;
+			}
+		).publish(event);
+
+		expect(
+			dispatchCoordinator.quarantineInvalidContract
+		).toHaveBeenCalledWith(event, expect.any(String), expect.any(String));
 		expect(rabbitMq.publish).not.toHaveBeenCalled();
 	});
 
@@ -220,7 +501,11 @@ describe('CampaignsOutboxPublisherService dispatch races', () => {
 			prisma as never,
 			rabbitMq as never,
 			{ publisherEnabled: true } as never,
-			{ get: jest.fn() } as never
+			{ get: jest.fn() } as never,
+			{
+				prepareDispatch: jest.fn().mockResolvedValue(true),
+				quarantineInvalidContract: jest.fn()
+			} as never
 		);
 		const event = outboxEvent({
 			exchange: CampaignOutboxExchange.RETRY,

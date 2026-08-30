@@ -297,11 +297,11 @@ Identity, Notification Delivery и Platform требуют отдельного 
 
 ### P2 — декомпозировать перегруженные orchestration-классы
 
-Актуальным измерением сложности подтверждены оставшиеся кандидаты: Campaigns
-dispatch/rate/finalization, Reporting routing/lease/retry и restore
-validation/executor. Перед каждым рефакторингом добавить characterization tests;
-не менять API/events, Outbox, CAS lease и ack semantics. Restore fence/recovery
-не смешивать с декомпозицией: это отдельный P1 production-restore gate.
+Актуальным измерением сложности подтверждены оставшиеся кандидаты: Reporting
+routing/lease/retry и restore validation/executor. Перед каждым рефакторингом
+добавить characterization tests; не менять API/events, Outbox, CAS lease и ack
+semantics. Restore fence/recovery не смешивать с декомпозицией: это отдельный P1
+production-restore gate.
 
 ### P2 — очистка legacy delivery-данных Notification Delivery
 
