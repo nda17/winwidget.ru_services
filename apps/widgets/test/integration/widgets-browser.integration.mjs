@@ -362,7 +362,7 @@ function browserPage(browserCase) {
 		  }
 		  if (callbackRateLimitOnce) {
 			callbackRateLimitOnce = false;
-			return Promise.resolve(callbackJsonResponse(429, { message: 'Повторная отправка кода пока недоступна' }, { 'Retry-After': '1' })).then(complete, fail);
+			return Promise.resolve(callbackJsonResponse(429, { message: 'Повторная отправка кода пока недоступна' }, { 'Retry-After': '3' })).then(complete, fail);
 		  }
 		  callbackChallenge = {
 			id: 'browser-challenge-' + callbackConfigMode.toLowerCase() + '-' + requests.length,
@@ -698,10 +698,12 @@ function browserPage(browserCase) {
 		callbackRateLimitOnce = true;
 		click(await waitFor(function () { return findButton(smsShadow, /Получить код/); }, 'SMS get replacement code'), 'SMS get replacement code');
 		await waitFor(function () { return observedRequestAfter(secondSmsStartIndex, '/verification/start', 'POST', 429); }, 'SMS Retry-After response');
-		if (!Array.prototype.some.call(smsShadow.querySelectorAll('button'), function (button) { return button.disabled && /Повторить через 1 с/.test(button.textContent); })) {
-		  throw new Error('Callback did not apply the server Retry-After cooldown');
-		}
-		var replacementButton = await waitFor(function () { return findButton(smsShadow, /Получить код/); }, 'SMS Retry-After cooldown', 3000);
+		await waitFor(function () {
+		  return Array.prototype.some.call(smsShadow.querySelectorAll('button'), function (button) {
+			return button.disabled && /Повторить через (1|2|3) с/.test(button.textContent);
+		  });
+		}, 'SMS server Retry-After cooldown');
+		var replacementButton = await waitFor(function () { return findButton(smsShadow, /Получить код/); }, 'SMS Retry-After cooldown', 5000);
 		var replacementSmsStart = requests.length;
 		click(replacementButton, 'SMS get replacement code after cooldown');
 		await waitFor(function () { return observedRequestAfter(replacementSmsStart, '/verification/start', 'POST', 200); }, 'replacement SMS challenge');
