@@ -108,7 +108,7 @@ const generate = async () => {
 	const targets = {};
 	for (const target of TARGETS)
 		targets[target] = await collectTarget(target);
-	return `${JSON.stringify({ schemaVersion: 1, targets }, null, 2)}\n`;
+	return `${JSON.stringify({ schemaVersion: 1, targets }, null, '\t')}\n`;
 };
 
 const run = async () => {
