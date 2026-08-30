@@ -45,7 +45,8 @@ interface ProcessInternals {
 	command(
 		command: 'pg_restore' | 'psql',
 		args: string[],
-		password: string | null
+		password: string | null,
+		options?: { stdoutOverflowError?: string }
 	): Promise<{ stdout: string }>;
 	connectionArguments(value: DatabaseRestoreConnection): string[];
 	environment(password: string | null): NodeJS.ProcessEnv;
@@ -106,7 +107,11 @@ describe('DatabaseRestoreProcessService command plans', () => {
 		expect(command).toHaveBeenCalledWith(
 			'pg_restore',
 			['--list', '/restore/source.dump'],
-			connection.password
+			connection.password,
+			{
+				stdoutOverflowError:
+					'Restore dump table of contents exceeds the safe size limit'
+			}
 		);
 	});
 
@@ -256,17 +261,21 @@ describe('DatabaseRestoreProcessService process boundary', () => {
 		);
 	});
 
-	it('keeps only the last 2000000 bytes of command stdout', async () => {
+	it('rejects an oversized TOC instead of silently dropping its schema entry', async () => {
 		const child = childProcess();
 		spawnMock.mockReturnValue(child);
 		const result = new DatabaseRestoreProcessService().listDump(
 			'/restore/source.dump',
 			connection.password
 		);
-		child.stdout?.write(`prefix${'x'.repeat(2_000_000)}`);
+		child.stdout?.write(
+			`3; 2615 2203 SCHEMA - operations owner\n${'x'.repeat(2_000_000)}`
+		);
 		child.emit('close', 0);
 
-		await expect(result).resolves.toBe('x'.repeat(2_000_000));
+		await expect(result).rejects.toThrow(
+			'Restore dump table of contents exceeds the safe size limit'
+		);
 	});
 
 	it('writes the safety dump exclusively with mode 0600 and the exact pg_dump command', async () => {

@@ -151,8 +151,7 @@ targets: `billing`, `campaigns`, `identity`, `notification-delivery`,
 
 Осталось:
 
-- Проверять точную TOC-запись target schema вместо произвольного substring и
-  после restore fail-closed сверять фактические schema/table/sequence/default
+- После restore fail-closed сверять фактические schema/table/sequence/default
   ACL grants, а не только наличие `_prisma_migrations`.
 - При ошибке execution/fetch подтверждать сообщение только после проверенного
   CAS `PROCESSING -> FAILED`: сейчас ошибка или `count = 0` подавляются, job

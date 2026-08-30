@@ -10,12 +10,19 @@ import {
 
 const DATABASE_COMMAND_TIMEOUT_MS = 30 * 60_000;
 const DATABASE_COMMAND_TERMINATION_GRACE_MS = 10_000;
+const DATABASE_COMMAND_STDOUT_TAIL_CHARACTERS = 2_000_000;
+const RESTORE_TOC_MAX_BYTES = 2_000_000;
+const RESTORE_TOC_OVERFLOW_ERROR =
+	'Restore dump table of contents exceeds the safe size limit';
 
 @Injectable()
 export class DatabaseRestoreProcessService {
 	async listDump(path: string, password: string): Promise<string> {
-		return (await this.command('pg_restore', ['--list', path], password))
-			.stdout;
+		return (
+			await this.command('pg_restore', ['--list', path], password, {
+				stdoutOverflowError: RESTORE_TOC_OVERFLOW_ERROR
+			})
+		).stdout;
 	}
 
 	async createSafetyCopy(
@@ -132,19 +139,43 @@ export class DatabaseRestoreProcessService {
 	private async command(
 		command: 'pg_restore' | 'psql',
 		args: string[],
-		password: string | null
+		password: string | null,
+		options: { stdoutOverflowError?: string } = {}
 	): Promise<{ stdout: string }> {
 		const child = spawn(command, args, {
 			env: this.environment(password),
 			stdio: ['ignore', 'pipe', 'pipe']
 		});
 		let stdout = '';
+		let stdoutBytes = 0;
+		let stdoutOverflow = false;
+		const stdoutChunks: Buffer[] = [];
 		child.stdout?.on('data', chunk => {
-			stdout = `${stdout}${Buffer.from(chunk).toString('utf8')}`.slice(
-				-2_000_000
-			);
+			const buffer = Buffer.from(chunk);
+			if (!options.stdoutOverflowError) {
+				stdout = `${stdout}${buffer.toString('utf8')}`.slice(
+					-DATABASE_COMMAND_STDOUT_TAIL_CHARACTERS
+				);
+				return;
+			}
+			if (
+				stdoutOverflow ||
+				stdoutBytes + buffer.length > RESTORE_TOC_MAX_BYTES
+			) {
+				stdoutOverflow = true;
+				stdoutChunks.length = 0;
+				return;
+			}
+			stdoutBytes += buffer.length;
+			stdoutChunks.push(buffer);
 		});
 		await this.wait(child, password);
+		if (stdoutOverflow) {
+			throw new Error(options.stdoutOverflowError);
+		}
+		if (options.stdoutOverflowError) {
+			stdout = Buffer.concat(stdoutChunks, stdoutBytes).toString('utf8');
+		}
 		return { stdout };
 	}
 

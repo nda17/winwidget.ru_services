@@ -26,11 +26,7 @@ export class DatabaseRestoreExecutorService {
 			input.source,
 			connection.password
 		);
-		this.artifacts.assertTableOfContents(
-			tableOfContents,
-			target,
-			this.targets.all()
-		);
+		this.artifacts.assertTableOfContents(tableOfContents, target);
 		const safetyPath = `${input.source}.safety`;
 		await this.process.createSafetyCopy(
 			connection,

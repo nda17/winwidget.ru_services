@@ -119,6 +119,13 @@ API записывает загруженные dump, а `restore-worker` их �
 сообщения только из семейства очередей
 `winwidget.operations.database-restore.v1`.
 
+Restore принимает только custom archive, читаемый закреплённым PostgreSQL 18
+`pg_restore`, в активном TOC которого есть ровно одна запись `SCHEMA` и она
+точно соответствует выбранной service-owned schema и её migration owner.
+Упоминания schema в `TABLE`, `COMMENT`, ACL или других записях не считаются;
+multi-schema, структурно неоднозначные и превышающие безопасный TOC-лимит
+архивы отклоняются до safety copy и любых destructive-команд.
+
 Production-трафик Telegram сохраняет установленный контракт зашифрованного
 прокси: `TELEGRAM_API_BASE_URL=https://tg.winwidget.ru/telegram-api`. Только
 `operations-worker`, отправляющий резервные копии, получает токен бота и

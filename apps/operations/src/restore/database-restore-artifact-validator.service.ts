@@ -3,6 +3,9 @@ import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { DatabaseRestoreTargetConfiguration } from './database-restore-target-registry.service';
 
+const SCHEMA_TOC_PREFIX = /^\d+;\s+\d+\s+\d+\s+SCHEMA(?:\s|$)/;
+const SCHEMA_TOC_ENTRY = /^\d+;\s+\d+\s+\d+\s+SCHEMA\s+-\s+(.+)$/;
+
 @Injectable()
 export class DatabaseRestoreArtifactValidatorService {
 	async sha256(path: string): Promise<string> {
@@ -19,21 +22,28 @@ export class DatabaseRestoreArtifactValidatorService {
 
 	assertTableOfContents(
 		tableOfContents: string,
-		target: DatabaseRestoreTargetConfiguration,
-		allTargets: DatabaseRestoreTargetConfiguration[]
+		target: DatabaseRestoreTargetConfiguration
 	): void {
-		if (!tableOfContents.includes(` ${target.schema} `)) {
+		const schemaEntries = tableOfContents
+			.split(/\r?\n/)
+			.filter(line => SCHEMA_TOC_PREFIX.test(line))
+			.map(line => {
+				const match = SCHEMA_TOC_ENTRY.exec(line);
+				if (!match) {
+					throw new Error('Restore dump schema TOC entry is invalid');
+				}
+				return match[1];
+			});
+		const expectedSchemaEntry = `${target.schema} ${target.migrationRole}`;
+		if (!schemaEntries.includes(expectedSchemaEntry)) {
 			throw new Error(
 				'Restore dump does not contain the exact target schema'
 			);
 		}
-		for (const other of allTargets) {
-			if (
-				other.schema !== target.schema &&
-				tableOfContents.includes(` SCHEMA - ${other.schema} `)
-			) {
-				throw new Error('Restore dump contains a foreign service schema');
-			}
+		if (schemaEntries.length !== 1) {
+			throw new Error(
+				'Restore dump must contain only the target service schema'
+			);
 		}
 	}
 }

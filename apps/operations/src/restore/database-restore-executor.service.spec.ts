@@ -40,10 +40,6 @@ const setup = () => {
 		connection: jest.fn(async () => {
 			calls.push('connection');
 			return connection;
-		}),
-		all: jest.fn(() => {
-			calls.push('targets');
-			return [target];
 		})
 	};
 	const artifacts = {
@@ -94,7 +90,7 @@ describe('DatabaseRestoreExecutorService', () => {
 	afterEach(() => jest.useRealTimers());
 
 	it('preserves the complete validation, safety, restore, ACL, and ledger order', async () => {
-		const { service, calls, process } = setup();
+		const { service, artifacts, calls, process } = setup();
 
 		await expect(service.restore(input)).resolves.toEqual({
 			target: 'operations',
@@ -109,7 +105,6 @@ describe('DatabaseRestoreExecutorService', () => {
 			'source-sha',
 			'checksum',
 			'toc',
-			'targets',
 			'toc-validation',
 			'safety-copy',
 			'safety-sha',
@@ -122,6 +117,10 @@ describe('DatabaseRestoreExecutorService', () => {
 			connection,
 			'operations',
 			'/restore/job.dump.safety'
+		);
+		expect(artifacts.assertTableOfContents).toHaveBeenCalledWith(
+			'toc',
+			target
 		);
 	});
 
@@ -165,6 +164,20 @@ describe('DatabaseRestoreExecutorService', () => {
 			);
 		}
 	);
+
+	it('does not create a safety copy or run destructive commands after TOC rejection', async () => {
+		const { service, artifacts, process } = setup();
+		artifacts.assertTableOfContents.mockImplementation(() => {
+			throw new Error('toc invalid');
+		});
+
+		await expect(service.restore(input)).rejects.toThrow('toc invalid');
+		expect(process.createSafetyCopy).not.toHaveBeenCalled();
+		expect(process.recreateSchema).not.toHaveBeenCalled();
+		expect(process.restoreSchema).not.toHaveBeenCalled();
+		expect(process.applyAcl).not.toHaveBeenCalled();
+		expect(process.verifyMigrationLedger).not.toHaveBeenCalled();
+	});
 
 	it.each([
 		['schema recreation', 'recreateSchema', ['recreate']],
