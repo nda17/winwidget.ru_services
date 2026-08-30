@@ -14,7 +14,10 @@ import {
 } from '@nestjs/common';
 import type { Request } from 'express';
 import { WidgetsDeliveryFailuresService } from '../delivery-failures/widgets-delivery-failures.service';
-import { requestCorrelationId } from '../http/widgets-http.util';
+import {
+	requestCorrelationId,
+	WIDGETS_SCALAR_QUERY_PIPE
+} from '../http/widgets-http.util';
 import { WidgetsMessagingOverviewService } from '../messaging/widgets-messaging-overview.service';
 import { WidgetsAdminMonitoringService } from '../monitoring/widgets-admin-monitoring.service';
 import {
@@ -50,11 +53,11 @@ export class WidgetsOperationsController {
 	@Get('delivery-failures')
 	@HttpCode(200)
 	listDeliveryFailures(
-		@Query('page') page?: string,
-		@Query('limit') limit?: string,
-		@Query('integration') integration?: string,
-		@Query('category') category?: string,
-		@Query('status') status?: string
+		@Query('page', WIDGETS_SCALAR_QUERY_PIPE) page?: string,
+		@Query('limit', WIDGETS_SCALAR_QUERY_PIPE) limit?: string,
+		@Query('integration', WIDGETS_SCALAR_QUERY_PIPE) integration?: string,
+		@Query('category', WIDGETS_SCALAR_QUERY_PIPE) category?: string,
+		@Query('status', WIDGETS_SCALAR_QUERY_PIPE) status?: string
 	) {
 		return this.failures.list(Number(page) || 1, Number(limit) || 20, {
 			integration,

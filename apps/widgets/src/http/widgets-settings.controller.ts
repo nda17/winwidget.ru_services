@@ -24,7 +24,8 @@ import { CloneWidgetDto, ExpectedDraftRevisionDto } from './widgets.dto';
 import {
 	CurrentWidgetsActor,
 	parseLifecycleType,
-	requestCorrelationId
+	requestCorrelationId,
+	WIDGETS_SCALAR_QUERY_PIPE
 } from './widgets-http.util';
 
 @Controller('widget-settings')
@@ -68,8 +69,8 @@ export class WidgetsSettingsController {
 		@Param('type') type: string,
 		@Param('id') id: string,
 		@CurrentWidgetsActor() actor: IntrospectedWidgetsActor,
-		@Query('page') page?: string,
-		@Query('limit') limit?: string
+		@Query('page', WIDGETS_SCALAR_QUERY_PIPE) page?: string,
+		@Query('limit', WIDGETS_SCALAR_QUERY_PIPE) limit?: string
 	) {
 		return this.widgets.versions(
 			parseLifecycleType(type),

@@ -1,4 +1,5 @@
 import { Logger, RequestMethod, ValidationPipe } from '@nestjs/common';
+import type { CustomOrigin } from '@nestjs/common/interfaces/external/cors-options.interface';
 import { NestFactory } from '@nestjs/core';
 import express from 'express';
 import type { NextFunction, Request, Response } from 'express';
@@ -116,9 +117,10 @@ async function bootstrap(): Promise<void> {
 		const allowedOrigins = parseWidgetsCorsAllowedOrigins(
 			process.env.CORS_ALLOWED_ORIGINS
 		);
+		const corsOrigin: CustomOrigin = (origin, callback) =>
+			callback(null, !origin || allowedOrigins.includes(origin));
 		app.enableCors({
-			origin: (origin, callback) =>
-				callback(null, !origin || allowedOrigins.includes(origin)),
+			origin: corsOrigin,
 			credentials: true,
 			exposedHeaders: 'set-cookie, x-request-id, x-correlation-id'
 		});

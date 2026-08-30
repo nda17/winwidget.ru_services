@@ -1,3 +1,5 @@
+export const SUPPORT_WEBHOOK_MAX_BYTES = 512 * 1024;
+
 export interface TelegramUser {
 	id: number;
 	is_bot?: boolean;

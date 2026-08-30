@@ -34,6 +34,7 @@ import {
 	CurrentWidgetsActor,
 	requestCorrelationId,
 	typeFromRequestPath,
+	WIDGETS_SCALAR_QUERY_PIPE,
 	WidgetButtonImageInterceptor
 } from './widgets-http.util';
 
@@ -145,8 +146,8 @@ export class WidgetsManagementController {
 		@Req() request: Request,
 		@CurrentWidgetsActor() actor: IntrospectedWidgetsActor,
 		@Param('id') id: string,
-		@Query('page') page?: string,
-		@Query('limit') limit?: string
+		@Query('page', WIDGETS_SCALAR_QUERY_PIPE) page?: string,
+		@Query('limit', WIDGETS_SCALAR_QUERY_PIPE) limit?: string
 	) {
 		return this.widgets.leads(
 			typeFromRequestPath(request),
@@ -177,7 +178,7 @@ export class WidgetsManagementController {
 		@Req() request: Request,
 		@CurrentWidgetsActor() actor: IntrospectedWidgetsActor,
 		@Param('id') id: string,
-		@Query('format') format: string,
+		@Query('format', WIDGETS_SCALAR_QUERY_PIPE) format: string,
 		@Res() response: Response
 	) {
 		const file = await this.widgets.export(

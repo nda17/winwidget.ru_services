@@ -1,9 +1,14 @@
 import { ConfigService } from '@nestjs/config';
-import { ForbiddenException } from '@nestjs/common';
+import { ForbiddenException, type INestApplication } from '@nestjs/common';
+import { Test } from '@nestjs/testing';
 import { AuthIdentityType, UserStatus } from '@prisma/identity-client';
+import express from 'express';
 import type { Request, Response } from 'express';
+import request from 'supertest';
 import { OAuthService } from './oauth.service';
 import { RefreshTokenService } from '../auth/refresh-token.service';
+import { OAuthController } from './oauth.controller';
+import { AuthRateLimitGuard } from '../auth/auth-rate-limit.guard';
 
 const configuration = {
 	RECAPTCHA_CLIENT_URL: 'https://winwidget.ru',
@@ -360,6 +365,16 @@ describe('OAuth callback secret handling', () => {
 				`identityOAuthState_${provider}`,
 				expect.any(Object)
 			);
+			const clearOptions = (target.clearCookie as jest.Mock).mock
+				.calls[0][1];
+			expect(clearOptions).toMatchObject({
+				httpOnly: true,
+				path: `/api/v1/auth/${provider}`,
+				sameSite: 'lax',
+				secure: true
+			});
+			expect(clearOptions).not.toHaveProperty('maxAge');
+			expect(clearOptions).not.toHaveProperty('expires');
 			expect(target.cookie).toHaveBeenCalledTimes(1);
 			expect(target.cookie).toHaveBeenCalledWith(
 				'refreshToken',
@@ -378,4 +393,77 @@ describe('OAuth callback secret handling', () => {
 			);
 		}
 	);
+
+	it('uses distinct cookie options for setting and clearing OAuth state', async () => {
+		const { service } = createService();
+		const app = express();
+		app.get('/start', (_request, response, next) => {
+			void service.start('google', undefined, response).catch(next);
+		});
+		app.get('/callback', (request, response, next) => {
+			void service
+				.callback('google', request, response, { error: 'access_denied' })
+				.catch(next);
+		});
+
+		const started = await request(app).get('/start').expect(302);
+		const stateCookie = (
+			started.headers['set-cookie'] as unknown as string[]
+		).find(value => value.startsWith('identityOAuthState_google='));
+		expect(stateCookie).toContain('Max-Age=600');
+		expect(stateCookie).toContain('Path=/api/v1/auth/google');
+
+		const cleared = await request(app).get('/callback').expect(302);
+		const clearedStateCookie = (
+			cleared.headers['set-cookie'] as unknown as string[]
+		).find(value => value.startsWith('identityOAuthState_google='));
+		expect(clearedStateCookie).toContain(
+			'Expires=Thu, 01 Jan 1970 00:00:00 GMT'
+		);
+		expect(clearedStateCookie).toContain('Path=/api/v1/auth/google');
+		expect(clearedStateCookie).not.toContain('Max-Age=');
+	});
+});
+
+describe('OAuth controller scalar query contract', () => {
+	let app: INestApplication;
+	const oauth = {
+		start: jest.fn(
+			(_provider: string, ref: string | undefined, response: Response) =>
+				response.status(200).json({ ref: ref ?? null })
+		),
+		callback: jest.fn()
+	};
+
+	beforeAll(async () => {
+		const module = await Test.createTestingModule({
+			controllers: [OAuthController],
+			providers: [{ provide: OAuthService, useValue: oauth }]
+		})
+			.overrideGuard(AuthRateLimitGuard)
+			.useValue({ canActivate: () => true })
+			.compile();
+		app = module.createNestApplication();
+		await app.init();
+	});
+
+	afterAll(() => app.close());
+
+	it('rejects repeated query parameters before calling OAuth', async () => {
+		await request(app.getHttpServer())
+			.get('/auth/google?ref=first&ref=second')
+			.expect(400);
+		expect(oauth.start).not.toHaveBeenCalled();
+	});
+
+	it('passes one scalar query parameter unchanged', async () => {
+		await request(app.getHttpServer())
+			.get('/auth/google?ref=single')
+			.expect(200, { ref: 'single' });
+		expect(oauth.start).toHaveBeenCalledWith(
+			'google',
+			'single',
+			expect.anything()
+		);
+	});
 });

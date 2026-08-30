@@ -1,5 +1,6 @@
 import { Logger } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
+import type { NestExpressApplication } from '@nestjs/platform-express';
 import { PlatformHttpExceptionFilter } from './common/platform-http-exception.filter';
 import { platformRequestContextMiddleware } from './common/platform-request-context';
 import { PlatformModule } from './platform.module';
@@ -7,6 +8,7 @@ import {
 	getPlatformCorsAllowedOrigins,
 	getPlatformListenHost,
 	getPlatformTrustProxyConfig,
+	PLATFORM_JSON_BODY_LIMIT_BYTES,
 	PLATFORM_GLOBAL_PREFIX_EXCLUDES
 } from './runtime/platform-http.config';
 import {
@@ -17,9 +19,13 @@ import {
 async function bootstrap(): Promise<void> {
 	const role = parsePlatformProcessRole(process.env.PLATFORM_PROCESS_ROLE);
 	const port = parsePlatformPort(role);
-	const app = await NestFactory.create(PlatformModule, {
-		forceCloseConnections: true
-	});
+	const app = await NestFactory.create<NestExpressApplication>(
+		PlatformModule,
+		{
+			forceCloseConnections: true
+		}
+	);
+	app.useBodyParser('json', { limit: PLATFORM_JSON_BODY_LIMIT_BYTES });
 	const instance = app.getHttpAdapter().getInstance();
 	if (typeof instance?.set === 'function') {
 		instance.set(

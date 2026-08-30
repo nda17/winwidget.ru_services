@@ -35,6 +35,7 @@ import {
 import {
 	CurrentWidgetsActor,
 	requestCorrelationId,
+	WIDGETS_SCALAR_QUERY_PIPE,
 	WidgetButtonImageInterceptor
 } from './widgets-http.util';
 
@@ -52,12 +53,12 @@ export class WidgetsAdminController {
 	@Get('monitoring')
 	@HttpCode(200)
 	list(
-		@Query('page') page?: string,
-		@Query('limit') limit?: string,
-		@Query('type') type?: string,
-		@Query('isActive') isActive?: string,
-		@Query('plan') plan?: string,
-		@Query('search') search?: string
+		@Query('page', WIDGETS_SCALAR_QUERY_PIPE) page?: string,
+		@Query('limit', WIDGETS_SCALAR_QUERY_PIPE) limit?: string,
+		@Query('type', WIDGETS_SCALAR_QUERY_PIPE) type?: string,
+		@Query('isActive', WIDGETS_SCALAR_QUERY_PIPE) isActive?: string,
+		@Query('plan', WIDGETS_SCALAR_QUERY_PIPE) plan?: string,
+		@Query('search', WIDGETS_SCALAR_QUERY_PIPE) search?: string
 	) {
 		return this.monitoring.list(Number(page) || 1, Number(limit) || 20, {
 			type,
@@ -78,8 +79,8 @@ export class WidgetsAdminController {
 	async versions(
 		@Param('type') type: string,
 		@Param('id') id: string,
-		@Query('page') page?: string,
-		@Query('limit') limit?: string
+		@Query('page', WIDGETS_SCALAR_QUERY_PIPE) page?: string,
+		@Query('limit', WIDGETS_SCALAR_QUERY_PIPE) limit?: string
 	) {
 		const widgetType = parseWidgetType(type);
 		return this.widgets.versions(
@@ -156,7 +157,7 @@ export class WidgetsAdminController {
 	async analytics(
 		@Param('type') type: string,
 		@Param('id') id: string,
-		@Query('days') days?: string
+		@Query('days', WIDGETS_SCALAR_QUERY_PIPE) days?: string
 	) {
 		const widgetType = parseWidgetType(type);
 		return this.telemetry.analytics(

@@ -150,7 +150,7 @@ export class WidgetsModule implements NestModule, OnApplicationShutdown {
 	constructor(private readonly prisma: WidgetsPrismaService) {}
 
 	configure(consumer: MiddlewareConsumer): void {
-		consumer.apply(widgetsContextMiddleware).forRoutes('*');
+		consumer.apply(widgetsContextMiddleware).forRoutes('{*splat}');
 	}
 
 	async onApplicationShutdown(): Promise<void> {

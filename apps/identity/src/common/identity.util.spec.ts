@@ -1,4 +1,9 @@
-import { normalizeEmail, normalizePhone } from './identity.util';
+import { BadRequestException } from '@nestjs/common';
+import {
+	IDENTITY_SCALAR_QUERY_PIPE,
+	normalizeEmail,
+	normalizePhone
+} from './identity.util';
 
 describe('Identity canonical normalization', () => {
 	it.each([
@@ -17,5 +22,19 @@ describe('Identity canonical normalization', () => {
 
 	it('normalizes email for all unique lookups and cutover collisions', () => {
 		expect(normalizeEmail(' USER@Example.COM ')).toBe('user@example.com');
+	});
+
+	it('accepts one scalar query value and rejects arrays or objects', () => {
+		expect(
+			IDENTITY_SCALAR_QUERY_PIPE.transform('value', {} as never)
+		).toBe('value');
+		expect(
+			IDENTITY_SCALAR_QUERY_PIPE.transform(undefined, {} as never)
+		).toBeUndefined();
+		for (const value of [['first', 'second'], { nested: 'value' }]) {
+			expect(() =>
+				IDENTITY_SCALAR_QUERY_PIPE.transform(value, {} as never)
+			).toThrow(BadRequestException);
+		}
 	});
 });

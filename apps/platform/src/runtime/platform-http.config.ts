@@ -8,6 +8,8 @@ const UNSAFE_TRUST_PROXY_VALUES = new Set([
 ]);
 const TRUST_PROXY_VALUE_PATTERN = /^[A-Za-z0-9.:/_-]{1,128}$/;
 
+export const PLATFORM_JSON_BODY_LIMIT_BYTES = 8 * 1024 * 1024;
+
 export const PLATFORM_GLOBAL_PREFIX_EXCLUDES = [
 	{ path: 'health/live', method: RequestMethod.GET },
 	{ path: 'health/ready', method: RequestMethod.GET },

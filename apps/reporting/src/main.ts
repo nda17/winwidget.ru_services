@@ -10,6 +10,7 @@ import {
 import { ReportingModule } from './reporting.module';
 import { parseReportingProcessRole } from './runtime/reporting-runtime.service';
 import { Logger, ValidationPipe } from '@nestjs/common';
+import type { CustomOrigin } from '@nestjs/common/interfaces/external/cors-options.interface';
 import { NestFactory } from '@nestjs/core';
 
 async function bootstrap(): Promise<void> {
@@ -29,12 +30,10 @@ async function bootstrap(): Promise<void> {
 		const allowedOrigins = parseReportingCorsAllowedOrigins(
 			process.env.CORS_ALLOWED_ORIGINS
 		);
+		const corsOrigin: CustomOrigin = (origin, callback) =>
+			callback(null, isReportingCorsOriginAllowed(origin, allowedOrigins));
 		app.enableCors({
-			origin: (origin, callback) =>
-				callback(
-					null,
-					isReportingCorsOriginAllowed(origin, allowedOrigins)
-				),
+			origin: corsOrigin,
 			credentials: true,
 			exposedHeaders: 'set-cookie, x-request-id, x-correlation-id'
 		});

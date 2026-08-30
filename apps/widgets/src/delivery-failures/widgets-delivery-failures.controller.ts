@@ -21,7 +21,8 @@ import {
 import type { IntrospectedWidgetsActor } from '../internal/widgets-identity.client';
 import {
 	CurrentWidgetsActor,
-	requestCorrelationId
+	requestCorrelationId,
+	WIDGETS_SCALAR_QUERY_PIPE
 } from '../http/widgets-http.util';
 import { CloseDeliveryFailureDto } from '../http/widgets.dto';
 import { WidgetsDeliveryFailuresService } from './widgets-delivery-failures.service';
@@ -38,11 +39,11 @@ export class WidgetsDeliveryFailuresController {
 	@Get()
 	@HttpCode(200)
 	list(
-		@Query('page') page?: string,
-		@Query('limit') limit?: string,
-		@Query('integration') integration?: string,
-		@Query('category') category?: string,
-		@Query('status') status?: string
+		@Query('page', WIDGETS_SCALAR_QUERY_PIPE) page?: string,
+		@Query('limit', WIDGETS_SCALAR_QUERY_PIPE) limit?: string,
+		@Query('integration', WIDGETS_SCALAR_QUERY_PIPE) integration?: string,
+		@Query('category', WIDGETS_SCALAR_QUERY_PIPE) category?: string,
+		@Query('status', WIDGETS_SCALAR_QUERY_PIPE) status?: string
 	) {
 		return this.failures.list(Number(page) || 1, Number(limit) || 20, {
 			integration,

@@ -27,7 +27,10 @@ import {
 	OperationsAuthGuard
 } from '../auth/operations-auth.guard';
 import type { OperationsActor } from '../auth/operations-request';
-import { getOperationsClientContext } from '../common/operations-request-context';
+import {
+	getOperationsClientContext,
+	OPERATIONS_SCALAR_QUERY_PIPE
+} from '../common/operations-request-context';
 import {
 	DATABASE_BACKUP_JOB_TYPES,
 	DATABASE_BACKUP_TARGETS,
@@ -220,11 +223,11 @@ export class TelegramSettingsController {
 	@Get('admin/database-backups/jobs')
 	@HttpCode(200)
 	async getBackupJobs(
-		@Query('page') page?: string,
-		@Query('limit') limit?: string,
-		@Query('target') rawTarget?: string,
-		@Query('trigger') rawTrigger?: string,
-		@Query('status') rawStatus?: string
+		@Query('page', OPERATIONS_SCALAR_QUERY_PIPE) page?: string,
+		@Query('limit', OPERATIONS_SCALAR_QUERY_PIPE) limit?: string,
+		@Query('target', OPERATIONS_SCALAR_QUERY_PIPE) rawTarget?: string,
+		@Query('trigger', OPERATIONS_SCALAR_QUERY_PIPE) rawTrigger?: string,
+		@Query('status', OPERATIONS_SCALAR_QUERY_PIPE) rawStatus?: string
 	) {
 		const target = rawTarget ? this.target(rawTarget) : undefined;
 		const trigger = rawTrigger

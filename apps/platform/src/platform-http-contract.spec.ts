@@ -1,11 +1,20 @@
 import 'reflect-metadata';
-import { RequestMethod, ValidationPipe } from '@nestjs/common';
+import {
+	Body,
+	Controller,
+	type INestApplication,
+	Post,
+	RequestMethod,
+	ValidationPipe
+} from '@nestjs/common';
 import {
 	GUARDS_METADATA,
 	METHOD_METADATA,
 	PATH_METADATA,
 	PIPES_METADATA
 } from '@nestjs/common/constants';
+import { Test } from '@nestjs/testing';
+import type { NestExpressApplication } from '@nestjs/platform-express';
 import {
 	PLATFORM_REQUIRED_ROLES,
 	PlatformAuthGuard
@@ -19,12 +28,29 @@ import {
 import { PlatformLegalPagesController } from './legal-pages/legal-pages.controller';
 import { UpdatePlatformLegalPageDto } from './legal-pages/legal-pages.dto';
 import { PlatformInternalController } from './messaging/platform-internal.controller';
-import { PLATFORM_GLOBAL_PREFIX_EXCLUDES } from './runtime/platform-http.config';
+import {
+	PLATFORM_GLOBAL_PREFIX_EXCLUDES,
+	PLATFORM_JSON_BODY_LIMIT_BYTES
+} from './runtime/platform-http.config';
 import { PlatformSiteSettingsController } from './site-settings/site-settings.controller';
 import { UpdatePlatformSiteSettingsDto } from './site-settings/site-settings.dto';
 
 type ControllerClass = { prototype: object };
 type Handler = (...args: unknown[]) => unknown;
+
+@Controller('transport-body')
+class PlatformTransportBodyController {
+	@Post()
+	accept(@Body() body: { content?: string }) {
+		return { length: body.content?.length || 0 };
+	}
+}
+
+const platformJsonBody = (bytes: number): string => {
+	const prefix = '{"content":"';
+	const suffix = '"}';
+	return `${prefix}${'a'.repeat(bytes - prefix.length - suffix.length)}${suffix}`;
+};
 
 const contracts = [
 	{
@@ -175,4 +201,46 @@ describe('Platform HTTP contract', () => {
 			});
 		}
 	);
+});
+
+describe('Platform JSON transport boundary', () => {
+	let app: INestApplication;
+	let baseUrl: string;
+
+	beforeAll(async () => {
+		const module = await Test.createTestingModule({
+			controllers: [PlatformTransportBodyController]
+		}).compile();
+		const expressApp =
+			module.createNestApplication<NestExpressApplication>();
+		expressApp.useBodyParser('json', {
+			limit: PLATFORM_JSON_BODY_LIMIT_BYTES
+		});
+		app = expressApp;
+		await app.listen(0, '127.0.0.1');
+		baseUrl = await app.getUrl();
+	});
+
+	afterAll(() => app.close());
+
+	it('accepts the explicit eight MiB JSON boundary', async () => {
+		const response = await fetch(`${baseUrl}/transport-body`, {
+			method: 'POST',
+			headers: { 'content-type': 'application/json' },
+			body: platformJsonBody(PLATFORM_JSON_BODY_LIMIT_BYTES)
+		});
+		expect(response.status).toBe(201);
+		await expect(response.json()).resolves.toEqual({
+			length: PLATFORM_JSON_BODY_LIMIT_BYTES - 14
+		});
+	});
+
+	it('rejects JSON above the explicit transport boundary', async () => {
+		const response = await fetch(`${baseUrl}/transport-body`, {
+			method: 'POST',
+			headers: { 'content-type': 'application/json' },
+			body: platformJsonBody(PLATFORM_JSON_BODY_LIMIT_BYTES + 1)
+		});
+		expect(response.status).toBe(413);
+	});
 });

@@ -6,7 +6,7 @@ import {
 	Prisma,
 	UserStatus
 } from '@prisma/identity-client';
-import type { Request, Response } from 'express';
+import type { CookieOptions, Request, Response } from 'express';
 import {
 	normalizeEmail,
 	randomToken,
@@ -120,14 +120,14 @@ export class OAuthService {
 			const { refreshToken } = await this.auth.startSession(user, request);
 			response.clearCookie(
 				this.cookie(provider),
-				this.cookieOptions(provider)
+				this.clearCookieOptions(provider)
 			);
 			this.refreshTokens.add(response, refreshToken);
 			return response.redirect(`${this.clientOrigin}/social-auth`);
 		} catch (error) {
 			response.clearCookie(
 				this.cookie(provider),
-				this.cookieOptions(provider)
+				this.clearCookieOptions(provider)
 			);
 			this.refreshTokens.remove(response);
 			const code =
@@ -465,14 +465,24 @@ export class OAuthService {
 		return `identityOAuthState_${provider}`;
 	}
 
-	private cookieOptions(provider: ProviderName) {
+	private cookieScopeOptions(provider: ProviderName): CookieOptions {
 		return {
 			httpOnly: true,
 			secure: process.env.MODE === 'production',
 			sameSite: 'lax' as const,
-			maxAge: 10 * 60_000,
 			path: `/api/v1/auth/${provider}`
 		};
+	}
+
+	private cookieOptions(provider: ProviderName): CookieOptions {
+		return {
+			...this.cookieScopeOptions(provider),
+			maxAge: 10 * 60_000
+		};
+	}
+
+	private clearCookieOptions(provider: ProviderName): CookieOptions {
+		return this.cookieScopeOptions(provider);
 	}
 
 	private enum(provider: ProviderName): OAuthProvider {

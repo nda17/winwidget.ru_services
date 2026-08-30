@@ -19,7 +19,10 @@ import {
 	OperationsAuthGuard
 } from '../auth/operations-auth.guard';
 import type { OperationsActor } from '../auth/operations-request';
-import { getOperationsClientContext } from '../common/operations-request-context';
+import {
+	getOperationsClientContext,
+	OPERATIONS_SCALAR_QUERY_PIPE
+} from '../common/operations-request-context';
 import { CloseMessagingFailureDto } from './messaging-admin.dto';
 import { MessagingAdminService } from './messaging-admin.service';
 
@@ -46,11 +49,12 @@ export class MessagingAdminController {
 	@OperationsAuth(['DEV'])
 	@HttpCode(200)
 	failures(
-		@Query('page') page?: string,
-		@Query('limit') limit?: string,
-		@Query('integration') integration?: string,
-		@Query('category') category?: string,
-		@Query('status') status?: string
+		@Query('page', OPERATIONS_SCALAR_QUERY_PIPE) page?: string,
+		@Query('limit', OPERATIONS_SCALAR_QUERY_PIPE) limit?: string,
+		@Query('integration', OPERATIONS_SCALAR_QUERY_PIPE)
+		integration?: string,
+		@Query('category', OPERATIONS_SCALAR_QUERY_PIPE) category?: string,
+		@Query('status', OPERATIONS_SCALAR_QUERY_PIPE) status?: string
 	) {
 		return this.messaging.getFailures(
 			Number(page || 1),

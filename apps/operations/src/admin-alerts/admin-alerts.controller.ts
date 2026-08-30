@@ -9,6 +9,7 @@ import {
 	OperationsAuth,
 	OperationsAuthGuard
 } from '../auth/operations-auth.guard';
+import { OPERATIONS_SCALAR_QUERY_PIPE } from '../common/operations-request-context';
 import { AdminAlertsService } from './admin-alerts.service';
 
 @Controller('admin-alerts')
@@ -20,11 +21,11 @@ export class AdminAlertsController {
 	@Get()
 	@HttpCode(200)
 	getAll(
-		@Query('page') page?: string,
-		@Query('limit') limit?: string,
-		@Query('type') type?: string,
-		@Query('severity') severity?: string,
-		@Query('search') search?: string
+		@Query('page', OPERATIONS_SCALAR_QUERY_PIPE) page?: string,
+		@Query('limit', OPERATIONS_SCALAR_QUERY_PIPE) limit?: string,
+		@Query('type', OPERATIONS_SCALAR_QUERY_PIPE) type?: string,
+		@Query('severity', OPERATIONS_SCALAR_QUERY_PIPE) severity?: string,
+		@Query('search', OPERATIONS_SCALAR_QUERY_PIPE) search?: string
 	) {
 		return this.alerts.getAll(
 			page ? Number(page) : 1,

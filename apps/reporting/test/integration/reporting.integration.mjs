@@ -1538,8 +1538,12 @@ async function waitForReady(port, expectedRole, timeoutMs = 20_000) {
 		signal: AbortSignal.timeout(2_000)
 	});
 	const raw = await response.text();
+	const requestId = response.headers.get('x-request-id');
+	const correlationId = response.headers.get('x-correlation-id');
 	if (
 		!response.ok ||
+		!requestId ||
+		correlationId !== requestId ||
 		[internalToken, operationsToken, identityToken].some(token =>
 			raw.includes(token)
 		) ||

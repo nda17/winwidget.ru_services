@@ -14,9 +14,10 @@ import {
 	SUPPORT_WEBHOOK_EVENT,
 	SUPPORT_WEBHOOK_ROUTING_KEY
 } from '../messaging/support-messaging.constants';
-import type { TelegramSupportUpdate } from './support-telegram.types';
-
-const MAX_WEBHOOK_BYTES = 512 * 1024;
+import {
+	SUPPORT_WEBHOOK_MAX_BYTES,
+	type TelegramSupportUpdate
+} from './support-telegram.types';
 
 @Injectable()
 export class SupportWebhookService {
@@ -135,7 +136,7 @@ export class SupportWebhookService {
 		raw: Buffer;
 		update: TelegramSupportUpdate;
 	} {
-		if (!rawBody?.length || rawBody.length > MAX_WEBHOOK_BYTES) {
+		if (!rawBody?.length || rawBody.length > SUPPORT_WEBHOOK_MAX_BYTES) {
 			throw new UnprocessableEntityException(
 				'Telegram webhook body is missing or too large'
 			);

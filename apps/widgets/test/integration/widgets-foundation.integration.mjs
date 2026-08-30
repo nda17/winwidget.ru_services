@@ -1,6 +1,8 @@
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
+import { fileURLToPath } from 'node:url';
 import { PrismaClient } from '@prisma/widgets-client';
 
 const databaseUrl = process.env.WIDGETS_TEST_DATABASE_URL?.trim();
@@ -17,6 +19,11 @@ assertLocalTestDatabase(databaseUrl);
 
 const port = await getFreePort();
 const internalToken = `widgets-foundation-${randomUUID()}`;
+const staticDotfile = fileURLToPath(
+	new URL('../../public/widgets/.express5-static-probe', import.meta.url)
+);
+const staticDotfileMarker = `not-public-${randomUUID()}`;
+await writeFile(staticDotfile, staticDotfileMarker);
 const app = spawn('node', ['dist/src/main.js'], {
 	cwd: new URL('../../', import.meta.url),
 	env: {
@@ -58,14 +65,20 @@ try {
 	await assertDatabaseAcl(databaseUrl);
 	console.log('Widgets service-local foundation integration passed');
 } finally {
-	app.kill('SIGTERM');
-	const exited = await Promise.race([
-		new Promise(resolve => app.once('exit', code => resolve(code))),
-		new Promise(resolve => setTimeout(() => resolve('timeout'), 5000))
-	]);
-	if (exited === 'timeout') {
-		app.kill('SIGKILL');
-		throw new Error('Widgets integration process did not stop gracefully');
+	try {
+		app.kill('SIGTERM');
+		const exited = await Promise.race([
+			new Promise(resolve => app.once('exit', code => resolve(code))),
+			new Promise(resolve => setTimeout(() => resolve('timeout'), 5000))
+		]);
+		if (exited === 'timeout') {
+			app.kill('SIGKILL');
+			throw new Error(
+				'Widgets integration process did not stop gracefully'
+			);
+		}
+	} finally {
+		await rm(staticDotfile, { force: true });
 	}
 }
 
@@ -135,6 +148,13 @@ async function waitForReady(port) {
 async function assertHealth(port, path, expectedStatus) {
 	const response = await fetch(`http://127.0.0.1:${port}${path}`);
 	if (!response.ok) throw new Error(`${path} returned ${response.status}`);
+	const requestId = response.headers.get('x-request-id');
+	if (
+		!requestId ||
+		response.headers.get('x-correlation-id') !== requestId
+	) {
+		throw new Error(`${path} did not receive Widgets request context`);
+	}
 	const payload = await response.json();
 	if (
 		payload.status !== expectedStatus ||
@@ -157,12 +177,31 @@ async function assertRuntimeAsset(port) {
 	if (
 		cacheControl !== 'public, max-age=300' ||
 		cacheControl.includes('immutable') ||
-		response.headers.get('access-control-allow-origin') !== '*'
+		response.headers.get('access-control-allow-origin') !== '*' ||
+		response.headers.get('content-type') !==
+			'text/javascript; charset=utf-8'
 	) {
-		throw new Error('Widgets runtime asset cache/CORS contract drifted');
+		throw new Error('Widgets runtime asset headers contract drifted');
 	}
 	if (!(await response.text()).trim()) {
 		throw new Error('Widgets runtime asset is empty');
+	}
+
+	const image = await fetch(
+		`http://127.0.0.1:${port}/widgets/gift-button.png`
+	);
+	if (!image.ok || image.headers.get('content-type') !== 'image/png') {
+		throw new Error('Widgets PNG static MIME contract drifted');
+	}
+
+	const dotfile = await fetch(
+		`http://127.0.0.1:${port}/widgets/.express5-static-probe`
+	);
+	if (
+		![403, 404].includes(dotfile.status) ||
+		(await dotfile.text()).includes(staticDotfileMarker)
+	) {
+		throw new Error('Widgets static dotfile became publicly readable');
 	}
 }
 

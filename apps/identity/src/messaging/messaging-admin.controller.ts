@@ -18,6 +18,7 @@ import {
 	IdentityInternalGuard,
 	InternalServices
 } from '../internal/internal.guard';
+import { IDENTITY_SCALAR_QUERY_PIPE } from '../common/identity.util';
 import { IdentityMessagingAdminService } from './messaging-admin.service';
 
 class RetryIdentityFailureDto {
@@ -56,11 +57,11 @@ export class IdentityMessagingAdminController {
 	@Get('failures')
 	@HttpCode(200)
 	failures(
-		@Query('page') page?: string,
-		@Query('limit') limit?: string,
-		@Query('consumer') consumer?: string,
-		@Query('category') category?: string,
-		@Query('status') status?: string
+		@Query('page', IDENTITY_SCALAR_QUERY_PIPE) page?: string,
+		@Query('limit', IDENTITY_SCALAR_QUERY_PIPE) limit?: string,
+		@Query('consumer', IDENTITY_SCALAR_QUERY_PIPE) consumer?: string,
+		@Query('category', IDENTITY_SCALAR_QUERY_PIPE) category?: string,
+		@Query('status', IDENTITY_SCALAR_QUERY_PIPE) status?: string
 	) {
 		return this.messaging.failures(
 			this.integer(page, 1),

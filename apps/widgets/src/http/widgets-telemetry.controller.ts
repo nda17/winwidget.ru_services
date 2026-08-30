@@ -28,7 +28,10 @@ import { isAiDirectPageRequest } from '../domain/widgets-domain.util';
 import type { IntrospectedWidgetsActor } from '../internal/widgets-identity.client';
 import { WidgetsTelemetryService } from '../telemetry/widgets-telemetry.service';
 import { RecordWidgetRuntimeEventDto } from './widgets.dto';
-import { CurrentWidgetsActor } from './widgets-http.util';
+import {
+	CurrentWidgetsActor,
+	WIDGETS_SCALAR_QUERY_PIPE
+} from './widgets-http.util';
 
 @Controller()
 @UsePipes(new ValidationPipe({ whitelist: true, transform: true }))
@@ -81,7 +84,7 @@ export class WidgetsTelemetryController {
 	analytics(
 		@Param('type') type: string,
 		@Param('id') id: string,
-		@Query('days') days: string | undefined,
+		@Query('days', WIDGETS_SCALAR_QUERY_PIPE) days: string | undefined,
 		@CurrentWidgetsActor() actor: IntrospectedWidgetsActor
 	) {
 		return this.telemetry.analytics(

@@ -6,6 +6,7 @@ import {
 	Injectable,
 	mixin,
 	NestInterceptor,
+	type PipeTransform,
 	Type
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
@@ -21,6 +22,21 @@ import {
 import { WIDGET_BUTTON_IMAGE_UPLOAD_LIMITS } from '../domain/widgets-image.service';
 
 const MULTER_FIELD_NESTING_ERROR_CODE = 'LIMIT_FIELD_NESTING';
+
+export const WIDGETS_SCALAR_QUERY_PIPE: PipeTransform<
+	unknown,
+	string | undefined
+> = {
+	transform(value: unknown): string | undefined {
+		if (value === undefined) return undefined;
+		if (typeof value !== 'string') {
+			throw new BadRequestException(
+				'Query parameter must contain exactly one string value'
+			);
+		}
+		return value;
+	}
+};
 
 export const transformWidgetUploadException = (
 	error: unknown

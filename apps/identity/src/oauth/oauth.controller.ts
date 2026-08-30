@@ -8,6 +8,7 @@ import {
 } from '@nestjs/common';
 import type { Request, Response } from 'express';
 import { AuthRateLimitGuard } from '../auth/auth-rate-limit.guard';
+import { IDENTITY_SCALAR_QUERY_PIPE } from '../common/identity.util';
 import { OAuthService } from './oauth.service';
 
 @Controller('auth')
@@ -17,7 +18,7 @@ export class OAuthController {
 
 	@Get('google')
 	google(
-		@Query('ref') ref: string | undefined,
+		@Query('ref', IDENTITY_SCALAR_QUERY_PIPE) ref: string | undefined,
 		@Res() response: Response
 	) {
 		return this.oauth.start('google', ref, response);
@@ -27,9 +28,9 @@ export class OAuthController {
 	googleCallback(
 		@Req() request: Request,
 		@Res() response: Response,
-		@Query('code') code?: string,
-		@Query('state') state?: string,
-		@Query('error') error?: string
+		@Query('code', IDENTITY_SCALAR_QUERY_PIPE) code?: string,
+		@Query('state', IDENTITY_SCALAR_QUERY_PIPE) state?: string,
+		@Query('error', IDENTITY_SCALAR_QUERY_PIPE) error?: string
 	) {
 		return this.oauth.callback('google', request, response, {
 			code,
@@ -40,7 +41,7 @@ export class OAuthController {
 
 	@Get('github')
 	github(
-		@Query('ref') ref: string | undefined,
+		@Query('ref', IDENTITY_SCALAR_QUERY_PIPE) ref: string | undefined,
 		@Res() response: Response
 	) {
 		return this.oauth.start('github', ref, response);
@@ -50,9 +51,9 @@ export class OAuthController {
 	githubCallback(
 		@Req() request: Request,
 		@Res() response: Response,
-		@Query('code') code?: string,
-		@Query('state') state?: string,
-		@Query('error') error?: string
+		@Query('code', IDENTITY_SCALAR_QUERY_PIPE) code?: string,
+		@Query('state', IDENTITY_SCALAR_QUERY_PIPE) state?: string,
+		@Query('error', IDENTITY_SCALAR_QUERY_PIPE) error?: string
 	) {
 		return this.oauth.callback('github', request, response, {
 			code,
@@ -63,7 +64,7 @@ export class OAuthController {
 
 	@Get('yandex')
 	yandex(
-		@Query('ref') ref: string | undefined,
+		@Query('ref', IDENTITY_SCALAR_QUERY_PIPE) ref: string | undefined,
 		@Res() response: Response
 	) {
 		return this.oauth.start('yandex', ref, response);
@@ -73,9 +74,9 @@ export class OAuthController {
 	yandexCallback(
 		@Req() request: Request,
 		@Res() response: Response,
-		@Query('code') code?: string,
-		@Query('state') state?: string,
-		@Query('error') error?: string
+		@Query('code', IDENTITY_SCALAR_QUERY_PIPE) code?: string,
+		@Query('state', IDENTITY_SCALAR_QUERY_PIPE) state?: string,
+		@Query('error', IDENTITY_SCALAR_QUERY_PIPE) error?: string
 	) {
 		return this.oauth.callback('yandex', request, response, {
 			code,
@@ -85,7 +86,10 @@ export class OAuthController {
 	}
 
 	@Get('vk')
-	vk(@Query('ref') ref: string | undefined, @Res() response: Response) {
+	vk(
+		@Query('ref', IDENTITY_SCALAR_QUERY_PIPE) ref: string | undefined,
+		@Res() response: Response
+	) {
 		return this.oauth.start('vk', ref, response);
 	}
 
@@ -93,10 +97,10 @@ export class OAuthController {
 	vkCallback(
 		@Req() request: Request,
 		@Res() response: Response,
-		@Query('code') code?: string,
-		@Query('state') state?: string,
-		@Query('device_id') deviceId?: string,
-		@Query('error') error?: string
+		@Query('code', IDENTITY_SCALAR_QUERY_PIPE) code?: string,
+		@Query('state', IDENTITY_SCALAR_QUERY_PIPE) state?: string,
+		@Query('device_id', IDENTITY_SCALAR_QUERY_PIPE) deviceId?: string,
+		@Query('error', IDENTITY_SCALAR_QUERY_PIPE) error?: string
 	) {
 		return this.oauth.callback('vk', request, response, {
 			code,

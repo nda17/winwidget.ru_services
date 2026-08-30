@@ -84,7 +84,7 @@ export class ReportingModule implements NestModule, OnApplicationShutdown {
 	constructor(private readonly prisma: ReportingPrismaService) {}
 
 	configure(consumer: MiddlewareConsumer): void {
-		consumer.apply(reportingContextMiddleware).forRoutes('*');
+		consumer.apply(reportingContextMiddleware).forRoutes('{*splat}');
 	}
 
 	async onApplicationShutdown(): Promise<void> {

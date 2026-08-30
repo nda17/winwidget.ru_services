@@ -4,10 +4,26 @@ import {
 	randomInt,
 	timingSafeEqual
 } from 'node:crypto';
+import { BadRequestException, type PipeTransform } from '@nestjs/common';
 import type { Request } from 'express';
 
 export const PASSWORD_SALT_ROUNDS = 12;
 export const USER_DEACTIVATED_MESSAGE = 'User is deactivated';
+
+export const IDENTITY_SCALAR_QUERY_PIPE: PipeTransform<
+	unknown,
+	string | undefined
+> = {
+	transform(value: unknown): string | undefined {
+		if (value === undefined) return undefined;
+		if (typeof value !== 'string') {
+			throw new BadRequestException(
+				'Query parameter must contain exactly one string value'
+			);
+		}
+		return value;
+	}
+};
 
 export function normalizeEmail(value: string): string {
 	return value.trim().toLowerCase();

@@ -1,5 +1,6 @@
 import { Logger, RequestMethod } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
+import type { NestExpressApplication } from '@nestjs/platform-express';
 import { SupportHttpExceptionFilter } from './common/support-http-exception.filter';
 import { supportRequestContextMiddleware } from './common/support-request-context';
 import {
@@ -12,13 +13,18 @@ import {
 	parseSupportProcessRole
 } from './runtime/support-runtime.service';
 import { SupportModule } from './support.module';
+import { SUPPORT_WEBHOOK_MAX_BYTES } from './telegram/support-telegram.types';
 
 async function bootstrap(): Promise<void> {
 	const role = parseSupportProcessRole(process.env.SUPPORT_PROCESS_ROLE);
-	const app = await NestFactory.create(SupportModule, {
-		forceCloseConnections: true,
-		rawBody: true
-	});
+	const app = await NestFactory.create<NestExpressApplication>(
+		SupportModule,
+		{
+			forceCloseConnections: true,
+			rawBody: true
+		}
+	);
+	app.useBodyParser('json', { limit: SUPPORT_WEBHOOK_MAX_BYTES });
 	const instance = app.getHttpAdapter().getInstance();
 	if (typeof instance?.set === 'function') {
 		instance.set(

@@ -41,6 +41,7 @@ import {
 	UpdateProfileDto,
 	UpdateUserDto
 } from '../auth/auth.dto';
+import { IDENTITY_SCALAR_QUERY_PIPE } from '../common/identity.util';
 import { UsersService } from './users.service';
 
 export const AVATAR_UPLOAD_OPTIONS = {
@@ -245,15 +246,19 @@ export class UsersController {
 	@Get('user-list')
 	@Auth(Role.ADMIN)
 	list(
-		@Query('page') page?: string,
-		@Query('limit') limit?: string,
-		@Query('searchTerm') searchTerm?: string,
-		@Query('role') role?: string,
-		@Query('registeredFrom') registeredFrom?: string,
-		@Query('registeredTo') registeredTo?: string,
-		@Query('subscription') subscription?: string,
-		@Query('includeDeleted') includeDeleted?: string,
-		@Query('deletedOnly') deletedOnly?: string,
+		@Query('page', IDENTITY_SCALAR_QUERY_PIPE) page?: string,
+		@Query('limit', IDENTITY_SCALAR_QUERY_PIPE) limit?: string,
+		@Query('searchTerm', IDENTITY_SCALAR_QUERY_PIPE) searchTerm?: string,
+		@Query('role', IDENTITY_SCALAR_QUERY_PIPE) role?: string,
+		@Query('registeredFrom', IDENTITY_SCALAR_QUERY_PIPE)
+		registeredFrom?: string,
+		@Query('registeredTo', IDENTITY_SCALAR_QUERY_PIPE)
+		registeredTo?: string,
+		@Query('subscription', IDENTITY_SCALAR_QUERY_PIPE)
+		subscription?: string,
+		@Query('includeDeleted', IDENTITY_SCALAR_QUERY_PIPE)
+		includeDeleted?: string,
+		@Query('deletedOnly', IDENTITY_SCALAR_QUERY_PIPE) deletedOnly?: string,
 		@CurrentUser('rights') adminRights: Role[] = []
 	) {
 		return this.users.list({
