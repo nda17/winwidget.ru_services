@@ -412,6 +412,7 @@ for (const evidence of [
 	"cancel-in-progress: ${{ github.ref != 'refs/heads/prod' }}",
 	'operations-restore-rehearsal:',
 	'--label winwidget.operations-restore-rehearsal=true',
+	'      - name: Run isolated restore rehearsal\n        env:\n          OPERATIONS_RESTORE_REHEARSAL_POSTGRES_CONTAINER_ID: ${{ job.services.postgres.id }}',
 	'pnpm --dir apps/operations run test:integration:restore-rehearsal',
 	'deploy-production:',
 	'needs:',

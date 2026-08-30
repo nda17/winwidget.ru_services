@@ -167,7 +167,6 @@ jobs:
           --health-retries 30
     env:
       OPERATIONS_RESTORE_REHEARSAL_ALLOW_MUTATION: 'true'
-      OPERATIONS_RESTORE_REHEARSAL_POSTGRES_CONTAINER_ID: ${{ job.services.postgres.id }}
       OPERATIONS_RESTORE_REHEARSAL_POSTGRES_USER: operations_restore_rehearsal_superuser
       OPERATIONS_RESTORE_REHEARSAL_POSTGRES_PASSWORD: operations_restore_rehearsal_password_A9
       OPERATIONS_RESTORE_REHEARSAL_POSTGRES_DB: operations_restore_rehearsal_control
@@ -194,6 +193,8 @@ jobs:
       - name: Build Operations
         run: pnpm --dir apps/operations run build
       - name: Run isolated restore rehearsal
+        env:
+          OPERATIONS_RESTORE_REHEARSAL_POSTGRES_CONTAINER_ID: ${{ job.services.postgres.id }}
         run: pnpm --dir apps/operations run test:integration:restore-rehearsal
 
   service-integration:
