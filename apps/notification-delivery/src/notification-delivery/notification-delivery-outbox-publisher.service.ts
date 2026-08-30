@@ -34,7 +34,6 @@ const DEFAULT_BATCH_SIZE = 50;
 const DEFAULT_POLL_INTERVAL_MS = 1000;
 const OUTBOX_LEASE_MS = 60_000;
 const SHUTDOWN_DRAIN_TIMEOUT_MS = 20_000;
-const DEFAULT_RETENTION_DAYS = 7;
 
 type ClaimedOutboxEvent = NotificationDeliveryOutboxEvent & {
 	lockToken: string;
@@ -53,7 +52,6 @@ export class NotificationDeliveryOutboxPublisherService
 	private shuttingDown = false;
 	private started = false;
 	private lastSuccessfulPollAt: Date | null = null;
-	private lastCleanupAt = 0;
 
 	constructor(
 		private readonly prisma: NotificationDeliveryPrismaService,
@@ -109,7 +107,6 @@ export class NotificationDeliveryOutboxPublisherService
 		this.running = true;
 
 		try {
-			await this.cleanupPublishedEventsIfDue();
 			const events = await this.claimBatch();
 			this.lastSuccessfulPollAt = new Date();
 
@@ -516,51 +513,5 @@ export class NotificationDeliveryOutboxPublisherService
 		return Number.isInteger(value) && value >= 100
 			? value
 			: DEFAULT_POLL_INTERVAL_MS;
-	}
-
-	private async cleanupPublishedEventsIfDue(): Promise<void> {
-		const now = Date.now();
-		if (now - this.lastCleanupAt < 60 * 60 * 1000) return;
-		this.lastCleanupAt = now;
-
-		const configured = Number(
-			this.configService.get<string>(
-				'NOTIFICATION_DELIVERY_OUTBOX_RETENTION_DAYS'
-			) || DEFAULT_RETENTION_DAYS
-		);
-		const retentionDays =
-			Number.isInteger(configured) && configured >= 1
-				? configured
-				: DEFAULT_RETENTION_DAYS;
-		const publishedBefore = new Date(
-			now - retentionDays * 24 * 60 * 60 * 1000
-		);
-		let deleted = 0;
-
-		for (let batch = 0; batch < 20; batch += 1) {
-			const expired =
-				await this.prisma.notificationDeliveryOutboxEvent.findMany({
-					where: {
-						status: NotificationDeliveryOutboxStatus.PUBLISHED,
-						publishedAt: { lt: publishedBefore }
-					},
-					orderBy: { publishedAt: 'asc' },
-					take: 1000,
-					select: { id: true }
-				});
-			if (!expired.length) break;
-			const result =
-				await this.prisma.notificationDeliveryOutboxEvent.deleteMany({
-					where: { id: { in: expired.map(event => event.id) } }
-				});
-			deleted += result.count;
-			if (expired.length < 1000) break;
-		}
-
-		if (deleted) {
-			this.logger.log(
-				`Deleted ${deleted} notification outbox events older than ${retentionDays} days`
-			);
-		}
 	}
 }

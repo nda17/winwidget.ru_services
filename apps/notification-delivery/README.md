@@ -41,6 +41,44 @@ Delivery только публичный базовый URL сайта для с
 выполняет через неё reCAPTCHA-проверки; имя сохранено, чтобы production deploy
 использовал уже существующий env-контракт без отдельной миграции.
 
+## Retention и readiness
+
+Сервис применяет фиксированную политику хранения ко всем активным видам
+доставки; `consumer` и дата переноса данных из прежнего backend не являются
+признаками legacy-строки:
+
+- опубликованный Outbox старше 7 дней удаляется; `PENDING`, `PUBLISHING` и
+  `FAILED` не затрагиваются;
+- у `DELIVERED` receipt старше 90 дней очищается только `checkpoint` и
+  заполняется `details_redacted_at`. Строка с `eventId + consumer`, статусом и
+  `deliveredAt` остаётся постоянным dedup tombstone; `CLOSED_NO_RETRY` также
+  хранится постоянно;
+- у resolved failure старше 30 дней очищаются payload, headers и provider
+  details, а текстовые детали и комментарий закрывающего control action
+  заменяются на `[redacted after retention]`;
+- resolved failure с результатом `DELIVERED` или `CLOSED_NO_RETRY` старше
+  365 дней удаляется вместе с дочерними `control_actions` в одной транзакции,
+  сначала дочерние строки, затем parent;
+- unresolved/retrying failure, `PROCESSING`, `RETRY_SCHEDULED` и
+  `DEAD_LETTERED` receipt не очищаются автоматически; heartbeat старше 7 дней
+  удаляется.
+
+Сроки 7/90/30/365 дней являются core policy и не меняются runtime-переменными.
+Существующие env-ключи для 7/90/30 принимаются только с этими точными
+значениями и останавливают запуск при расхождении. Очистка идёт CAS-safe
+пакетами. При наличии backlog следующий пакет запускается без ожидания
+следующего часового интервала.
+
+После старта `GET /health/live` доступен во время очистки, но
+`GET /health/ready` возвращает `503`, пока первый полный retention pass не
+обработает все пакеты. После первого успешного полного pass последующая ошибка
+плановой очистки логируется, но сама по себе не снимает readiness уже
+работающего delivery-контура.
+
+Online retention не заменяет service-owned backup, проверку isolated restore
+или будущий PITR-контур: их расписание, артефакты и контроль восстановления
+ведутся отдельно от readiness Notification Delivery.
+
 ## Настройка и развёртывание
 
 Скопируйте `.env.example` в игнорируемый `.env.production` рядом с сервисом на

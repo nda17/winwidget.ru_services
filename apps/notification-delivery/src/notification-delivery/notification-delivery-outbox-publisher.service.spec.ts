@@ -420,4 +420,21 @@ describe('NotificationDeliveryOutboxPublisherService', () => {
 			})
 		);
 	});
+
+	it('polls publishable events independently from retention cleanup', async () => {
+		const { service } = createService();
+		const claimBatch = jest
+			.spyOn(service as any, 'claimBatch')
+			.mockResolvedValue([]);
+		jest
+			.spyOn(service as any, 'schedule')
+			.mockImplementation(() => undefined);
+
+		await (service as any).poll();
+
+		expect(claimBatch).toHaveBeenCalledTimes(1);
+		expect((service as any).lastSuccessfulPollAt).toEqual(
+			expect.any(Date)
+		);
+	});
 });

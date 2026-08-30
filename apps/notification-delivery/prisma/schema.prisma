@@ -11,25 +11,27 @@ datasource db {
 }
 
 model NotificationDeliveryReceipt {
-  id               String                            @id @default(uuid()) @db.Uuid
-  eventId          String                            @map("event_id") @db.Uuid
-  consumer         String
-  status           NotificationDeliveryReceiptStatus
-  lockedAt         DateTime?                         @map("locked_at")
-  lockedBy         String?                           @map("locked_by")
-  lockToken        String?                           @map("lock_token") @db.Uuid
-  leaseExpiresAt   DateTime?                         @map("lease_expires_at")
-  deliveredAt      DateTime?                         @map("delivered_at")
-  retryAttempt     Int?                              @map("retry_attempt")
-  retryAvailableAt DateTime?                         @map("retry_available_at")
-  retryToken       String?                           @map("retry_token") @db.Uuid
-  checkpoint       Json?
-  createdAt        DateTime                          @default(now()) @map("created_at")
-  updatedAt        DateTime                          @updatedAt @map("updated_at")
+  id                String                            @id @default(uuid()) @db.Uuid
+  eventId           String                            @map("event_id") @db.Uuid
+  consumer          String
+  status            NotificationDeliveryReceiptStatus
+  lockedAt          DateTime?                         @map("locked_at")
+  lockedBy          String?                           @map("locked_by")
+  lockToken         String?                           @map("lock_token") @db.Uuid
+  leaseExpiresAt    DateTime?                         @map("lease_expires_at")
+  deliveredAt       DateTime?                         @map("delivered_at")
+  retryAttempt      Int?                              @map("retry_attempt")
+  retryAvailableAt  DateTime?                         @map("retry_available_at")
+  retryToken        String?                           @map("retry_token") @db.Uuid
+  checkpoint        Json?
+  detailsRedactedAt DateTime?                         @map("details_redacted_at")
+  createdAt         DateTime                          @default(now()) @map("created_at")
+  updatedAt         DateTime                          @updatedAt @map("updated_at")
 
   @@unique([eventId, consumer], map: "delivery_receipts_event_consumer_unique")
   @@index([status, leaseExpiresAt], map: "delivery_receipts_lease_idx")
   @@index([status, retryAvailableAt], map: "delivery_receipts_retry_idx")
+  @@index([status, deliveredAt, id], map: "delivery_receipts_retention_idx")
   @@index([consumer, deliveredAt], map: "delivery_receipts_consumer_delivered_idx")
   @@map("delivery_receipts")
   @@schema("notification_delivery")
@@ -59,6 +61,7 @@ model NotificationDeliveryFailure {
   resolution            NotificationDeliveryFailureResolution?
   resolutionComment     String?                                @map("resolution_comment") @db.Text
   resolvedById          String?                                @map("resolved_by_id")
+  detailsRedactedAt     DateTime?                              @map("details_redacted_at")
   createdAt             DateTime                               @default(now()) @map("created_at")
   updatedAt             DateTime                               @updatedAt @map("updated_at")
   controlActions        NotificationDeliveryControlAction[]
@@ -68,6 +71,7 @@ model NotificationDeliveryFailure {
   @@index([consumer, resolvedAt], map: "delivery_failures_consumer_idx")
   @@index([category, resolvedAt, failedAt], map: "delivery_failures_category_idx")
   @@index([resolvedById], map: "delivery_failures_resolver_idx")
+  @@index([resolution, resolvedAt, id], map: "delivery_failures_retention_idx")
   @@map("delivery_failures")
   @@schema("notification_delivery")
 }
@@ -115,6 +119,7 @@ model NotificationDeliveryOutboxEvent {
   @@index([status, leaseExpiresAt], map: "notification_outbox_events_lease_idx")
   @@index([messageId], map: "notification_outbox_events_message_id_idx")
   @@index([publishedAt], map: "notification_outbox_events_published_idx")
+  @@index([status, publishedAt, id], map: "notification_outbox_events_retention_idx")
   @@map("outbox_events")
   @@schema("notification_delivery")
 }

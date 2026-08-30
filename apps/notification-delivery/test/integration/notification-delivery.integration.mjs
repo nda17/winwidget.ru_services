@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
+import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
@@ -107,6 +108,8 @@ const DEAD_LETTER_EXCHANGE = 'winwidget.dead-letter';
 const MANUAL_RETRY_EXCHANGE = 'winwidget.manual-retry';
 const RETRY_DELAYS_MS = [30_000, 300_000, 1_800_000];
 const INTERNAL_TOKEN = 'notification_delivery_integration_token_32_chars';
+const DAY_MS = 24 * 60 * 60 * 1000;
+const REDACTED_RETENTION_DETAIL = '[redacted after retention]';
 const KINDS = {
 	email: {
 		queue: 'winwidget.lead-integration.email',
@@ -164,6 +167,7 @@ let telegramServer;
 let serviceProcess;
 let containerName;
 let serviceLogs = '';
+let retentionStartupBlock;
 
 const smtpMessages = [];
 const telegramMessages = [];
@@ -332,6 +336,629 @@ async function cleanupDatabase() {
 	]);
 }
 
+async function assertRetentionCatalogContract() {
+	const [version] = await prisma.$queryRawUnsafe(
+		"SELECT current_setting('server_version_num')::int AS version"
+	);
+	assert.ok(
+		Number(version.version) >= 180_000 &&
+			Number(version.version) < 190_000,
+		`Notification Delivery retention requires PostgreSQL 18, got ${version.version}`
+	);
+
+	const indexes = await prisma.$queryRawUnsafe(
+		"SELECT indexname FROM pg_indexes WHERE schemaname = 'notification_delivery'"
+	);
+	const indexNames = new Set(indexes.map(index => index.indexname));
+	for (const name of [
+		'notification_outbox_events_retention_idx',
+		'delivery_receipts_retention_idx',
+		'delivery_failures_retention_idx'
+	]) {
+		assert.ok(indexNames.has(name), `Missing retention index ${name}`);
+	}
+
+	const constraints = await prisma.$queryRawUnsafe(`
+		SELECT constraint_state.conname,
+			constraint_state.contype,
+			constraint_state.confdeltype,
+			constraint_state.convalidated
+		FROM pg_constraint AS constraint_state
+		JOIN pg_namespace AS namespace_state
+			ON namespace_state.oid = constraint_state.connamespace
+		WHERE namespace_state.nspname = 'notification_delivery'
+			AND constraint_state.conname IN (
+				'control_actions_failure_id_fkey',
+				'delivery_receipts_state_check',
+				'delivery_failures_resolution_check',
+				'control_actions_content_check'
+			)
+	`);
+	const byName = new Map(
+		constraints.map(constraint => [constraint.conname, constraint])
+	);
+	for (const name of [
+		'delivery_receipts_state_check',
+		'delivery_failures_resolution_check',
+		'control_actions_content_check'
+	]) {
+		assert.equal(byName.get(name)?.contype, 'c');
+		assert.equal(byName.get(name)?.convalidated, true);
+	}
+	assert.equal(
+		byName.get('control_actions_failure_id_fkey')?.contype,
+		'f'
+	);
+	assert.equal(
+		byName.get('control_actions_failure_id_fkey')?.confdeltype,
+		'r'
+	);
+	assert.equal(
+		byName.get('control_actions_failure_id_fkey')?.convalidated,
+		true
+	);
+}
+
+async function seedRetentionStartupFixture() {
+	const runId = randomUUID();
+	const now = Date.now();
+	const atAge = days => new Date(now - days * DAY_MS);
+	const future = new Date(now + DAY_MS);
+	const lockedAt = new Date(now - 60_000);
+
+	const createOutbox = async (label, status, days, overrides = {}) => {
+		const timestamp = atAge(days);
+		return prisma.notificationDeliveryOutboxEvent.create({
+			data: {
+				messageId: randomUUID(),
+				deduplicationKey: `retention:${runId}:outbox:${label}`,
+				exchange: 'EVENTS',
+				eventType: 'notification.retention.fixture.v1',
+				routingKey: 'manual.email',
+				payload: { runId, label, detail: 'retention fixture' },
+				headers: { source: 'retention-integration' },
+				status,
+				availableAt: timestamp,
+				publishedAt: status === 'PUBLISHED' ? timestamp : null,
+				lastError:
+					status === 'FAILED' ? 'active failure must remain' : null,
+				createdAt: timestamp,
+				updatedAt: timestamp,
+				...overrides
+			}
+		});
+	};
+
+	const createReceipt = async (label, status, days, overrides = {}) => {
+		const timestamp = atAge(days);
+		return prisma.notificationDeliveryReceipt.create({
+			data: {
+				eventId: randomUUID(),
+				consumer: 'email',
+				status,
+				deliveredAt: status === 'DELIVERED' ? timestamp : null,
+				checkpoint: { runId, label, detail: 'retention fixture' },
+				createdAt: timestamp,
+				updatedAt: timestamp,
+				...overrides
+			}
+		});
+	};
+
+	const createFailure = async (
+		label,
+		resolution,
+		days,
+		overrides = {}
+	) => {
+		const timestamp = atAge(days);
+		return prisma.notificationDeliveryFailure.create({
+			data: {
+				eventId: randomUUID(),
+				consumer: 'email',
+				routingKey: 'manual.email',
+				payload: {
+					runId,
+					label,
+					contact: 'retention-fixture@example.test'
+				},
+				headers: { source: 'retention-integration' },
+				attempts: 3,
+				lastError: `retention detail ${label}`,
+				category: 'PERMANENT',
+				normalizedCode: 'RETENTION_INTEGRATION',
+				safeReason: `safe retention detail ${label}`,
+				httpStatus: 422,
+				providerCode: 'RETENTION_PROVIDER_CODE',
+				retryable: false,
+				classificationVersion: 1,
+				firstFailedAt: timestamp,
+				failedAt: timestamp,
+				resolvedAt: resolution ? timestamp : null,
+				resolution,
+				resolutionComment:
+					resolution === 'CLOSED_NO_RETRY'
+						? `retention resolution ${label}`
+						: null,
+				resolvedById:
+					resolution === 'CLOSED_NO_RETRY'
+						? `retention-actor-${runId}`
+						: null,
+				createdAt: timestamp,
+				updatedAt: timestamp,
+				...overrides
+			}
+		});
+	};
+
+	const createAction = (failure, action, comment = null) =>
+		prisma.notificationDeliveryControlAction.create({
+			data: {
+				action,
+				failureId: failure.id,
+				eventId: failure.eventId,
+				kind: failure.consumer,
+				actorId: `retention-actor-${runId}`,
+				comment,
+				createdAt: failure.resolvedAt || failure.failedAt
+			}
+		});
+
+	const outbox = {
+		oldPublished: await createOutbox('old-published', 'PUBLISHED', 8),
+		freshPublished: await createOutbox('fresh-published', 'PUBLISHED', 6),
+		pending: await createOutbox('old-pending', 'PENDING', 400, {
+			availableAt: future
+		}),
+		publishing: await createOutbox('old-publishing', 'PUBLISHING', 400, {
+			lockedAt,
+			lockedBy: `retention-lock-${runId}`,
+			lockToken: randomUUID(),
+			leaseExpiresAt: future
+		}),
+		failed: await createOutbox('old-failed', 'FAILED', 400)
+	};
+
+	const receipts = {
+		oldDelivered: await createReceipt('old-delivered', 'DELIVERED', 91),
+		freshDelivered: await createReceipt(
+			'fresh-delivered',
+			'DELIVERED',
+			89
+		),
+		processing: await createReceipt('old-processing', 'PROCESSING', 400, {
+			lockedAt,
+			lockedBy: `retention-lock-${runId}`,
+			lockToken: randomUUID(),
+			leaseExpiresAt: future
+		}),
+		retryScheduled: await createReceipt(
+			'old-retry-scheduled',
+			'RETRY_SCHEDULED',
+			400,
+			{
+				retryAttempt: 2,
+				retryAvailableAt: future,
+				retryToken: randomUUID()
+			}
+		),
+		deadLettered: await createReceipt(
+			'old-dead-lettered',
+			'DEAD_LETTERED',
+			400
+		),
+		closedNoRetry: await createReceipt(
+			'old-closed-no-retry',
+			'CLOSED_NO_RETRY',
+			400
+		)
+	};
+
+	const failures = {
+		redactedDelivered: await createFailure(
+			'redacted-delivered',
+			'DELIVERED',
+			31
+		),
+		redactedClosed: await createFailure(
+			'redacted-closed',
+			'CLOSED_NO_RETRY',
+			31
+		),
+		freshClosed: await createFailure(
+			'fresh-closed',
+			'CLOSED_NO_RETRY',
+			29
+		),
+		nearExpiryDelivered: await createFailure(
+			'near-expiry-delivered',
+			'DELIVERED',
+			364
+		),
+		expiredDelivered: await createFailure(
+			'expired-delivered',
+			'DELIVERED',
+			366
+		),
+		expiredClosed: await createFailure(
+			'expired-closed',
+			'CLOSED_NO_RETRY',
+			366
+		),
+		unresolved: await createFailure('unresolved', null, 400),
+		retrying: await createFailure('retrying', null, 400, {
+			retryingAt: atAge(1),
+			activeRetryToken: randomUUID()
+		})
+	};
+
+	const actions = {
+		redactedDelivered: await createAction(
+			failures.redactedDelivered,
+			'RETRY'
+		),
+		redactedClosed: await createAction(
+			failures.redactedClosed,
+			'CLOSE',
+			'redact this operator comment'
+		),
+		freshClosed: await createAction(
+			failures.freshClosed,
+			'CLOSE',
+			'keep this fresh operator comment'
+		),
+		nearExpiryDelivered: await createAction(
+			failures.nearExpiryDelivered,
+			'RETRY'
+		),
+		expiredDelivered: await createAction(
+			failures.expiredDelivered,
+			'RETRY'
+		),
+		expiredClosed: await createAction(
+			failures.expiredClosed,
+			'CLOSE',
+			'delete this child before its parent'
+		)
+	};
+
+	const heartbeats = {
+		old: await prisma.notificationDeliveryHeartbeat.create({
+			data: {
+				service: 'retention-integration-old',
+				instanceId: runId,
+				metadata: { runId, state: 'old' },
+				lastSeenAt: atAge(8),
+				createdAt: atAge(8),
+				updatedAt: atAge(8)
+			}
+		}),
+		fresh: await prisma.notificationDeliveryHeartbeat.create({
+			data: {
+				service: 'retention-integration-fresh',
+				instanceId: runId,
+				metadata: { runId, state: 'fresh' },
+				lastSeenAt: atAge(6),
+				createdAt: atAge(6),
+				updatedAt: atAge(6)
+			}
+		})
+	};
+
+	return { runId, outbox, receipts, failures, actions, heartbeats };
+}
+
+async function assertRetentionForeignKey(fixture) {
+	await assert.rejects(
+		prisma.notificationDeliveryFailure.delete({
+			where: { id: fixture.failures.expiredClosed.id }
+		}),
+		error =>
+			error?.code === 'P2003' ||
+			error?.code === 'P2014' ||
+			String(error).includes('control_actions_failure_id_fkey')
+	);
+	assert.ok(
+		await prisma.notificationDeliveryControlAction.findUnique({
+			where: { id: fixture.actions.expiredClosed.id }
+		})
+	);
+}
+
+function deferred() {
+	let resolve;
+	let reject;
+	const promise = new Promise((resolvePromise, rejectPromise) => {
+		resolve = resolvePromise;
+		reject = rejectPromise;
+	});
+	return { promise, resolve, reject };
+}
+
+async function acquireRetentionStartupBlock() {
+	const locked = deferred();
+	const released = deferred();
+	let didRelease = false;
+	const completed = prisma.$transaction(
+		async transaction => {
+			await transaction.$executeRawUnsafe(
+				'LOCK TABLE "notification_delivery"."delivery_failures" IN ACCESS EXCLUSIVE MODE'
+			);
+			locked.resolve();
+			await released.promise;
+		},
+		{ maxWait: 10_000, timeout: 90_000 }
+	);
+	void completed.catch(error => locked.reject(error));
+	await locked.promise;
+	return {
+		completed,
+		release() {
+			if (didRelease) return;
+			didRelease = true;
+			released.resolve();
+		}
+	};
+}
+
+async function releaseRetentionStartupBlock() {
+	if (!retentionStartupBlock) return;
+	const block = retentionStartupBlock;
+	retentionStartupBlock = undefined;
+	block.release();
+	await block.completed;
+}
+
+async function retentionReachedFailureStage(fixture) {
+	const [oldOutbox, oldReceipt] = await Promise.all([
+		prisma.notificationDeliveryOutboxEvent.findUnique({
+			where: { id: fixture.outbox.oldPublished.id }
+		}),
+		prisma.notificationDeliveryReceipt.findUnique({
+			where: { id: fixture.receipts.oldDelivered.id }
+		})
+	]);
+	return (
+		oldOutbox === null &&
+		oldReceipt?.detailsRedactedAt instanceof Date &&
+		oldReceipt.checkpoint === null
+	);
+}
+
+async function assertRetentionStartupFixture(fixture) {
+	await assertOutboxRetentionFixture(fixture);
+	await assertReceiptRetentionFixture(fixture);
+	await assertFailureRetentionFixture(fixture);
+	await assertHeartbeatRetentionFixture(fixture);
+}
+
+async function assertOutboxRetentionFixture(fixture) {
+	const expected = [
+		fixture.outbox.oldPublished,
+		fixture.outbox.freshPublished,
+		fixture.outbox.pending,
+		fixture.outbox.publishing,
+		fixture.outbox.failed
+	];
+	const rows = await prisma.notificationDeliveryOutboxEvent.findMany({
+		where: { id: { in: expected.map(row => row.id) } }
+	});
+	const byId = new Map(rows.map(row => [row.id, row]));
+	assert.equal(byId.has(fixture.outbox.oldPublished.id), false);
+	for (const [name, status] of [
+		['freshPublished', 'PUBLISHED'],
+		['pending', 'PENDING'],
+		['publishing', 'PUBLISHING'],
+		['failed', 'FAILED']
+	]) {
+		assert.equal(byId.get(fixture.outbox[name].id)?.status, status);
+		assert.equal(
+			byId.get(fixture.outbox[name].id)?.payload?.label,
+			fixture.outbox[name].payload.label
+		);
+	}
+}
+
+async function assertReceiptRetentionFixture(fixture) {
+	const expected = Object.values(fixture.receipts);
+	const rows = await prisma.notificationDeliveryReceipt.findMany({
+		where: { id: { in: expected.map(row => row.id) } }
+	});
+	assert.equal(rows.length, expected.length);
+	const byId = new Map(rows.map(row => [row.id, row]));
+	const oldDelivered = byId.get(fixture.receipts.oldDelivered.id);
+	assert.equal(
+		oldDelivered.eventId,
+		fixture.receipts.oldDelivered.eventId
+	);
+	assert.equal(oldDelivered.consumer, 'email');
+	assert.equal(oldDelivered.status, 'DELIVERED');
+	assert.equal(
+		oldDelivered.deliveredAt.toISOString(),
+		fixture.receipts.oldDelivered.deliveredAt.toISOString()
+	);
+	assert.equal(oldDelivered.checkpoint, null);
+	assert.ok(oldDelivered.detailsRedactedAt instanceof Date);
+
+	const freshDelivered = byId.get(fixture.receipts.freshDelivered.id);
+	assert.deepEqual(
+		freshDelivered.checkpoint,
+		fixture.receipts.freshDelivered.checkpoint
+	);
+	assert.equal(freshDelivered.detailsRedactedAt, null);
+
+	for (const name of [
+		'processing',
+		'retryScheduled',
+		'deadLettered',
+		'closedNoRetry'
+	]) {
+		const row = byId.get(fixture.receipts[name].id);
+		assert.equal(row.status, fixture.receipts[name].status);
+		assert.deepEqual(row.checkpoint, fixture.receipts[name].checkpoint);
+		assert.equal(row.detailsRedactedAt, null);
+	}
+
+	await assert.rejects(
+		prisma.notificationDeliveryReceipt.create({
+			data: {
+				eventId: oldDelivered.eventId,
+				consumer: oldDelivered.consumer,
+				status: 'DELIVERED',
+				deliveredAt: new Date(),
+				checkpoint: { duplicate: true }
+			}
+		}),
+		error => error?.code === 'P2002'
+	);
+}
+
+function assertRedactedFailure(actual, original) {
+	assert.equal(actual.eventId, original.eventId);
+	assert.equal(actual.consumer, original.consumer);
+	assert.equal(actual.resolution, original.resolution);
+	assert.equal(
+		actual.resolvedAt.toISOString(),
+		original.resolvedAt.toISOString()
+	);
+	assert.equal(actual.attempts, original.attempts);
+	assert.equal(actual.category, original.category);
+	assert.equal(actual.normalizedCode, original.normalizedCode);
+	assert.equal(
+		actual.classificationVersion,
+		original.classificationVersion
+	);
+	assert.deepEqual(actual.payload, {});
+	assert.deepEqual(actual.headers, {});
+	assert.equal(actual.lastError, REDACTED_RETENTION_DETAIL);
+	assert.equal(actual.safeReason, REDACTED_RETENTION_DETAIL);
+	assert.equal(actual.httpStatus, null);
+	assert.equal(actual.providerCode, null);
+	assert.ok(actual.detailsRedactedAt instanceof Date);
+	if (actual.resolution === 'CLOSED_NO_RETRY') {
+		assert.equal(actual.resolutionComment, REDACTED_RETENTION_DETAIL);
+		assert.equal(actual.resolvedById, original.resolvedById);
+	} else {
+		assert.equal(actual.resolutionComment, null);
+		assert.equal(actual.resolvedById, null);
+	}
+}
+
+async function assertFailureRetentionFixture(fixture) {
+	const retainedNames = [
+		'redactedDelivered',
+		'redactedClosed',
+		'freshClosed',
+		'nearExpiryDelivered',
+		'unresolved',
+		'retrying'
+	];
+	const retained = await prisma.notificationDeliveryFailure.findMany({
+		where: {
+			id: {
+				in: retainedNames.map(name => fixture.failures[name].id)
+			}
+		}
+	});
+	assert.equal(retained.length, retainedNames.length);
+	const byId = new Map(retained.map(row => [row.id, row]));
+	for (const name of [
+		'redactedDelivered',
+		'redactedClosed',
+		'nearExpiryDelivered'
+	]) {
+		assertRedactedFailure(
+			byId.get(fixture.failures[name].id),
+			fixture.failures[name]
+		);
+	}
+
+	const fresh = byId.get(fixture.failures.freshClosed.id);
+	assert.deepEqual(fresh.payload, fixture.failures.freshClosed.payload);
+	assert.deepEqual(fresh.headers, fixture.failures.freshClosed.headers);
+	assert.equal(fresh.lastError, fixture.failures.freshClosed.lastError);
+	assert.equal(fresh.safeReason, fixture.failures.freshClosed.safeReason);
+	assert.equal(fresh.httpStatus, fixture.failures.freshClosed.httpStatus);
+	assert.equal(
+		fresh.providerCode,
+		fixture.failures.freshClosed.providerCode
+	);
+	assert.equal(fresh.detailsRedactedAt, null);
+	assert.equal(
+		fresh.resolutionComment,
+		fixture.failures.freshClosed.resolutionComment
+	);
+
+	for (const name of ['unresolved', 'retrying']) {
+		const actual = byId.get(fixture.failures[name].id);
+		const original = fixture.failures[name];
+		assert.deepEqual(actual.payload, original.payload);
+		assert.deepEqual(actual.headers, original.headers);
+		assert.equal(actual.lastError, original.lastError);
+		assert.equal(actual.safeReason, original.safeReason);
+		assert.equal(actual.detailsRedactedAt, null);
+		assert.equal(actual.resolvedAt, null);
+		assert.equal(actual.resolution, null);
+		assert.equal(actual.activeRetryToken, original.activeRetryToken);
+		assert.equal(
+			actual.retryingAt?.toISOString(),
+			original.retryingAt?.toISOString()
+		);
+	}
+
+	for (const name of ['expiredDelivered', 'expiredClosed']) {
+		assert.equal(
+			await prisma.notificationDeliveryFailure.findUnique({
+				where: { id: fixture.failures[name].id }
+			}),
+			null
+		);
+		assert.equal(
+			await prisma.notificationDeliveryControlAction.findUnique({
+				where: { id: fixture.actions[name].id }
+			}),
+			null
+		);
+	}
+
+	const redactedDeliveredAction =
+		await prisma.notificationDeliveryControlAction.findUniqueOrThrow({
+			where: { id: fixture.actions.redactedDelivered.id }
+		});
+	assert.equal(redactedDeliveredAction.comment, null);
+	const redactedClosedAction =
+		await prisma.notificationDeliveryControlAction.findUniqueOrThrow({
+			where: { id: fixture.actions.redactedClosed.id }
+		});
+	assert.equal(redactedClosedAction.comment, REDACTED_RETENTION_DETAIL);
+	const freshClosedAction =
+		await prisma.notificationDeliveryControlAction.findUniqueOrThrow({
+			where: { id: fixture.actions.freshClosed.id }
+		});
+	assert.equal(
+		freshClosedAction.comment,
+		fixture.actions.freshClosed.comment
+	);
+}
+
+async function assertHeartbeatRetentionFixture(fixture) {
+	assert.equal(
+		await prisma.notificationDeliveryHeartbeat.findUnique({
+			where: { id: fixture.heartbeats.old.id }
+		}),
+		null
+	);
+	const fresh =
+		await prisma.notificationDeliveryHeartbeat.findUniqueOrThrow({
+			where: { id: fixture.heartbeats.fresh.id }
+		});
+	assert.deepEqual(fresh.metadata, fixture.heartbeats.fresh.metadata);
+	assert.equal(
+		fresh.lastSeenAt.toISOString(),
+		fixture.heartbeats.fresh.lastSeenAt.toISOString()
+	);
+}
+
 async function assertOutcomeConstraintMatrix() {
 	const probePrefix = `integration-outcome-constraint:${randomUUID()}`;
 	const createProbe = (eventType, routingKey, suffix, sourceKind) =>
@@ -417,6 +1044,7 @@ async function startService({ smtpPort, telegramPort, healthPort }) {
 		NOTIFICATION_DELIVERY_PREFETCH: '5',
 		NOTIFICATION_DELIVERY_OUTBOX_POLL_INTERVAL_MS: '100',
 		NOTIFICATION_DELIVERY_HEARTBEAT_INTERVAL_MS: '500',
+		NOTIFICATION_DELIVERY_OUTBOX_RETENTION_DAYS: '7',
 		NOTIFICATION_DELIVERY_RECEIPT_RETENTION_DAYS: '90',
 		NOTIFICATION_DELIVERY_FAILURE_DETAIL_RETENTION_DAYS: '30',
 		RABBITMQ_URL: workerRabbitUrl,
@@ -447,6 +1075,7 @@ async function startService({ smtpPort, telegramPort, healthPort }) {
 			'NOTIFICATION_DELIVERY_PREFETCH',
 			'NOTIFICATION_DELIVERY_OUTBOX_POLL_INTERVAL_MS',
 			'NOTIFICATION_DELIVERY_HEARTBEAT_INTERVAL_MS',
+			'NOTIFICATION_DELIVERY_OUTBOX_RETENTION_DAYS',
 			'NOTIFICATION_DELIVERY_RECEIPT_RETENTION_DAYS',
 			'NOTIFICATION_DELIVERY_FAILURE_DETAIL_RETENTION_DAYS',
 			'RABBITMQ_URL',
@@ -608,6 +1237,7 @@ async function main() {
 
 	await prisma.$connect();
 	await cleanupDatabase();
+	await assertRetentionCatalogContract();
 	await assertOutcomeConstraintMatrix();
 	rabbitConnection = await amqp.connect(adminRabbitUrl);
 	rabbitChannel = await rabbitConnection.createConfirmChannel();
@@ -670,6 +1300,9 @@ async function main() {
 		},
 		{ noAck: true }
 	);
+	const retentionFixture = await seedRetentionStartupFixture();
+	await assertRetentionForeignKey(retentionFixture);
+	retentionStartupBlock = await acquireRetentionStartupBlock();
 
 	await startService({ smtpPort, telegramPort, healthPort });
 	await waitFor('service liveness', async () => {
@@ -681,10 +1314,23 @@ async function main() {
 		const result = await requestJson(baseUrl, '/health/live');
 		return result.status === 200 && result.body?.status === 'ok';
 	});
+	await waitFor('retention reaches the failure stage', () =>
+		retentionReachedFailureStage(retentionFixture)
+	);
+	await waitFor('initial retention readiness gate', async () => {
+		const result = await requestJson(baseUrl, '/health/ready');
+		return result.status === 503 &&
+			result.body?.message ===
+				'Notification delivery retention is not ready'
+			? result
+			: null;
+	});
+	await releaseRetentionStartupBlock();
 	await waitFor('service readiness', async () => {
 		const result = await requestJson(baseUrl, '/health/ready');
 		return result.status === 200 && result.body?.status === 'ready';
 	});
+	await assertRetentionStartupFixture(retentionFixture);
 
 	const unauthorized = await requestJson(
 		baseUrl,
@@ -1042,6 +1688,9 @@ async function main() {
 			image: image || 'local-dist',
 			checked: [
 				'health',
+				'retention-startup-readiness',
+				'retention-7-90-30-365',
+				'retention-fk-and-constraints',
 				'internal-token',
 				'email',
 				'telegram',
@@ -1073,6 +1722,7 @@ try {
 		console.error('Notification Delivery logs:\n' + serviceLogs);
 	}
 } finally {
+	await releaseRetentionStartupBlock().catch(() => undefined);
 	await stopService().catch(() => undefined);
 	if (rabbitChannel) {
 		await assertTopologyAndPurge().catch(() => undefined);

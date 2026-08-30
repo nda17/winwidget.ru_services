@@ -1,5 +1,6 @@
 import { RabbitMqService } from '../messaging/rabbitmq.service';
 import { NotificationDeliveryOutboxPublisherService } from './notification-delivery-outbox-publisher.service';
+import { NotificationDeliveryRetentionService } from './notification-delivery-retention.service';
 import { NotificationDeliveryWorkerService } from './notification-delivery-worker.service';
 import { NotificationDeliveryPrismaService } from './prisma/notification-delivery-prisma.service';
 import { Injectable, ServiceUnavailableException } from '@nestjs/common';
@@ -35,6 +36,7 @@ export class NotificationDeliveryHealthService {
 	constructor(
 		private readonly worker: NotificationDeliveryWorkerService,
 		private readonly outbox: NotificationDeliveryOutboxPublisherService,
+		private readonly retention: NotificationDeliveryRetentionService,
 		private readonly rabbitMq: RabbitMqService,
 		private readonly prisma: NotificationDeliveryPrismaService
 	) {}
@@ -72,6 +74,11 @@ export class NotificationDeliveryHealthService {
 		if (!this.outbox.isReady()) {
 			throw new ServiceUnavailableException(
 				'Notification delivery outbox is not ready'
+			);
+		}
+		if (!this.retention.isInitialCleanupReady()) {
+			throw new ServiceUnavailableException(
+				'Notification delivery retention is not ready'
 			);
 		}
 		if (!this.rabbitMq.isConnected()) {
