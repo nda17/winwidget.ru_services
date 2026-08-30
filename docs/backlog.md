@@ -145,25 +145,25 @@ backups. Это не даёт PITR и ограничено размером фа
 
 Operations принимает и аудитирует DEV-only restore request, а изолированный
 `database-restore-worker` выполняет manifest/SHA/TOC/migration/ACL проверки,
-safety dump, fence и restore. В active registry входят только service-owned
-targets: `billing`, `campaigns`, `identity`, `notification-delivery`,
-`operations`, `platform`, `reporting`, `support` и `widgets`.
+safety dump и restore. В active registry входят семь service-owned targets:
+`campaigns`, `identity`, `notification-delivery`, `platform`, `reporting`,
+`support` и `widgets`. Billing остаётся только backup target до отдельного
+платёжного review. Operations остаётся только backup target, пока job/lease и
+recovery evidence не вынесены из восстанавливаемой схемы.
 
 Осталось:
 
 - После restore fail-closed сверять фактические schema/table/sequence/default
   ACL grants, а не только наличие `_prisma_migrations`.
-- При ошибке execution/fetch подтверждать сообщение только после проверенного
-  CAS `PROCESSING -> FAILED`: сейчас ошибка или `count = 0` подавляются, job
-  может остаться в `PROCESSING`, а source удаляется. Нужна recovery-семантика
-  для недоступной Operations DB и будущего `FAILED_FENCED`.
 - выполнить exact-SHA Linux/Docker/PostgreSQL 18 rehearsal всех targets,
   включая несовместимый dump, нехватку места, cancel race, restart checkpoint,
   ACL drift и изоляцию чужих БД;
 - проверить one-shot permit, signed receipt и обязательное закрытие API после
   success, timeout и отмены workflow;
-- реализовать и отрепетировать `FAILED_FENCED` recovery-action с проверкой
+- реализовать и отрепетировать `RECOVERY_REQUIRED` recovery-action с проверкой
   terminal/lock/fence evidence и dual approval;
+- если потребуется вернуть Operations self-restore, вынести control ledger,
+  lease, incidents и recovery evidence в отдельную невосстанавливаемую границу;
 - решить, остаётся ли in-place restore приемлемым, либо перейти к восстановлению
   в новую изолированную PostgreSQL с проверкой до switch;
 - закрепить retention restore artifacts и alerts на зависшие job/fence.

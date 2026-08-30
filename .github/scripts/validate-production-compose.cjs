@@ -1396,7 +1396,10 @@ const restoreBaseKeys = [
 	'RABBITMQ_MAX_MESSAGE_BYTES',
 	'DATABASE_RESTORE_STORAGE_DIR'
 ];
-const restoreCredentialKeys = databaseTargets.flatMap(target => [
+const restoreTargets = databaseTargets.filter(
+	target => !['billing', 'operations'].includes(target.slug)
+);
+const restoreCredentialKeys = restoreTargets.flatMap(target => [
 	target.prefix + '_POSTGRES_ADMIN_USER',
 	target.prefix + '_POSTGRES_PORT',
 	'DATABASE_RESTORE_' + target.prefix + '_ADMIN_PASSWORD_FILE'
@@ -1406,7 +1409,7 @@ assertExactKeys(
 	[...restoreBaseKeys, ...restoreCredentialKeys],
 	'operations-restore-worker environment'
 );
-for (const target of databaseTargets) {
+for (const target of restoreTargets) {
 	assert(
 		operationsRestoreEnvironment[
 			target.prefix + '_POSTGRES_ADMIN_USER'
@@ -1446,7 +1449,7 @@ assert(
 	'restore-worker must not receive Telegram token'
 );
 
-const expectedRestoreSecrets = databaseTargets
+const expectedRestoreSecrets = restoreTargets
 	.map(target => [
 		target.slug + '-postgres-admin-password',
 		'database-restore-' + target.slug + '-admin-password'

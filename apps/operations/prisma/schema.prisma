@@ -286,20 +286,31 @@ model ReportingSchedulePolicy {
 }
 
 model DatabaseRestoreJob {
-  id             String                   @id @default(uuid()) @db.Uuid
-  target         String
-  status         DatabaseRestoreJobStatus @default(QUEUED)
-  sourceFileName String                   @map("source_file_name")
-  sourceSha256   String                   @map("source_sha256")
-  sourceSize     BigInt                   @map("source_size")
-  requestedById  String                   @map("requested_by_id")
-  idempotencyKey String                   @map("idempotency_key") @db.Uuid
-  result         Json?
-  lastError      String?                  @map("last_error") @db.Text
-  startedAt      DateTime?                @map("started_at")
-  finishedAt     DateTime?                @map("finished_at")
-  createdAt      DateTime                 @default(now()) @map("created_at")
-  updatedAt      DateTime                 @updatedAt @map("updated_at")
+  id                   String                   @id @default(uuid()) @db.Uuid
+  target               String
+  status               DatabaseRestoreJobStatus @default(QUEUED)
+  phase                DatabaseRestoreJobPhase?
+  sourceFileName       String                   @map("source_file_name")
+  sourceSha256         String                   @map("source_sha256")
+  sourceSize           BigInt                   @map("source_size")
+  requestedById        String                   @map("requested_by_id")
+  idempotencyKey       String                   @map("idempotency_key") @db.Uuid
+  eventId              String                   @unique(map: "database_restore_jobs_event_id_unique") @map("event_id") @db.Uuid
+  leaseOwner           String?                  @map("lease_owner")
+  leaseToken           String?                  @map("lease_token") @db.Uuid
+  leaseExpiresAt       DateTime?                @map("lease_expires_at")
+  attempts             Int                      @default(0)
+  safetyBackupFileName String?                  @map("safety_backup_file_name")
+  safetyBackupSha256   String?                  @map("safety_backup_sha256")
+  sourceDeletedAt      DateTime?                @map("source_deleted_at")
+  safetyDeletedAt      DateTime?                @map("safety_deleted_at")
+  cleanupError         String?                  @map("cleanup_error") @db.Text
+  result               Json?
+  lastError            String?                  @map("last_error") @db.Text
+  startedAt            DateTime?                @map("started_at")
+  finishedAt           DateTime?                @map("finished_at")
+  createdAt            DateTime                 @default(now()) @map("created_at")
+  updatedAt            DateTime                 @updatedAt @map("updated_at")
 
   @@unique([requestedById, idempotencyKey], map: "database_restore_jobs_actor_idempotency_key")
   @@index([status, createdAt], map: "database_restore_jobs_dispatch_idx")
@@ -381,7 +392,17 @@ enum DatabaseRestoreJobStatus {
   PROCESSING
   SUCCEEDED
   FAILED
+  RECOVERY_REQUIRED
   CANCELLED
+
+  @@schema("operations")
+}
+
+enum DatabaseRestoreJobPhase {
+  PREPARING
+  SAFETY_READY
+  MUTATING
+  VERIFIED
 
   @@schema("operations")
 }

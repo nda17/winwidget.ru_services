@@ -1,7 +1,8 @@
 import { Injectable } from '@nestjs/common';
 import { spawn } from 'node:child_process';
 import { createWriteStream } from 'node:fs';
-import { chmod } from 'node:fs/promises';
+import { chmod, open } from 'node:fs/promises';
+import { dirname } from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import {
 	DatabaseRestoreConnection,
@@ -17,10 +18,16 @@ const RESTORE_TOC_OVERFLOW_ERROR =
 
 @Injectable()
 export class DatabaseRestoreProcessService {
-	async listDump(path: string, password: string): Promise<string> {
+	async listDump(
+		path: string,
+		password: string,
+		signal?: AbortSignal
+	): Promise<string> {
+		signal?.throwIfAborted();
 		return (
 			await this.command('pg_restore', ['--list', path], password, {
-				stdoutOverflowError: RESTORE_TOC_OVERFLOW_ERROR
+				stdoutOverflowError: RESTORE_TOC_OVERFLOW_ERROR,
+				signal
 			})
 		).stdout;
 	}
@@ -28,8 +35,10 @@ export class DatabaseRestoreProcessService {
 	async createSafetyCopy(
 		connection: DatabaseRestoreConnection,
 		schema: string,
-		path: string
+		path: string,
+		signal?: AbortSignal
 	): Promise<void> {
+		signal?.throwIfAborted();
 		const child = spawn(
 			'pg_dump',
 			[
@@ -48,21 +57,37 @@ export class DatabaseRestoreProcessService {
 		);
 		if (!child.stdout) {
 			const error = new Error('Safety backup stdout is unavailable');
-			await this.wait(child, connection.password, undefined, error);
+			await this.wait(
+				child,
+				connection.password,
+				undefined,
+				error,
+				signal
+			);
 			throw error;
 		}
+		const outputSignal = signal
+			? AbortSignal.any([
+					signal,
+					AbortSignal.timeout(DATABASE_COMMAND_TIMEOUT_MS)
+				])
+			: AbortSignal.timeout(DATABASE_COMMAND_TIMEOUT_MS);
 		const output = pipeline(
 			child.stdout,
-			createWriteStream(path, { flags: 'wx', mode: 0o600 })
+			createWriteStream(path, { flags: 'wx', mode: 0o600 }),
+			{ signal: outputSignal }
 		);
-		await this.wait(child, connection.password, output);
+		await this.wait(child, connection.password, output, undefined, signal);
 		await chmod(path, 0o600);
+		await this.durablySyncArtifact(path, signal);
 	}
 
 	async recreateSchema(
 		connection: DatabaseRestoreConnection,
-		target: DatabaseRestoreTargetConfiguration
+		target: DatabaseRestoreTargetConfiguration,
+		signal?: AbortSignal
 	): Promise<void> {
+		signal?.throwIfAborted();
 		await this.command(
 			'psql',
 			[
@@ -73,15 +98,18 @@ export class DatabaseRestoreProcessService {
 				'--command',
 				`DROP SCHEMA ${this.identifier(target.schema)} CASCADE; CREATE SCHEMA ${this.identifier(target.schema)} AUTHORIZATION ${this.identifier(target.migrationRole)};`
 			],
-			connection.password
+			connection.password,
+			{ signal }
 		);
 	}
 
 	async restoreSchema(
 		connection: DatabaseRestoreConnection,
 		target: DatabaseRestoreTargetConfiguration,
-		source: string
+		source: string,
+		signal?: AbortSignal
 	): Promise<void> {
+		signal?.throwIfAborted();
 		await this.command(
 			'pg_restore',
 			[
@@ -95,14 +123,17 @@ export class DatabaseRestoreProcessService {
 				...this.connectionArguments(connection),
 				source
 			],
-			connection.password
+			connection.password,
+			{ signal }
 		);
 	}
 
 	async applyAcl(
 		connection: DatabaseRestoreConnection,
-		target: DatabaseRestoreTargetConfiguration
+		target: DatabaseRestoreTargetConfiguration,
+		signal?: AbortSignal
 	): Promise<void> {
+		signal?.throwIfAborted();
 		await this.command(
 			'psql',
 			[
@@ -113,14 +144,17 @@ export class DatabaseRestoreProcessService {
 				'--command',
 				this.aclSql(target)
 			],
-			connection.password
+			connection.password,
+			{ signal }
 		);
 	}
 
 	async verifyMigrationLedger(
 		connection: DatabaseRestoreConnection,
-		target: DatabaseRestoreTargetConfiguration
+		target: DatabaseRestoreTargetConfiguration,
+		signal?: AbortSignal
 	): Promise<boolean> {
+		signal?.throwIfAborted();
 		const verification = await this.command(
 			'psql',
 			[
@@ -131,7 +165,8 @@ export class DatabaseRestoreProcessService {
 				'--command',
 				`SELECT CASE WHEN to_regclass('${target.schema}._prisma_migrations') IS NOT NULL THEN 'ok' ELSE 'missing' END;`
 			],
-			connection.password
+			connection.password,
+			{ signal }
 		);
 		return verification.stdout.trim() === 'ok';
 	}
@@ -140,8 +175,12 @@ export class DatabaseRestoreProcessService {
 		command: 'pg_restore' | 'psql',
 		args: string[],
 		password: string | null,
-		options: { stdoutOverflowError?: string } = {}
+		options: {
+			stdoutOverflowError?: string;
+			signal?: AbortSignal;
+		} = {}
 	): Promise<{ stdout: string }> {
+		options.signal?.throwIfAborted();
 		const child = spawn(command, args, {
 			env: this.environment(password),
 			stdio: ['ignore', 'pipe', 'pipe']
@@ -169,7 +208,7 @@ export class DatabaseRestoreProcessService {
 			stdoutBytes += buffer.length;
 			stdoutChunks.push(buffer);
 		});
-		await this.wait(child, password);
+		await this.wait(child, password, undefined, undefined, options.signal);
 		if (stdoutOverflow) {
 			throw new Error(options.stdoutOverflowError);
 		}
@@ -194,11 +233,32 @@ export class DatabaseRestoreProcessService {
 		];
 	}
 
+	private async durablySyncArtifact(
+		path: string,
+		signal?: AbortSignal
+	): Promise<void> {
+		signal?.throwIfAborted();
+		await this.syncPath(path);
+		signal?.throwIfAborted();
+		await this.syncPath(dirname(path));
+		signal?.throwIfAborted();
+	}
+
+	private async syncPath(path: string): Promise<void> {
+		const handle = await open(path, 'r');
+		try {
+			await handle.sync();
+		} finally {
+			await handle.close();
+		}
+	}
+
 	private wait(
 		child: ReturnType<typeof spawn>,
 		password: string | null,
 		output?: Promise<void>,
-		initialError?: Error
+		initialError?: Error,
+		signal?: AbortSignal
 	): Promise<void> {
 		return new Promise((resolve, reject) => {
 			let stderr = '';
@@ -213,6 +273,7 @@ export class DatabaseRestoreProcessService {
 			const clearTimers = () => {
 				clearTimeout(timeout);
 				if (terminationTimeout) clearTimeout(terminationTimeout);
+				signal?.removeEventListener('abort', handleAbort);
 			};
 			const sendSignal = (signal: NodeJS.Signals) => {
 				try {
@@ -233,6 +294,12 @@ export class DatabaseRestoreProcessService {
 				}, DATABASE_COMMAND_TERMINATION_GRACE_MS);
 				terminationTimeout.unref();
 			}
+			const handleAbort = () =>
+				requestStop(
+					errorValue(
+						signal?.reason ?? new Error('Database restore was aborted')
+					)
+				);
 			const timeout = setTimeout(
 				() => requestStop(new Error('Database restore command timed out')),
 				DATABASE_COMMAND_TIMEOUT_MS
@@ -275,6 +342,10 @@ export class DatabaseRestoreProcessService {
 					outputError ??= errorValue(error);
 					if (!closed && !exited) requestStop(outputError);
 				});
+			}
+			if (signal) {
+				signal.addEventListener('abort', handleAbort, { once: true });
+				if (signal.aborted) handleAbort();
 			}
 			if (initialError) requestStop(initialError);
 		});

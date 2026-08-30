@@ -63,15 +63,6 @@ const TARGETS: Record<
 		runtimeRole: 'winwidget_widgets_runtime',
 		backupRole: 'winwidget_widgets_backup'
 	},
-	billing: {
-		environmentPrefix: 'BILLING',
-		database: 'winwidget_billing',
-		schema: 'billing',
-		adminRole: 'winwidget_billing_admin',
-		migrationRole: 'winwidget_billing_migration',
-		runtimeRole: 'winwidget_billing_runtime',
-		backupRole: 'winwidget_billing_backup'
-	},
 	identity: {
 		environmentPrefix: 'IDENTITY',
 		database: 'winwidget_identity',
@@ -98,15 +89,6 @@ const TARGETS: Record<
 		migrationRole: 'winwidget_support_migration',
 		runtimeRole: 'winwidget_support_runtime',
 		backupRole: 'winwidget_support_backup'
-	},
-	operations: {
-		environmentPrefix: 'OPERATIONS',
-		database: 'winwidget_operations',
-		schema: 'operations',
-		adminRole: 'winwidget_operations_admin',
-		migrationRole: 'winwidget_operations_migration',
-		runtimeRole: 'winwidget_operations_runtime',
-		backupRole: 'winwidget_operations_backup'
 	}
 };
 

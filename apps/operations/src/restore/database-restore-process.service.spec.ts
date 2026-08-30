@@ -46,17 +46,19 @@ interface ProcessInternals {
 		command: 'pg_restore' | 'psql',
 		args: string[],
 		password: string | null,
-		options?: { stdoutOverflowError?: string }
+		options?: { stdoutOverflowError?: string; signal?: AbortSignal }
 	): Promise<{ stdout: string }>;
 	connectionArguments(value: DatabaseRestoreConnection): string[];
 	environment(password: string | null): NodeJS.ProcessEnv;
 	identifier(value: string): string;
 	aclSql(value: DatabaseRestoreTargetConfiguration): string;
+	syncPath(path: string): Promise<void>;
 	wait(
 		child: ReturnType<typeof spawnMock>,
 		password: string | null,
 		output?: Promise<void>,
-		initialError?: Error
+		initialError?: Error,
+		signal?: AbortSignal
 	): Promise<void>;
 }
 
@@ -128,7 +130,8 @@ describe('DatabaseRestoreProcessService command plans', () => {
 				'--command',
 				'DROP SCHEMA "operations" CASCADE; CREATE SCHEMA "operations" AUTHORIZATION "winwidget_operations_migration";'
 			],
-			connection.password
+			connection.password,
+			{ signal: undefined }
 		);
 	});
 
@@ -152,7 +155,8 @@ describe('DatabaseRestoreProcessService command plans', () => {
 				...connectionArguments,
 				'/restore/source.dump'
 			],
-			connection.password
+			connection.password,
+			{ signal: undefined }
 		);
 	});
 
@@ -177,7 +181,8 @@ describe('DatabaseRestoreProcessService command plans', () => {
 					'ALTER DEFAULT PRIVILEGES FOR ROLE "winwidget_operations_migration" IN SCHEMA "operations" GRANT SELECT ON TABLES TO "winwidget_operations_backup";'
 				].join(' ')
 			],
-			connection.password
+			connection.password,
+			{ signal: undefined }
 		);
 	});
 
@@ -202,7 +207,8 @@ describe('DatabaseRestoreProcessService command plans', () => {
 					'--command',
 					"SELECT CASE WHEN to_regclass('operations._prisma_migrations') IS NOT NULL THEN 'ok' ELSE 'missing' END;"
 				],
-				connection.password
+				connection.password,
+				{ signal: undefined }
 			);
 		}
 	);
@@ -259,6 +265,25 @@ describe('DatabaseRestoreProcessService process boundary', () => {
 				stdio: ['ignore', 'pipe', 'pipe']
 			}
 		);
+	});
+
+	it('terminates the child when the durable lease aborts execution', async () => {
+		jest.useFakeTimers();
+		const child = childProcess();
+		spawnMock.mockReturnValue(child);
+		const controller = new AbortController();
+		const result = new DatabaseRestoreProcessService().recreateSchema(
+			connection,
+			target,
+			controller.signal
+		);
+
+		controller.abort(new Error('restore lease lost'));
+		expect(child.kill).toHaveBeenNthCalledWith(1, 'SIGTERM');
+		await jest.advanceTimersByTimeAsync(10_000);
+		expect(child.kill).toHaveBeenNthCalledWith(2, 'SIGKILL');
+		child.emit('close', null, 'SIGKILL');
+		await expect(result).rejects.toThrow('restore lease lost');
 	});
 
 	it('rejects an oversized TOC instead of silently dropping its schema entry', async () => {
@@ -328,7 +353,11 @@ describe('DatabaseRestoreProcessService process boundary', () => {
 		const path = join(directory, 'job.dump.safety');
 		const child = childProcess();
 		spawnMock.mockReturnValue(child);
-		const result = new DatabaseRestoreProcessService().createSafetyCopy(
+		const service = new DatabaseRestoreProcessService();
+		const syncPath = jest
+			.spyOn(service as unknown as ProcessInternals, 'syncPath')
+			.mockResolvedValue();
+		const result = service.createSafetyCopy(
 			connection,
 			'operations',
 			path
@@ -340,10 +369,39 @@ describe('DatabaseRestoreProcessService process boundary', () => {
 			child.emit('close', 0);
 			await Promise.resolve();
 			expect(settlement()).toBe('pending');
+			expect(syncPath).not.toHaveBeenCalled();
 
 			child.stdout?.end();
 			await expect(result).resolves.toBeUndefined();
+			expect(syncPath.mock.calls).toEqual([[path], [directory]]);
 			await expect(readFile(path, 'utf8')).resolves.toBe('PGDMP-safety');
+		} finally {
+			await rm(directory, { recursive: true, force: true });
+		}
+	});
+
+	it('aborts a pending safety pipeline after the child has already closed', async () => {
+		const directory = await mkdtemp(join(tmpdir(), 'restore-safety-'));
+		const path = join(directory, 'job.dump.safety');
+		const child = childProcess();
+		spawnMock.mockReturnValue(child);
+		const controller = new AbortController();
+		const result = new DatabaseRestoreProcessService().createSafetyCopy(
+			connection,
+			'operations',
+			path,
+			controller.signal
+		);
+		const settlement = observeSettlement(result);
+
+		try {
+			child.stdout?.write(Buffer.from('partial safety'));
+			child.emit('close', 0);
+			await Promise.resolve();
+			expect(settlement()).toBe('pending');
+
+			controller.abort(new Error('restore lease lost after child close'));
+			await expect(result).rejects.toThrow(/abort/i);
 		} finally {
 			await rm(directory, { recursive: true, force: true });
 		}

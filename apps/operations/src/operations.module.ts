@@ -33,10 +33,13 @@ import { ReportingPolicyController } from './reporting-policy/reporting-policy.c
 import { ReportingPolicyGuard } from './reporting-policy/reporting-policy.guard';
 import { ReportingPolicyService } from './reporting-policy/reporting-policy.service';
 import { DatabaseRestoreArtifactValidatorService } from './restore/database-restore-artifact-validator.service';
+import { DatabaseRestoreCleanupService } from './restore/database-restore-cleanup.service';
 import { DatabaseRestoreController } from './restore/database-restore.controller';
 import { DatabaseRestoreExecutorService } from './restore/database-restore-executor.service';
 import { DatabaseRestoreProcessService } from './restore/database-restore-process.service';
+import { DatabaseRestoreRecoveryService } from './restore/database-restore-recovery.service';
 import { DatabaseRestoreService } from './restore/database-restore.service';
+import { DatabaseRestoreStateService } from './restore/database-restore-state.service';
 import { DatabaseRestoreTargetRegistryService } from './restore/database-restore-target-registry.service';
 import { DatabaseRestoreWorkerService } from './restore/database-restore-worker.service';
 import { OperationsRuntimeModule } from './runtime/operations-runtime.module';
@@ -108,6 +111,9 @@ const ROLE_SCOPED_PROVIDERS =
 		DatabaseRestoreArtifactValidatorService,
 		DatabaseRestoreProcessService,
 		DatabaseRestoreExecutorService,
+		DatabaseRestoreCleanupService,
+		DatabaseRestoreStateService,
+		DatabaseRestoreRecoveryService,
 		DatabaseRestoreService,
 		DatabaseRestoreWorkerService,
 		ReportingPolicyService,

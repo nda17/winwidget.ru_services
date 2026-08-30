@@ -8,13 +8,13 @@ import {
 } from './database-restore-target-registry.service';
 
 const target: DatabaseRestoreTargetConfiguration = {
-	environmentPrefix: 'OPERATIONS',
-	database: 'winwidget_operations',
-	schema: 'operations',
-	adminRole: 'winwidget_operations_admin',
-	migrationRole: 'winwidget_operations_migration',
-	runtimeRole: 'winwidget_operations_runtime',
-	backupRole: 'winwidget_operations_backup'
+	environmentPrefix: 'REPORTING',
+	database: 'winwidget_reporting',
+	schema: 'reporting',
+	adminRole: 'winwidget_reporting_admin',
+	migrationRole: 'winwidget_reporting_migration',
+	runtimeRole: 'winwidget_reporting_runtime',
+	backupRole: 'winwidget_reporting_backup'
 };
 const connection: DatabaseRestoreConnection = {
 	host: '127.0.0.1',
@@ -23,12 +23,16 @@ const connection: DatabaseRestoreConnection = {
 	database: target.database,
 	password: 'test-restore-password'
 };
-const input = {
+const input = (calls: string[] = []) => ({
 	jobId: '0198c64e-a7a2-7244-9328-c769a42113f4',
-	target: 'operations' as const,
+	target: 'reporting' as const,
 	source: '/restore/job.dump',
-	expectedSha256: 'source-sha'
-};
+	expectedSha256: 'source-sha',
+	signal: new AbortController().signal,
+	checkpoint: jest.fn(async ({ phase }: { phase: string }) => {
+		calls.push(`checkpoint:${phase}`);
+	})
+});
 
 const setup = () => {
 	const calls: string[] = [];
@@ -51,8 +55,8 @@ const setup = () => {
 		assertTableOfContents: jest.fn(() => calls.push('toc-validation'))
 	};
 	const process = {
-		listDump: jest.fn(async () => {
-			calls.push('toc');
+		listDump: jest.fn(async (path: string) => {
+			calls.push(path.endsWith('.safety') ? 'safety-toc' : 'toc');
 			return 'toc';
 		}),
 		createSafetyCopy: jest.fn(async () => {
@@ -92,8 +96,9 @@ describe('DatabaseRestoreExecutorService', () => {
 	it('preserves the complete validation, safety, restore, ACL, and ledger order', async () => {
 		const { service, artifacts, calls, process } = setup();
 
-		await expect(service.restore(input)).resolves.toEqual({
-			target: 'operations',
+		const restoreInput = input(calls);
+		await expect(service.restore(restoreInput)).resolves.toEqual({
+			target: 'reporting',
 			safetyBackupFileName: 'job.dump.safety',
 			safetyBackupSha256: 'safety-sha',
 			restoredAt: '2026-08-30T12:00:00.000Z',
@@ -107,21 +112,28 @@ describe('DatabaseRestoreExecutorService', () => {
 			'toc',
 			'toc-validation',
 			'safety-copy',
+			'safety-toc',
+			'toc-validation',
 			'safety-sha',
+			'checkpoint:SAFETY_READY',
+			'checkpoint:MUTATING',
 			'recreate',
 			'restore',
 			'acl',
-			'ledger'
+			'ledger',
+			'checkpoint:VERIFIED'
 		]);
 		expect(process.createSafetyCopy).toHaveBeenCalledWith(
 			connection,
-			'operations',
-			'/restore/job.dump.safety'
+			'reporting',
+			'/restore/job.dump.safety',
+			restoreInput.signal
 		);
 		expect(artifacts.assertTableOfContents).toHaveBeenCalledWith(
 			'toc',
 			target
 		);
+		expect(artifacts.assertTableOfContents).toHaveBeenCalledTimes(2);
 	});
 
 	it.each([
@@ -131,11 +143,17 @@ describe('DatabaseRestoreExecutorService', () => {
 		['TOC listing', 'listDump', 'toc failed'],
 		['TOC validation', 'assertTableOfContents', 'toc invalid'],
 		['safety copy', 'createSafetyCopy', 'safety failed'],
+		['safety TOC listing', 'safetyListDump', 'safety toc failed'],
+		[
+			'safety TOC validation',
+			'safetyTableOfContents',
+			'safety toc invalid'
+		],
 		['safety checksum', 'safetySha256', 'safety hash failed']
 	])(
 		'propagates a pre-destructive %s error without the safety wrapper',
 		async (_label, point, message) => {
-			const { service, targets, artifacts, process } = setup();
+			const { service, targets, artifacts, process, calls } = setup();
 			if (point === 'connection')
 				targets.connection.mockRejectedValue(new Error(message));
 			if (point === 'sha256')
@@ -152,16 +170,30 @@ describe('DatabaseRestoreExecutorService', () => {
 				});
 			if (point === 'createSafetyCopy')
 				process.createSafetyCopy.mockRejectedValue(new Error(message));
+			if (point === 'safetyListDump')
+				process.listDump
+					.mockResolvedValueOnce('toc')
+					.mockRejectedValueOnce(new Error(message));
+			if (point === 'safetyTableOfContents')
+				artifacts.assertTableOfContents
+					.mockImplementationOnce(() => calls.push('toc-validation'))
+					.mockImplementationOnce(() => {
+						calls.push('toc-validation');
+						throw new Error(message);
+					});
 			if (point === 'safetySha256')
 				artifacts.sha256
 					.mockResolvedValueOnce('source-sha')
 					.mockRejectedValueOnce(new Error(message));
 
-			const result = service.restore(input);
+			const restoreInput = input();
+			const result = service.restore(restoreInput);
 			await expect(result).rejects.toThrow(message);
 			await expect(result).rejects.not.toThrow(
 				'Database restore failed after safety backup'
 			);
+			expect(restoreInput.checkpoint).not.toHaveBeenCalled();
+			expect(process.recreateSchema).not.toHaveBeenCalled();
 		}
 	);
 
@@ -171,12 +203,29 @@ describe('DatabaseRestoreExecutorService', () => {
 			throw new Error('toc invalid');
 		});
 
-		await expect(service.restore(input)).rejects.toThrow('toc invalid');
+		await expect(service.restore(input())).rejects.toThrow('toc invalid');
 		expect(process.createSafetyCopy).not.toHaveBeenCalled();
 		expect(process.recreateSchema).not.toHaveBeenCalled();
 		expect(process.restoreSchema).not.toHaveBeenCalled();
 		expect(process.applyAcl).not.toHaveBeenCalled();
 		expect(process.verifyMigrationLedger).not.toHaveBeenCalled();
+	});
+
+	it('does not mutate the target when the MUTATING checkpoint is not durable', async () => {
+		const { service, process } = setup();
+		const restoreInput = input();
+		restoreInput.checkpoint.mockImplementation(async ({ phase }) => {
+			if (phase === 'MUTATING') {
+				throw new Error('checkpoint persistence unavailable');
+			}
+		});
+
+		await expect(service.restore(restoreInput)).rejects.toThrow(
+			'checkpoint persistence unavailable'
+		);
+		expect(process.recreateSchema).not.toHaveBeenCalled();
+		expect(process.restoreSchema).not.toHaveBeenCalled();
+		expect(process.applyAcl).not.toHaveBeenCalled();
 	});
 
 	it.each([
@@ -199,7 +248,7 @@ describe('DatabaseRestoreExecutorService', () => {
 				throw new Error('destructive failure');
 			});
 
-			await expect(service.restore(input)).rejects.toThrow(
+			await expect(service.restore(input())).rejects.toThrow(
 				'Database restore failed after safety backup safety-sha: destructive failure'
 			);
 			expect(calls.slice(calls.indexOf('recreate'))).toEqual(
@@ -212,7 +261,7 @@ describe('DatabaseRestoreExecutorService', () => {
 		const { service, process } = setup();
 		process.verifyMigrationLedger.mockResolvedValue(false);
 
-		await expect(service.restore(input)).rejects.toThrow(
+		await expect(service.restore(input())).rejects.toThrow(
 			'Database restore failed after safety backup safety-sha: Restored database migration ledger is missing'
 		);
 	});

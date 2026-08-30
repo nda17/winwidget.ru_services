@@ -25,6 +25,13 @@ export class OperationalAlertService {
 	constructor(private readonly prisma: OperationsPrismaService) {}
 
 	record(input: RecordOperationalAlertInput) {
+		return this.recordInTransaction(this.prisma, input);
+	}
+
+	recordInTransaction(
+		transaction: Prisma.TransactionClient,
+		input: RecordOperationalAlertInput
+	) {
 		for (const [name, value] of [
 			['deduplicationKey', input.deduplicationKey],
 			['type', input.type],
@@ -37,7 +44,7 @@ export class OperationalAlertService {
 				throw new Error(`Operational alert ${name} is invalid`);
 			}
 		}
-		return this.prisma.operationalAlert.upsert({
+		return transaction.operationalAlert.upsert({
 			where: { deduplicationKey: input.deduplicationKey },
 			create: {
 				...input,
@@ -62,7 +69,14 @@ export class OperationalAlertService {
 	}
 
 	resolve(deduplicationKey: string) {
-		return this.prisma.operationalAlert.updateMany({
+		return this.resolveInTransaction(this.prisma, deduplicationKey);
+	}
+
+	resolveInTransaction(
+		transaction: Prisma.TransactionClient,
+		deduplicationKey: string
+	) {
+		return transaction.operationalAlert.updateMany({
 			where: { deduplicationKey, resolvedAt: null },
 			data: { resolvedAt: new Date() }
 		});

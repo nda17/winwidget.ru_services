@@ -1,6 +1,14 @@
-import { DATABASE_BACKUP_TARGETS } from '../scheduled-jobs/scheduled-jobs.types';
+import type { DatabaseBackupTarget } from '../scheduled-jobs/scheduled-jobs.types';
 
-export const DATABASE_RESTORE_TARGETS = DATABASE_BACKUP_TARGETS;
+export const DATABASE_RESTORE_TARGETS = [
+	'notification-delivery',
+	'campaigns',
+	'reporting',
+	'widgets',
+	'identity',
+	'platform',
+	'support'
+] as const satisfies ReadonlyArray<DatabaseBackupTarget>;
 export type DatabaseRestoreTarget =
 	(typeof DATABASE_RESTORE_TARGETS)[number];
 export const DATABASE_RESTORE_MAX_FILE_SIZE_BYTES = 49 * 1024 * 1024;
@@ -40,11 +48,6 @@ export const DATABASE_RESTORE_SETTINGS: ReadonlyArray<{
 		confirmation: 'ВОССТАНОВИТЬ WIDGETS'
 	},
 	{
-		id: 'billing',
-		label: 'Billing',
-		confirmation: 'ВОССТАНОВИТЬ BILLING'
-	},
-	{
 		id: 'identity',
 		label: 'Identity',
 		confirmation: 'ВОССТАНОВИТЬ IDENTITY'
@@ -58,11 +61,6 @@ export const DATABASE_RESTORE_SETTINGS: ReadonlyArray<{
 		id: 'support',
 		label: 'Support',
 		confirmation: 'ВОССТАНОВИТЬ SUPPORT'
-	},
-	{
-		id: 'operations',
-		label: 'Operations',
-		confirmation: 'ВОССТАНОВИТЬ OPERATIONS'
 	}
 ];
 

@@ -98,9 +98,11 @@ describe('OperationsRabbitMqService consumer readiness', () => {
 		const consume = jest
 			.fn()
 			.mockResolvedValue({ consumerTag: 'restore-worker-consumer' });
+		const prefetch = jest.fn().mockResolvedValue(undefined);
 		const channel = {
 			checkQueue,
-			consume
+			consume,
+			prefetch
 		} as unknown as ConfirmChannel;
 		const internal = service as unknown as RabbitInternals;
 		internal.topologyReady = true;
@@ -124,6 +126,7 @@ describe('OperationsRabbitMqService consumer readiness', () => {
 		expect(checkQueue).not.toHaveBeenCalledWith(
 			OPERATIONS_SCHEDULED_JOB_DLQ
 		);
+		expect(prefetch).toHaveBeenCalledWith(1);
 		expect(service.isReady()).toBe(true);
 	});
 

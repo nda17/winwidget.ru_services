@@ -28,11 +28,9 @@ describe('DatabaseRestoreTargetRegistryService', () => {
 				'campaigns',
 				'reporting',
 				'widgets',
-				'billing',
 				'identity',
 				'platform',
-				'support',
-				'operations'
+				'support'
 			].map(name => ({
 				environmentPrefix: name.toUpperCase(),
 				database: `winwidget_${name}`,
@@ -52,20 +50,20 @@ describe('DatabaseRestoreTargetRegistryService', () => {
 		await writeFile(secretPath, 'test-restore-password', { mode: 0o600 });
 		const registry = new DatabaseRestoreTargetRegistryService(
 			config({
-				OPERATIONS_POSTGRES_ADMIN_USER: 'winwidget_operations_admin',
-				OPERATIONS_POSTGRES_PORT: '55441',
-				DATABASE_RESTORE_OPERATIONS_ADMIN_PASSWORD_FILE: secretPath
+				REPORTING_POSTGRES_ADMIN_USER: 'winwidget_reporting_admin',
+				REPORTING_POSTGRES_PORT: '55441',
+				DATABASE_RESTORE_REPORTING_ADMIN_PASSWORD_FILE: secretPath
 			})
 		);
 
 		try {
 			await expect(
-				registry.connection(registry.get('operations'))
+				registry.connection(registry.get('reporting'))
 			).resolves.toEqual({
 				host: '127.0.0.1',
 				port: 55441,
-				user: 'winwidget_operations_admin',
-				database: 'winwidget_operations',
+				user: 'winwidget_reporting_admin',
+				database: 'winwidget_reporting',
 				password: 'test-restore-password'
 			});
 		} finally {
@@ -77,47 +75,47 @@ describe('DatabaseRestoreTargetRegistryService', () => {
 		[
 			'wrong user',
 			{
-				OPERATIONS_POSTGRES_ADMIN_USER: 'postgres',
-				OPERATIONS_POSTGRES_PORT: '5432'
+				REPORTING_POSTGRES_ADMIN_USER: 'postgres',
+				REPORTING_POSTGRES_PORT: '5432'
 			},
-			'must be winwidget_operations_admin'
+			'must be winwidget_reporting_admin'
 		],
 		[
 			'missing port',
-			{ OPERATIONS_POSTGRES_ADMIN_USER: 'winwidget_operations_admin' },
+			{ REPORTING_POSTGRES_ADMIN_USER: 'winwidget_reporting_admin' },
 			'must be an integer between 1 and 65535'
 		],
 		[
 			'invalid port',
 			{
-				OPERATIONS_POSTGRES_ADMIN_USER: 'winwidget_operations_admin',
-				OPERATIONS_POSTGRES_PORT: '65536'
+				REPORTING_POSTGRES_ADMIN_USER: 'winwidget_reporting_admin',
+				REPORTING_POSTGRES_PORT: '65536'
 			},
 			'must be an integer between 1 and 65535'
 		],
 		[
 			'missing secret path',
 			{
-				OPERATIONS_POSTGRES_ADMIN_USER: 'winwidget_operations_admin',
-				OPERATIONS_POSTGRES_PORT: '5432'
+				REPORTING_POSTGRES_ADMIN_USER: 'winwidget_reporting_admin',
+				REPORTING_POSTGRES_PORT: '5432'
 			},
 			'must be an absolute file path'
 		],
 		[
 			'relative secret path',
 			{
-				OPERATIONS_POSTGRES_ADMIN_USER: 'winwidget_operations_admin',
-				OPERATIONS_POSTGRES_PORT: '5432',
-				DATABASE_RESTORE_OPERATIONS_ADMIN_PASSWORD_FILE: 'secret'
+				REPORTING_POSTGRES_ADMIN_USER: 'winwidget_reporting_admin',
+				REPORTING_POSTGRES_PORT: '5432',
+				DATABASE_RESTORE_REPORTING_ADMIN_PASSWORD_FILE: 'secret'
 			},
 			'must be an absolute file path'
 		],
 		[
 			'root secret path',
 			{
-				OPERATIONS_POSTGRES_ADMIN_USER: 'winwidget_operations_admin',
-				OPERATIONS_POSTGRES_PORT: '5432',
-				DATABASE_RESTORE_OPERATIONS_ADMIN_PASSWORD_FILE: '/'
+				REPORTING_POSTGRES_ADMIN_USER: 'winwidget_reporting_admin',
+				REPORTING_POSTGRES_PORT: '5432',
+				DATABASE_RESTORE_REPORTING_ADMIN_PASSWORD_FILE: '/'
 			},
 			'must be an absolute file path'
 		]
@@ -127,7 +125,7 @@ describe('DatabaseRestoreTargetRegistryService', () => {
 		);
 
 		await expect(
-			registry.connection(registry.get('operations'))
+			registry.connection(registry.get('reporting'))
 		).rejects.toThrow(message);
 	});
 
@@ -141,7 +139,7 @@ describe('DatabaseRestoreTargetRegistryService', () => {
 
 		try {
 			await expect(
-				registry.connection(registry.get('operations'))
+				registry.connection(registry.get('reporting'))
 			).rejects.toThrow('could not be read safely');
 		} finally {
 			await rm(directory, { recursive: true, force: true });
@@ -163,7 +161,7 @@ describe('DatabaseRestoreTargetRegistryService', () => {
 
 		try {
 			await expect(
-				registry.connection(registry.get('operations'))
+				registry.connection(registry.get('reporting'))
 			).rejects.toThrow(message);
 		} finally {
 			await rm(directory, { recursive: true, force: true });
@@ -181,7 +179,7 @@ describe('DatabaseRestoreTargetRegistryService', () => {
 			for (const path of [nested, oversized]) {
 				const registry = configuredRegistry(path);
 				await expect(
-					registry.connection(registry.get('operations'))
+					registry.connection(registry.get('reporting'))
 				).rejects.toThrow('does not reference a valid secret file');
 			}
 		} finally {
@@ -193,8 +191,8 @@ describe('DatabaseRestoreTargetRegistryService', () => {
 const configuredRegistry = (secretPath: string) =>
 	new DatabaseRestoreTargetRegistryService(
 		config({
-			OPERATIONS_POSTGRES_ADMIN_USER: 'winwidget_operations_admin',
-			OPERATIONS_POSTGRES_PORT: '55441',
-			DATABASE_RESTORE_OPERATIONS_ADMIN_PASSWORD_FILE: secretPath
+			REPORTING_POSTGRES_ADMIN_USER: 'winwidget_reporting_admin',
+			REPORTING_POSTGRES_PORT: '55441',
+			DATABASE_RESTORE_REPORTING_ADMIN_PASSWORD_FILE: secretPath
 		})
 	);

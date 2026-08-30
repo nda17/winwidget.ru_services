@@ -1652,9 +1652,6 @@ services:
       WIDGETS_POSTGRES_ADMIN_USER: ${WIDGETS_POSTGRES_ADMIN_USER:?WIDGETS_POSTGRES_ADMIN_USER is required}
       WIDGETS_POSTGRES_PORT: ${WIDGETS_POSTGRES_PORT:-55436}
       DATABASE_RESTORE_WIDGETS_ADMIN_PASSWORD_FILE: /run/secrets/database-restore-widgets-admin-password
-      BILLING_POSTGRES_ADMIN_USER: ${BILLING_POSTGRES_ADMIN_USER:?BILLING_POSTGRES_ADMIN_USER is required}
-      BILLING_POSTGRES_PORT: ${BILLING_POSTGRES_PORT:-55437}
-      DATABASE_RESTORE_BILLING_ADMIN_PASSWORD_FILE: /run/secrets/database-restore-billing-admin-password
       IDENTITY_POSTGRES_ADMIN_USER: ${IDENTITY_POSTGRES_ADMIN_USER:?IDENTITY_POSTGRES_ADMIN_USER is required}
       IDENTITY_POSTGRES_PORT: ${IDENTITY_POSTGRES_PORT:-55438}
       DATABASE_RESTORE_IDENTITY_ADMIN_PASSWORD_FILE: /run/secrets/database-restore-identity-admin-password
@@ -1664,9 +1661,6 @@ services:
       SUPPORT_POSTGRES_ADMIN_USER: ${SUPPORT_POSTGRES_ADMIN_USER:?SUPPORT_POSTGRES_ADMIN_USER is required}
       SUPPORT_POSTGRES_PORT: ${SUPPORT_POSTGRES_PORT:-55440}
       DATABASE_RESTORE_SUPPORT_ADMIN_PASSWORD_FILE: /run/secrets/database-restore-support-admin-password
-      OPERATIONS_POSTGRES_ADMIN_USER: ${OPERATIONS_POSTGRES_ADMIN_USER:?OPERATIONS_POSTGRES_ADMIN_USER is required}
-      OPERATIONS_POSTGRES_PORT: ${OPERATIONS_POSTGRES_PORT:-55441}
-      DATABASE_RESTORE_OPERATIONS_ADMIN_PASSWORD_FILE: /run/secrets/database-restore-operations-admin-password
     network_mode: host
     volumes:
       - type: bind
@@ -1681,16 +1675,12 @@ services:
         target: database-restore-reporting-admin-password
       - source: widgets-postgres-admin-password
         target: database-restore-widgets-admin-password
-      - source: billing-postgres-admin-password
-        target: database-restore-billing-admin-password
       - source: identity-postgres-admin-password
         target: database-restore-identity-admin-password
       - source: platform-postgres-admin-password
         target: database-restore-platform-admin-password
       - source: support-postgres-admin-password
         target: database-restore-support-admin-password
-      - source: operations-postgres-admin-password
-        target: database-restore-operations-admin-password
     tmpfs:
       - /tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777
     read_only: true

@@ -1,10 +1,11 @@
 import { ConfigService } from '@nestjs/config';
+import { ConflictException } from '@nestjs/common';
 import {
-	DatabaseRestoreJobStatus,
-	OperationalAlertSeverity
+	DatabaseRestoreJobPhase,
+	DatabaseRestoreJobStatus
 } from '@prisma/operations-client';
 import { randomUUID } from 'node:crypto';
-import { access, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { access, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseRestoreService } from './database-restore.service';
@@ -13,83 +14,49 @@ import { DatabaseRestoreWorkerService } from './database-restore-worker.service'
 const message = (overrides: Record<string, unknown> = {}) => {
 	const eventId = randomUUID();
 	const jobId = randomUUID();
+	const payload = {
+		schemaVersion: 1,
+		eventId,
+		jobId,
+		target: 'reporting',
+		...overrides
+	};
 	return {
-		content: Buffer.from(
-			JSON.stringify({
-				schemaVersion: 1,
-				eventId,
-				jobId,
-				target: 'operations',
-				...overrides
-			})
-		),
+		content: Buffer.from(JSON.stringify(payload)),
 		properties: {
 			type: 'operations.database-restore.requested.v1',
-			messageId: eventId
+			messageId: payload.eventId
 		}
 	};
 };
 
 const restoreConfig = (values: Record<string, string>) =>
-	({
-		get: (key: string) => values[key]
-	}) as ConfigService;
+	({ get: (key: string) => values[key] }) as ConfigService;
 
-const restoreWorker = (dependencies: {
-	control: unknown;
-	prisma: unknown;
+const worker = (dependencies: {
+	control?: unknown;
+	state?: unknown;
+	recovery?: unknown;
 	executor?: unknown;
-	alerts?: unknown;
+	cleanup?: unknown;
+	runtime?: unknown;
+	rabbit?: unknown;
 }) =>
 	new DatabaseRestoreWorkerService(
-		{} as never,
-		{} as never,
-		dependencies.control as never,
-		dependencies.prisma as never,
+		(dependencies.runtime ?? {}) as never,
+		(dependencies.rabbit ?? {}) as never,
+		(dependencies.control ?? {}) as never,
+		(dependencies.state ?? {}) as never,
+		(dependencies.recovery ?? {}) as never,
 		(dependencies.executor ?? {}) as never,
-		(dependencies.alerts ?? {}) as never
+		(dependencies.cleanup ?? {}) as never
 	);
 
-describe('DatabaseRestoreService RabbitMQ contract', () => {
-	it('starts the restore consumer only in the isolated restore-worker role', async () => {
-		const rabbit = {
-			consumeDatabaseRestoreJobs: jest.fn().mockResolvedValue(undefined)
-		};
-		const worker = new DatabaseRestoreWorkerService(
-			{ restoreWorkerEnabled: true } as never,
-			rabbit as never,
-			{} as never,
-			{} as never,
-			{} as never,
-			{} as never
-		);
-
-		await worker.onModuleInit();
-
-		expect(rabbit.consumeDatabaseRestoreJobs).toHaveBeenCalledTimes(1);
-		expect(worker.isReady()).toBe(true);
-	});
-
-	it('does not start restore execution in the regular worker role', async () => {
-		const rabbit = { consumeDatabaseRestoreJobs: jest.fn() };
-		const worker = new DatabaseRestoreWorkerService(
-			{ restoreWorkerEnabled: false } as never,
-			rabbit as never,
-			{} as never,
-			{} as never,
-			{} as never,
-			{} as never
-		);
-
-		await worker.onModuleInit();
-
-		expect(rabbit.consumeDatabaseRestoreJobs).not.toHaveBeenCalled();
-		expect(worker.isReady()).toBe(true);
-	});
-
-	it('keeps the frontend restore settings contract explicit', () => {
+describe('DatabaseRestoreService contract', () => {
+	it('exposes only the currently approved non-Operations, non-Billing targets', () => {
 		const service = new DatabaseRestoreService(
 			restoreConfig({ DATABASE_RESTORE_ENABLED: 'false' }),
+			{} as never,
 			{} as never,
 			{} as never,
 			{} as never
@@ -100,31 +67,39 @@ describe('DatabaseRestoreService RabbitMQ contract', () => {
 				enabled: false,
 				approved: null,
 				allowedFileExtension: '.dump',
-				maxFileSizeBytes: 49 * 1024 * 1024
+				maxFileSizeBytes: 49 * 1024 * 1024,
+				targets: expect.arrayContaining([
+					expect.objectContaining({ id: 'reporting' })
+				])
 			})
 		);
+		expect(service.getSettings().targets.map(item => item.id)).toEqual([
+			'notification-delivery',
+			'campaigns',
+			'reporting',
+			'widgets',
+			'identity',
+			'platform',
+			'support'
+		]);
 	});
 
-	it('uses the frontend request id as the durable job id', async () => {
-		const storage = await mkdtemp(
-			join(tmpdir(), 'operations-restore-test-')
-		);
+	it('stores the outbox event id on the durable job in the same transaction', async () => {
+		const storage = await mkdtemp(join(tmpdir(), 'operations-restore-'));
 		const requestId = randomUUID();
-		const now = new Date('2026-08-26T08:00:00.000Z');
-		const transaction = {
-			databaseRestoreJob: {
-				create: jest.fn().mockImplementation(({ data }) => ({
-					...data,
-					status: DatabaseRestoreJobStatus.QUEUED,
-					result: null,
-					lastError: null,
-					startedAt: null,
-					finishedAt: null,
-					createdAt: now,
-					updatedAt: now
-				}))
-			}
-		};
+		const now = new Date('2026-08-30T08:00:00.000Z');
+		const create = jest.fn().mockImplementation(({ data }) => ({
+			...data,
+			status: DatabaseRestoreJobStatus.QUEUED,
+			attempts: 0,
+			result: null,
+			lastError: null,
+			startedAt: null,
+			finishedAt: null,
+			createdAt: now,
+			updatedAt: now
+		}));
+		const transaction = { databaseRestoreJob: { create } };
 		const prisma = {
 			databaseRestoreJob: {
 				findUnique: jest.fn().mockResolvedValue(null)
@@ -142,35 +117,40 @@ describe('DatabaseRestoreService RabbitMQ contract', () => {
 			}),
 			prisma as never,
 			outbox as never,
-			audit as never
+			audit as never,
+			{} as never
 		);
 
 		try {
 			await expect(
 				service.enqueue({
-					target: 'operations',
+					target: 'reporting',
 					file: {
-						originalname: 'operations.dump',
+						originalname: 'reporting.dump',
 						size: 6,
 						buffer: Buffer.from('PGDMP1')
 					},
-					confirmation: 'ВОССТАНОВИТЬ OPERATIONS',
+					confirmation: 'ВОССТАНОВИТЬ REPORTING',
 					requestId,
 					actorId: 'admin-42',
 					ip: null,
 					userAgent: null
 				})
 			).resolves.toEqual(
-				expect.objectContaining({
-					jobId: requestId,
-					publicationConfirmed: true
-				})
+				expect.objectContaining({ jobId: requestId, attempt: 0 })
 			);
+			const eventId = create.mock.calls[0][0].data.eventId;
+			expect(eventId).toEqual(expect.any(String));
 			expect(outbox.enqueue).toHaveBeenCalledWith(
 				transaction,
 				expect.objectContaining({
+					eventId,
 					aggregateId: requestId,
-					payload: expect.objectContaining({ jobId: requestId })
+					payload: expect.objectContaining({
+						eventId,
+						jobId: requestId,
+						target: 'reporting'
+					})
 				})
 			);
 		} finally {
@@ -178,361 +158,306 @@ describe('DatabaseRestoreService RabbitMQ contract', () => {
 		}
 	});
 
-	it('rejects messages outside the exact Operations restore contract', async () => {
-		const resolveSourcePath = jest.fn();
-		const prisma = {
-			databaseRestoreJob: { updateMany: jest.fn() }
-		};
-		const worker = restoreWorker({
-			control: { resolveSourcePath },
-			prisma
-		});
-		const invalid = message({ legacyCoreJobId: randomUUID() });
-
-		await expect(worker.handleMessage(invalid as never)).resolves.toBe(
-			'reject'
+	it('exposes recovery-required state and the durable attempt count', async () => {
+		const now = new Date('2026-08-30T08:00:00.000Z');
+		const service = new DatabaseRestoreService(
+			restoreConfig({}),
+			{
+				databaseRestoreJob: {
+					findUnique: jest.fn().mockResolvedValue({
+						id: randomUUID(),
+						target: 'reporting',
+						status: DatabaseRestoreJobStatus.RECOVERY_REQUIRED,
+						attempts: 2,
+						sourceFileName: 'reporting.dump',
+						sourceSha256: 'a'.repeat(64),
+						sourceSize: 10n,
+						result: null,
+						lastError: 'manual recovery required',
+						startedAt: now,
+						finishedAt: now,
+						createdAt: now
+					})
+				}
+			} as never,
+			{} as never,
+			{} as never,
+			{} as never
 		);
-		expect(resolveSourcePath).not.toHaveBeenCalled();
-		expect(prisma.databaseRestoreJob.updateMany).not.toHaveBeenCalled();
+
+		await expect(service.getJob(randomUUID())).resolves.toEqual(
+			expect.objectContaining({
+				status: DatabaseRestoreJobStatus.RECOVERY_REQUIRED,
+				attempt: 2,
+				error: {
+					code: 'RESTORE_RECOVERY_REQUIRED',
+					message: 'manual recovery required'
+				}
+			})
+		);
 	});
 
-	it('fails a queued job when its source path cannot be resolved', async () => {
-		const jobId = randomUUID();
-		const updateMany = jest.fn().mockResolvedValue({ count: 1 });
-		const record = jest
-			.fn()
-			.mockRejectedValue(new Error('alert unavailable'));
-		const restore = jest.fn();
-		const worker = restoreWorker({
-			control: {
-				resolveSourcePath: jest
-					.fn()
-					.mockRejectedValue(new Error('restore path\r\nunavailable'))
+	it('returns 409 and removes the upload when the target fence conflicts', async () => {
+		const storage = await mkdtemp(join(tmpdir(), 'operations-restore-'));
+		const requestId = randomUUID();
+		const conflict = Object.assign(new Error('unique target fence'), {
+			code: 'P2002'
+		});
+		const service = new DatabaseRestoreService(
+			restoreConfig({
+				DATABASE_RESTORE_ENABLED: 'true',
+				DATABASE_RESTORE_STORAGE_DIR: storage
+			}),
+			{
+				databaseRestoreJob: {
+					findUnique: jest.fn().mockResolvedValue(null)
+				},
+				$transaction: jest.fn().mockRejectedValue(conflict)
+			} as never,
+			{} as never,
+			{} as never,
+			{} as never
+		);
+
+		try {
+			await expect(
+				service.enqueue({
+					target: 'reporting',
+					file: {
+						originalname: 'reporting.dump',
+						size: 6,
+						buffer: Buffer.from('PGDMP1')
+					},
+					confirmation: 'ВОССТАНОВИТЬ REPORTING',
+					requestId,
+					actorId: 'admin-42',
+					ip: null,
+					userAgent: null
+				})
+			).rejects.toBeInstanceOf(ConflictException);
+			await expect(
+				access(join(storage, `${requestId}.dump`))
+			).rejects.toMatchObject({ code: 'ENOENT' });
+		} finally {
+			await rm(storage, { recursive: true, force: true });
+		}
+	});
+});
+
+describe('DatabaseRestoreWorkerService orchestration', () => {
+	it('recovers expired state and pending cleanup before consuming', async () => {
+		const calls: string[] = [];
+		const restoreWorker = worker({
+			runtime: { restoreWorkerEnabled: true },
+			rabbit: {
+				consumeDatabaseRestoreJobs: jest.fn(async () => {
+					calls.push('consume');
+				})
 			},
-			prisma: { databaseRestoreJob: { updateMany } },
-			executor: { restore },
-			alerts: { record }
+			recovery: {
+				recoverExpired: jest.fn(async () => {
+					calls.push('recover');
+					return [];
+				})
+			},
+			cleanup: {
+				pending: jest.fn(async () => {
+					calls.push('pending-cleanup');
+					return [];
+				})
+			}
+		});
+
+		await restoreWorker.onModuleInit();
+		expect(calls).toEqual(['recover', 'pending-cleanup', 'consume']);
+		expect(restoreWorker.isReady()).toBe(true);
+		await restoreWorker.onApplicationShutdown();
+	});
+
+	it.each(['operations', 'billing'])(
+		'rejects the excluded %s target before any source access',
+		async target => {
+			const resolveSourcePath = jest.fn();
+			const restoreWorker = worker({ control: { resolveSourcePath } });
+
+			await expect(
+				restoreWorker.handleMessage(message({ target }) as never)
+			).resolves.toBe('reject');
+			expect(resolveSourcePath).not.toHaveBeenCalled();
+		}
+	);
+
+	it('persists VERIFIED success before cleanup and acknowledges', async () => {
+		const eventId = randomUUID();
+		const jobId = randomUUID();
+		const lease = {
+			event: { eventId, jobId, target: 'reporting' as const },
+			leaseToken: randomUUID(),
+			leaseExpiresAt: new Date(Date.now() + 60_000),
+			phase: DatabaseRestoreJobPhase.PREPARING
+		};
+		const calls: string[] = [];
+		const state = {
+			claim: jest.fn().mockResolvedValue({ state: 'claimed', lease }),
+			loadClaimedJob: jest
+				.fn()
+				.mockResolvedValue({ id: jobId, sourceSha256: 'a'.repeat(64) }),
+			checkpoint: jest.fn(async (_lease, checkpoint) => {
+				lease.phase = checkpoint.phase;
+				calls.push(`checkpoint:${checkpoint.phase}`);
+			}),
+			succeed: jest.fn(async () => {
+				calls.push('terminal');
+				return true;
+			}),
+			fail: jest.fn(),
+			renew: jest.fn()
+		};
+		const executor = {
+			restore: jest.fn(async input => {
+				await input.checkpoint({
+					phase: 'SAFETY_READY',
+					safetyBackupFileName: `${jobId}.dump.safety`,
+					safetyBackupSha256: 'b'.repeat(64)
+				});
+				await input.checkpoint({ phase: 'MUTATING' });
+				await input.checkpoint({ phase: 'VERIFIED' });
+				return { target: 'reporting' };
+			})
+		};
+		const cleanup = {
+			cleanup: jest.fn(async () => calls.push('cleanup'))
+		};
+		const restoreWorker = worker({
+			control: {
+				resolveSourcePath: jest.fn().mockResolvedValue('/job.dump')
+			},
+			state,
+			recovery: {},
+			executor,
+			cleanup
 		});
 
 		await expect(
-			worker.handleMessage(message({ jobId }) as never)
+			restoreWorker.handleMessage(
+				message({ eventId, jobId, target: 'reporting' }) as never
+			)
 		).resolves.toBe('ack');
-
-		expect(updateMany).toHaveBeenCalledTimes(1);
-		const failure = updateMany.mock.calls[0][0];
-		expect(failure).toEqual({
-			where: {
-				id: jobId,
-				target: 'operations',
-				status: DatabaseRestoreJobStatus.QUEUED
-			},
-			data: {
-				status: DatabaseRestoreJobStatus.FAILED,
-				lastError: 'restore path unavailable',
-				startedAt: expect.any(Date),
-				finishedAt: expect.any(Date)
-			}
-		});
-		expect(failure.data.startedAt).toBe(failure.data.finishedAt);
-		expect(record).toHaveBeenCalledWith({
-			deduplicationKey: 'database-restore:operations',
-			type: 'INTEGRATION_PROBLEM',
-			severity: OperationalAlertSeverity.HIGH,
-			source: 'operations',
-			referenceId: jobId,
-			title: 'Не восстановлена база operations',
-			message:
-				'DEV database restore не запущен: не удалось подготовить путь к исходному dump'
-		});
-		expect(restore).not.toHaveBeenCalled();
+		expect(calls).toEqual([
+			'checkpoint:SAFETY_READY',
+			'checkpoint:MUTATING',
+			'checkpoint:VERIFIED',
+			'terminal',
+			'cleanup'
+		]);
+		expect(state.fail).not.toHaveBeenCalled();
 	});
 
-	it('acks a stale path failure without overwriting or alerting', async () => {
-		const updateMany = jest.fn().mockResolvedValue({ count: 0 });
-		const record = jest.fn();
-		const worker = restoreWorker({
-			control: {
-				resolveSourcePath: jest
-					.fn()
-					.mockRejectedValue(new Error('restore path unavailable'))
-			},
-			prisma: { databaseRestoreJob: { updateMany } },
-			alerts: { record }
-		});
-
-		await expect(worker.handleMessage(message() as never)).resolves.toBe(
-			'ack'
-		);
-		expect(updateMany).toHaveBeenCalledWith(
-			expect.objectContaining({
-				where: expect.objectContaining({
-					status: DatabaseRestoreJobStatus.QUEUED
-				}),
-				data: expect.objectContaining({
-					status: DatabaseRestoreJobStatus.FAILED
-				})
-			})
-		);
-		expect(record).not.toHaveBeenCalled();
-	});
-
-	it('rethrows a source-path failure when the failure CAS is unavailable', async () => {
-		const persistenceError = new Error('failure state unavailable');
-		const record = jest.fn();
-		const worker = restoreWorker({
-			control: {
-				resolveSourcePath: jest
-					.fn()
-					.mockRejectedValue(new Error('restore path unavailable'))
-			},
-			prisma: {
-				databaseRestoreJob: {
-					updateMany: jest.fn().mockRejectedValue(persistenceError)
-				}
-			},
-			alerts: { record }
-		});
-
-		await expect(worker.handleMessage(message() as never)).rejects.toBe(
-			persistenceError
-		);
-		expect(record).not.toHaveBeenCalled();
-	});
-
-	it('resolves the source before claiming and preserves it after a lost claim', async () => {
-		const directory = await mkdtemp(
-			join(tmpdir(), 'operations-restore-worker-')
-		);
-		const source = join(directory, 'source.dump');
-		await writeFile(source, 'PGDMP-test');
-		const calls: string[] = [];
-		const restore = jest.fn();
-		const record = jest.fn();
-		const worker = restoreWorker({
-			control: {
-				resolveSourcePath: jest.fn().mockImplementation(async () => {
-					calls.push('resolve');
-					return source;
-				})
-			},
-			prisma: {
-				databaseRestoreJob: {
-					updateMany: jest.fn().mockImplementation(async () => {
-						calls.push('claim');
-						return { count: 0 };
-					})
-				}
-			},
-			executor: { restore },
-			alerts: { record }
-		});
-
-		try {
-			await expect(worker.handleMessage(message() as never)).resolves.toBe(
-				'ack'
-			);
-			expect(calls).toEqual(['resolve', 'claim']);
-			await expect(access(source)).resolves.toBeUndefined();
-			expect(restore).not.toHaveBeenCalled();
-			expect(record).not.toHaveBeenCalled();
-		} finally {
-			await rm(directory, { recursive: true, force: true });
-		}
-	});
-
-	it('preserves the source when the processing claim cannot be persisted', async () => {
-		const directory = await mkdtemp(
-			join(tmpdir(), 'operations-restore-worker-')
-		);
-		const source = join(directory, 'source.dump');
-		await writeFile(source, 'PGDMP-test');
-		const claimError = new Error('claim unavailable');
-		const worker = restoreWorker({
-			control: { resolveSourcePath: jest.fn().mockResolvedValue(source) },
-			prisma: {
-				databaseRestoreJob: {
-					updateMany: jest.fn().mockRejectedValue(claimError)
-				}
-			}
-		});
-
-		try {
-			await expect(worker.handleMessage(message() as never)).rejects.toBe(
-				claimError
-			);
-			await expect(access(source)).resolves.toBeUndefined();
-		} finally {
-			await rm(directory, { recursive: true, force: true });
-		}
-	});
-
-	it('executes a winning claim, persists success, and removes its source', async () => {
-		const directory = await mkdtemp(
-			join(tmpdir(), 'operations-restore-worker-')
-		);
-		const source = join(directory, 'source.dump');
-		await writeFile(source, 'PGDMP-test');
+	it('does not ack or clean when failure terminal persistence is unconfirmed', async () => {
+		const eventId = randomUUID();
 		const jobId = randomUUID();
-		const sourceSha256 = 'a'.repeat(64);
-		const result = {
-			target: 'reporting',
-			restoredAt: '2026-08-30T10:00:00Z'
+		const lease = {
+			event: { eventId, jobId, target: 'reporting' as const },
+			leaseToken: randomUUID(),
+			leaseExpiresAt: new Date(Date.now() + 60_000),
+			phase: DatabaseRestoreJobPhase.PREPARING
 		};
-		const calls: string[] = [];
-		const update = jest.fn().mockImplementation(async () => {
-			calls.push('success');
-			return {};
-		});
-		const restore = jest.fn().mockImplementation(async () => {
-			calls.push('execute');
-			return result;
-		});
-		const resolve = jest.fn().mockResolvedValue({ count: 1 });
-		const record = jest.fn();
-		const worker = restoreWorker({
+		const cleanup = { cleanup: jest.fn() };
+		const restoreWorker = worker({
 			control: {
-				resolveSourcePath: jest.fn().mockImplementation(async () => {
-					calls.push('resolve');
-					return source;
-				})
+				resolveSourcePath: jest.fn().mockResolvedValue('/job.dump')
 			},
-			prisma: {
-				databaseRestoreJob: {
-					updateMany: jest.fn().mockImplementation(async () => {
-						calls.push('claim');
-						return { count: 1 };
-					}),
-					findUniqueOrThrow: jest.fn().mockResolvedValue({
-						id: jobId,
-						sourceSha256
-					}),
-					update
-				}
+			state: {
+				claim: jest.fn().mockResolvedValue({ state: 'claimed', lease }),
+				loadClaimedJob: jest
+					.fn()
+					.mockResolvedValue({ id: jobId, sourceSha256: 'a'.repeat(64) }),
+				fail: jest.fn().mockResolvedValue(null),
+				renew: jest.fn()
 			},
-			executor: { restore },
-			alerts: { resolve, record }
+			recovery: {},
+			executor: {
+				restore: jest.fn().mockRejectedValue(new Error('executor failed'))
+			},
+			cleanup
 		});
 
-		try {
-			await expect(
-				worker.handleMessage(
-					message({ jobId, target: 'reporting' }) as never
-				)
-			).resolves.toBe('ack');
-			expect(calls).toEqual(['resolve', 'claim', 'execute', 'success']);
-			expect(restore).toHaveBeenCalledWith({
-				jobId,
-				target: 'reporting',
-				source,
-				expectedSha256: sourceSha256
-			});
-			expect(update).toHaveBeenCalledWith({
-				where: { id: jobId },
-				data: {
-					status: DatabaseRestoreJobStatus.SUCCEEDED,
-					result,
-					finishedAt: expect.any(Date)
-				}
-			});
-			expect(resolve).toHaveBeenCalledWith('database-restore:reporting');
-			expect(record).not.toHaveBeenCalled();
-			await expect(access(source)).rejects.toMatchObject({
-				code: 'ENOENT'
-			});
-		} finally {
-			await rm(directory, { recursive: true, force: true });
-		}
+		await expect(
+			restoreWorker.handleMessage(
+				message({ eventId, jobId, target: 'reporting' }) as never
+			)
+		).rejects.toThrow(
+			'Database restore failure checkpoint could not be persisted'
+		);
+		expect(cleanup.cleanup).not.toHaveBeenCalled();
 	});
 
-	it('persists a winning claim failure, alerts, and removes its source', async () => {
-		const directory = await mkdtemp(
-			join(tmpdir(), 'operations-restore-worker-')
-		);
-		const source = join(directory, 'source.dump');
-		await writeFile(source, 'PGDMP-test');
+	it('does not ack or clean when the terminal transaction is unavailable', async () => {
+		const eventId = randomUUID();
 		const jobId = randomUUID();
-		const sourceSha256 = 'b'.repeat(64);
-		const calls: string[] = [];
-		const updateMany = jest
-			.fn()
-			.mockImplementationOnce(async () => {
-				calls.push('claim');
-				return { count: 1 };
-			})
-			.mockImplementationOnce(async () => {
-				calls.push('failed');
-				return { count: 1 };
-			});
-		const restore = jest.fn().mockImplementation(async () => {
-			calls.push('execute');
-			throw new Error('restore failed\r\nnow');
-		});
-		const record = jest.fn().mockImplementation(async () => {
-			calls.push('alert');
-			return {};
-		});
-		const update = jest.fn();
-		const worker = restoreWorker({
+		const lease = {
+			event: { eventId, jobId, target: 'reporting' as const },
+			leaseToken: randomUUID(),
+			leaseExpiresAt: new Date(Date.now() + 60_000),
+			phase: DatabaseRestoreJobPhase.PREPARING
+		};
+		const persistenceError = new Error('operations database unavailable');
+		const cleanup = { cleanup: jest.fn() };
+		const restoreWorker = worker({
 			control: {
-				resolveSourcePath: jest.fn().mockImplementation(async () => {
-					calls.push('resolve');
-					return source;
-				})
+				resolveSourcePath: jest.fn().mockResolvedValue('/job.dump')
 			},
-			prisma: {
-				databaseRestoreJob: {
-					updateMany,
-					findUniqueOrThrow: jest.fn().mockResolvedValue({
-						id: jobId,
-						sourceSha256
-					}),
-					update
-				}
+			state: {
+				claim: jest.fn().mockResolvedValue({ state: 'claimed', lease }),
+				loadClaimedJob: jest
+					.fn()
+					.mockResolvedValue({ id: jobId, sourceSha256: 'a'.repeat(64) }),
+				fail: jest.fn().mockRejectedValue(persistenceError),
+				renew: jest.fn()
 			},
-			executor: { restore },
-			alerts: { record }
+			recovery: {},
+			executor: {
+				restore: jest.fn().mockRejectedValue(new Error('executor failed'))
+			},
+			cleanup
 		});
 
-		try {
-			await expect(
-				worker.handleMessage(
-					message({ jobId, target: 'reporting' }) as never
-				)
-			).resolves.toBe('ack');
-			expect(calls).toEqual([
-				'resolve',
-				'claim',
-				'execute',
-				'failed',
-				'alert'
-			]);
-			expect(updateMany).toHaveBeenNthCalledWith(2, {
-				where: {
-					id: jobId,
-					status: DatabaseRestoreJobStatus.PROCESSING
-				},
-				data: {
-					status: DatabaseRestoreJobStatus.FAILED,
-					lastError: 'restore failed now',
-					finishedAt: expect.any(Date)
-				}
-			});
-			expect(record).toHaveBeenCalledWith({
-				deduplicationKey: 'database-restore:reporting',
-				type: 'INTEGRATION_PROBLEM',
-				severity: OperationalAlertSeverity.HIGH,
-				source: 'operations',
-				referenceId: jobId,
-				title: 'Не восстановлена база reporting',
-				message:
-					'DEV database restore завершился ошибкой; проверьте job и safety backup'
-			});
-			expect(update).not.toHaveBeenCalled();
-			await expect(access(source)).rejects.toMatchObject({
-				code: 'ENOENT'
-			});
-		} finally {
-			await rm(directory, { recursive: true, force: true });
-		}
+		await expect(
+			restoreWorker.handleMessage(
+				message({ eventId, jobId, target: 'reporting' }) as never
+			)
+		).rejects.toBe(persistenceError);
+		expect(cleanup.cleanup).not.toHaveBeenCalled();
+	});
+
+	it('holds a redelivery until bounded settlement and requeues an active lease', async () => {
+		const waitForEventSettlement = jest.fn().mockResolvedValue({
+			state: 'processing',
+			job: {
+				leaseExpiresAt: new Date(Date.now() + 60_000)
+			}
+		});
+		const waitForProcessingSlot = jest.fn().mockResolvedValue(false);
+		const restoreWorker = worker({
+			control: {
+				resolveSourcePath: jest.fn().mockResolvedValue('/job.dump')
+			},
+			state: {
+				claim: jest.fn().mockResolvedValue({ state: 'unclaimed' })
+			},
+			recovery: { waitForEventSettlement, waitForProcessingSlot }
+		});
+
+		await expect(
+			restoreWorker.handleMessage(message() as never)
+		).resolves.toBe('requeue');
+		expect(waitForEventSettlement).toHaveBeenCalledWith(
+			expect.any(Object),
+			65_000
+		);
+		expect(waitForProcessingSlot).toHaveBeenCalledWith(
+			'reporting',
+			65_000
+		);
 	});
 });

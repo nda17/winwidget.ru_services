@@ -27,6 +27,7 @@ import {
 	DatabaseRestoreTarget,
 	UploadedRestoreFile
 } from './database-restore.contract';
+import { DatabaseRestoreCleanupService } from './database-restore-cleanup.service';
 
 const UUID_PATTERN =
 	/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -37,7 +38,8 @@ export class DatabaseRestoreService {
 		private readonly config: ConfigService,
 		private readonly prisma: OperationsPrismaService,
 		private readonly outbox: OperationsOutboxService,
-		private readonly audit: AdminEventLogService
+		private readonly audit: AdminEventLogService,
+		private readonly cleanup: DatabaseRestoreCleanupService
 	) {}
 
 	getSettings() {
@@ -115,12 +117,14 @@ export class DatabaseRestoreService {
 			await handle.close();
 		}
 		const sha256 = createHash('sha256').update(file.buffer).digest('hex');
+		const eventId = randomUUID();
 		try {
 			const job = await this.prisma.$transaction(async transaction => {
 				const created = await transaction.databaseRestoreJob.create({
 					data: {
 						id: jobId,
 						target,
+						eventId,
 						sourceFileName: this.safeFileName(file.originalname),
 						sourceSha256: sha256,
 						sourceSize: BigInt(file.size),
@@ -128,7 +132,6 @@ export class DatabaseRestoreService {
 						idempotencyKey
 					}
 				});
-				const eventId = randomUUID();
 				await this.outbox.enqueue(transaction, {
 					eventId,
 					deduplicationKey: `database-restore:${jobId}:requested`,
@@ -164,6 +167,11 @@ export class DatabaseRestoreService {
 			return this.serialize(job);
 		} catch (error) {
 			await rm(path, { force: true });
+			if (this.isUniqueConflict(error)) {
+				throw new ConflictException(
+					'Для этой базы уже есть активное или требующее восстановления задание'
+				);
+			}
 			throw error;
 		}
 	}
@@ -207,7 +215,20 @@ export class DatabaseRestoreService {
 				where: { id }
 			});
 		});
-		await rm(await this.resolveSourcePath(id), { force: true });
+		try {
+			await this.cleanup.cleanup({
+				id,
+				status: DatabaseRestoreJobStatus.CANCELLED,
+				phase: job.phase,
+				source: await this.resolveSourcePath(id)
+			});
+		} catch (error) {
+			await this.cleanup.recordError(
+				id,
+				DatabaseRestoreJobStatus.CANCELLED,
+				error
+			);
+		}
 		return this.serialize(job);
 	}
 
@@ -257,10 +278,20 @@ export class DatabaseRestoreService {
 		return (normalized || 'database.dump').slice(0, 255);
 	}
 
+	private isUniqueConflict(error: unknown): boolean {
+		return (
+			typeof error === 'object' &&
+			error !== null &&
+			'code' in error &&
+			(error as { code?: unknown }).code === 'P2002'
+		);
+	}
+
 	private serialize(job: {
 		id: string;
 		target: string;
 		status: DatabaseRestoreJobStatus;
+		attempts: number;
 		sourceFileName: string;
 		sourceSha256: string;
 		sourceSize: bigint;
@@ -280,13 +311,15 @@ export class DatabaseRestoreService {
 			requestedAt: job.createdAt.toISOString(),
 			startedAt: job.startedAt?.toISOString() ?? null,
 			finishedAt: job.finishedAt?.toISOString() ?? null,
-			attempt:
-				job.status === DatabaseRestoreJobStatus.QUEUED ||
-				job.status === DatabaseRestoreJobStatus.CANCELLED
-					? 0
-					: 1,
+			attempt: job.attempts,
 			error: job.lastError
-				? { code: 'RESTORE_FAILED', message: job.lastError }
+				? {
+						code:
+							job.status === DatabaseRestoreJobStatus.RECOVERY_REQUIRED
+								? 'RESTORE_RECOVERY_REQUIRED'
+								: 'RESTORE_FAILED',
+						message: job.lastError
+					}
 				: null,
 			result: job.result,
 			canCancel: job.status === DatabaseRestoreJobStatus.QUEUED,
