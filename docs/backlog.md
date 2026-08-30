@@ -166,6 +166,15 @@ targets: `billing`, `campaigns`, `identity`, `notification-delivery`,
 
 Осталось:
 
+- Проверять точную TOC-запись target schema вместо произвольного substring и
+  после restore fail-closed сверять фактические schema/table/sequence/default
+  ACL grants, а не только наличие `_prisma_migrations`.
+- Перенести `resolveSourcePath` под управляемую failure-транзакцию worker:
+  ошибка после CAS `QUEUED -> PROCESSING` не должна оставлять job навсегда в
+  `PROCESSING` и превращать повторную доставку в ложный duplicate ack.
+- После command timeout дождаться фактического завершения дочернего процесса;
+  при необходимости выполнить ограниченный `SIGTERM -> SIGKILL`, прежде чем
+  менять restore job/fence state или подтверждать сообщение.
 - выполнить exact-SHA Linux/Docker/PostgreSQL 18 rehearsal всех targets,
   включая несовместимый dump, нехватку места, cancel race, restart checkpoint,
   ACL drift и изоляцию чужих БД;
@@ -309,14 +318,6 @@ Identity, Notification Delivery и Platform требуют отдельного 
   без DDL и cross-schema доступа у runtime; RabbitMQ permissions и topic
   permissions должны совпадать с production least-privilege contract, а не
   разрешать весь `winwidget.*` namespace.
-
-### P2 — декомпозировать перегруженные orchestration-классы
-
-Оставшийся подтверждённый кандидат — restore validation/executor. Перед
-рефакторингом добавить characterization tests; не менять API/events и порядок
-validation -> safety dump -> destructive restore -> ACL -> migration ledger.
-Restore fence/recovery не смешивать с декомпозицией: это отдельный P1
-production-restore gate.
 
 ### P2 — очистка legacy delivery-данных Notification Delivery
 

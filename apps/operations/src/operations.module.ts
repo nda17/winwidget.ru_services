@@ -32,9 +32,12 @@ import { OperationsPrismaService } from './prisma/operations-prisma.service';
 import { ReportingPolicyController } from './reporting-policy/reporting-policy.controller';
 import { ReportingPolicyGuard } from './reporting-policy/reporting-policy.guard';
 import { ReportingPolicyService } from './reporting-policy/reporting-policy.service';
+import { DatabaseRestoreArtifactValidatorService } from './restore/database-restore-artifact-validator.service';
 import { DatabaseRestoreController } from './restore/database-restore.controller';
 import { DatabaseRestoreExecutorService } from './restore/database-restore-executor.service';
+import { DatabaseRestoreProcessService } from './restore/database-restore-process.service';
 import { DatabaseRestoreService } from './restore/database-restore.service';
+import { DatabaseRestoreTargetRegistryService } from './restore/database-restore-target-registry.service';
 import { DatabaseRestoreWorkerService } from './restore/database-restore-worker.service';
 import { OperationsRuntimeModule } from './runtime/operations-runtime.module';
 import {
@@ -101,6 +104,9 @@ const ROLE_SCOPED_PROVIDERS =
 		TelegramSettingsService,
 		TelegramTransportService,
 		DatabaseBackupService,
+		DatabaseRestoreTargetRegistryService,
+		DatabaseRestoreArtifactValidatorService,
+		DatabaseRestoreProcessService,
 		DatabaseRestoreExecutorService,
 		DatabaseRestoreService,
 		DatabaseRestoreWorkerService,
