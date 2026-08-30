@@ -99,7 +99,10 @@ describe('DatabaseRestoreAclService', () => {
 		expect(sql).not.toContain('BEGIN;');
 		expect(sql).toContain("current_database() <> 'winwidget_reporting'");
 		expect(sql).toContain(
-			'membership.roleid IN (migration_oid, runtime_oid, backup_oid)'
+			'membership.roleid IN (admin_oid, migration_oid, runtime_oid, backup_oid)'
+		);
+		expect(sql).toContain(
+			'Database restore has an unexpected login superuser'
 		);
 		expect(sql).toContain('Database restore database privileges drifted');
 		expect(sql).toContain('to_regprocedure(expected.signature)::OID');

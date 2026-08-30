@@ -13,6 +13,7 @@
 		"start": "node dist/src/main.js",
 		"lint": "eslint \"src/**/*.ts\" --max-warnings=0",
 		"test": "jest --runInBand",
+		"test:integration:restore-rehearsal": "node test/integration/database-restore-postgres18.rehearsal.mjs",
 		"typecheck": "tsc -p tsconfig.json --noEmit",
 		"prisma:generate": "prisma generate --schema prisma/schema.prisma",
 		"prisma:validate": "prisma validate --schema prisma/schema.prisma",
@@ -28,7 +29,7 @@
 		"amqplib": "^0.10.9",
 		"class-transformer": "^0.5.1",
 		"class-validator": "^0.14.1",
-		"express": "^4.22.1",
+		"express": "^4.22.2",
 		"prisma": "5.22.0",
 		"reflect-metadata": "^0.1.14",
 		"rxjs": "^7.8.1"
@@ -52,6 +53,8 @@
 	"pnpm": {
 		"overrides": {
 			"@nestjs/config>lodash": "4.18.1",
+			"@nestjs/platform-express>body-parser": "1.20.6",
+			"@nestjs/platform-express>express": "4.22.2",
 			"@nestjs/platform-express>multer": "2.2.0"
 		}
 	},

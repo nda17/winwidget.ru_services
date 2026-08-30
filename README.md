@@ -135,4 +135,6 @@ Workflow для production и подробная инструкция наход
 - [Технический backlog](docs/backlog.md)
 - [API Gateway и авторизация](docs/api-gateway-auth.md)
 - [Контракт Widgets](docs/widgets-service.md)
+- [AI-консультант: legal/DPA и трансграничная передача](docs/ai-consultant-legal-dossier.md)
+- [Контракт миграции NestJS 11 / Express 5](docs/nestjs-11-migration.md)
 - [Production runbook](https://github.com/nda17/winwidget.ru_infra/blob/master/docs/runbook.md)

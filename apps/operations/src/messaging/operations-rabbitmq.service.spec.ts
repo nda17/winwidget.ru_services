@@ -8,6 +8,8 @@ import {
 	OPERATIONS_DATABASE_RESTORE_DLQ,
 	OPERATIONS_DATABASE_RESTORE_QUEUE,
 	OPERATIONS_DATABASE_RESTORE_RETRY_QUEUE,
+	OPERATIONS_DATABASE_RESTORE_RETRY_ROUTING_KEY,
+	OPERATIONS_OPERATIONAL_RETRY_DELAY_MS,
 	OPERATIONS_SCHEDULED_JOB_DLQ,
 	OPERATIONS_SCHEDULED_JOB_QUEUE,
 	OPERATIONS_SCHEDULED_JOB_RETRY_QUEUE
@@ -30,6 +32,11 @@ interface RabbitInternals {
 }
 
 describe('OperationsRabbitMqService consumer readiness', () => {
+	const flush = async () => {
+		await new Promise<void>(resolve => setImmediate(resolve));
+		await new Promise<void>(resolve => setImmediate(resolve));
+		await new Promise<void>(resolve => setImmediate(resolve));
+	};
 	it('keeps seven service audit sources and no Core compatibility queue', () => {
 		expect(OPERATIONS_AUDIT_SOURCES.map(source => source.source)).toEqual([
 			'campaigns',
@@ -128,6 +135,109 @@ describe('OperationsRabbitMqService consumer readiness', () => {
 		);
 		expect(prefetch).toHaveBeenCalledWith(1);
 		expect(service.isReady()).toBe(true);
+	});
+
+	it('publishes transient restore redelivery to the TTL retry queue before acknowledging the original', async () => {
+		const service = new OperationsRabbitMqService(
+			{} as ConfigService,
+			{
+				rabbitEnabled: true,
+				workerEnabled: false,
+				restoreWorkerEnabled: true
+			} as OperationsRuntimeService
+		);
+		let delivery: ((message: unknown) => void) | undefined;
+		const ack = jest.fn();
+		const nack = jest.fn();
+		const confirmChannel = {
+			checkQueue: jest.fn().mockResolvedValue(undefined),
+			prefetch: jest.fn().mockResolvedValue(undefined),
+			consume: jest.fn(async (_queue, handler) => {
+				delivery = handler;
+				return { consumerTag: 'restore-worker-consumer' };
+			}),
+			ack,
+			nack
+		} as unknown as ConfirmChannel;
+		const publish = jest.fn().mockResolvedValue(true);
+		const internal = service as unknown as RabbitInternals;
+		internal.topologyReady = true;
+		internal.channel = {
+			addSetup: jest.fn(async setup => setup(confirmChannel)),
+			publish
+		} as unknown as ChannelWrapper;
+		const body = Buffer.from('{"jobId":"job-1"}');
+		const message = {
+			content: body,
+			properties: {
+				messageId: 'event-1',
+				type: 'operations.database-restore.requested.v1',
+				headers: { 'x-retry-attempt': 4 }
+			}
+		};
+
+		await service.consumeDatabaseRestoreJobs(async () => 'requeue');
+		delivery?.(message);
+		await flush();
+
+		expect(publish).toHaveBeenCalledWith(
+			'winwidget.retry',
+			OPERATIONS_DATABASE_RESTORE_RETRY_ROUTING_KEY,
+			body,
+			expect.objectContaining({
+				mandatory: true,
+				deliveryMode: 2,
+				expiration: String(OPERATIONS_OPERATIONAL_RETRY_DELAY_MS),
+				headers: expect.objectContaining({ 'x-retry-attempt': 5 })
+			})
+		);
+		expect(ack).toHaveBeenCalledWith(message);
+		expect(nack).not.toHaveBeenCalled();
+	});
+
+	it('keeps the original restore message requeueable when confirmed retry publication fails', async () => {
+		const service = new OperationsRabbitMqService(
+			{} as ConfigService,
+			{
+				rabbitEnabled: true,
+				workerEnabled: false,
+				restoreWorkerEnabled: true
+			} as OperationsRuntimeService
+		);
+		let delivery: ((message: unknown) => void) | undefined;
+		const ack = jest.fn();
+		const nack = jest.fn();
+		const confirmChannel = {
+			checkQueue: jest.fn().mockResolvedValue(undefined),
+			prefetch: jest.fn().mockResolvedValue(undefined),
+			consume: jest.fn(async (_queue, handler) => {
+				delivery = handler;
+				return { consumerTag: 'restore-worker-consumer' };
+			}),
+			ack,
+			nack
+		} as unknown as ConfirmChannel;
+		const internal = service as unknown as RabbitInternals;
+		internal.topologyReady = true;
+		internal.channel = {
+			addSetup: jest.fn(async setup => setup(confirmChannel)),
+			publish: jest.fn().mockRejectedValue(new Error('confirm failed'))
+		} as unknown as ChannelWrapper;
+		const message = {
+			content: Buffer.from('{"jobId":"job-1"}'),
+			properties: {
+				messageId: 'event-1',
+				type: 'operations.database-restore.requested.v1',
+				headers: {}
+			}
+		};
+
+		await service.consumeDatabaseRestoreJobs(async () => 'requeue');
+		delivery?.(message);
+		await flush();
+
+		expect(ack).not.toHaveBeenCalled();
+		expect(nack).toHaveBeenCalledWith(message, false, true);
 	});
 
 	it('keeps the worker publish path away from events and manual retry', async () => {

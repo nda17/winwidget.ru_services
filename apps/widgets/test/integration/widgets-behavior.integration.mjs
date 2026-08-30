@@ -690,6 +690,17 @@ async function exerciseAllWidgetTypes() {
 			typeof publicAiResponse.reply === 'string',
 		'AI consultant public message response drifted'
 	);
+	await jsonRequest(`/api/v1/ai-consultants/${aiWidget.id}/test-message`, {
+		method: 'POST',
+		token: 'behavior-dev',
+		expectedStatus: 400,
+		body: {
+			requestId: randomUUID(),
+			sessionId: randomUUID(),
+			message: 'Тест draft',
+			history: []
+		}
+	});
 	const testAiResponse = await jsonRequest(
 		`/api/v1/ai-consultants/${aiWidget.id}/test-message`,
 		{
@@ -699,7 +710,8 @@ async function exerciseAllWidgetTypes() {
 				requestId: randomUUID(),
 				sessionId: randomUUID(),
 				message: 'Тест draft',
-				history: []
+				history: [],
+				aiCloudflareDisclosureAcknowledged: true
 			}
 		}
 	);

@@ -28,6 +28,7 @@ import {
 	OPERATIONS_DATABASE_RESTORE_DLQ,
 	OPERATIONS_DATABASE_RESTORE_QUEUE,
 	OPERATIONS_DATABASE_RESTORE_RETRY_QUEUE,
+	OPERATIONS_DATABASE_RESTORE_RETRY_ROUTING_KEY,
 	OPERATIONS_DEAD_LETTER_EXCHANGE,
 	OPERATIONS_EVENTS_EXCHANGE,
 	OPERATIONS_MANUAL_RETRY_EXCHANGE,
@@ -35,6 +36,8 @@ import {
 	OPERATIONS_SCHEDULED_JOB_DLQ,
 	OPERATIONS_SCHEDULED_JOB_QUEUE,
 	OPERATIONS_SCHEDULED_JOB_RETRY_QUEUE,
+	OPERATIONS_SCHEDULED_JOB_RETRY_ROUTING_KEY,
+	OPERATIONS_OPERATIONAL_RETRY_DELAY_MS,
 	OperationsAuditSource
 } from './operations-messaging.constants';
 
@@ -94,6 +97,7 @@ export class OperationsRabbitMqService
 			OPERATIONS_SCHEDULED_JOB_QUEUE,
 			OPERATIONS_SCHEDULED_JOB_RETRY_QUEUE,
 			OPERATIONS_SCHEDULED_JOB_DLQ,
+			OPERATIONS_SCHEDULED_JOB_RETRY_ROUTING_KEY,
 			handler
 		);
 	}
@@ -106,6 +110,7 @@ export class OperationsRabbitMqService
 			OPERATIONS_DATABASE_RESTORE_QUEUE,
 			OPERATIONS_DATABASE_RESTORE_RETRY_QUEUE,
 			OPERATIONS_DATABASE_RESTORE_DLQ,
+			OPERATIONS_DATABASE_RESTORE_RETRY_ROUTING_KEY,
 			handler
 		);
 	}
@@ -149,9 +154,18 @@ export class OperationsRabbitMqService
 		payload: unknown,
 		options: Options.Publish = {}
 	): Promise<void> {
+		const body = Buffer.from(JSON.stringify(payload));
+		return this.publishBuffer(exchange, routingKey, body, options);
+	}
+
+	private async publishBuffer(
+		exchange: string,
+		routingKey: string,
+		body: Buffer,
+		options: Options.Publish = {}
+	): Promise<void> {
 		if (!this.channel) throw new Error('RabbitMQ publisher is disabled');
 		this.assertPublishBoundary(exchange);
-		const body = Buffer.from(JSON.stringify(payload));
 		if (body.length > this.maxMessageBytes) {
 			throw new Error('RabbitMQ payload exceeds configured limit');
 		}
@@ -273,6 +287,7 @@ export class OperationsRabbitMqService
 		queue: string,
 		retryQueue: string,
 		deadLetterQueue: string,
+		retryRoutingKey: string,
 		handler: OperationsJobHandler
 	): Promise<void> {
 		if (this.jobConsumerRegistered) {
@@ -287,7 +302,12 @@ export class OperationsRabbitMqService
 			await channel.checkQueue(queue);
 			await channel.checkQueue(retryQueue);
 			await channel.checkQueue(deadLetterQueue);
-			const consumerTag = await this.consumeQueue(channel, queue, handler);
+			const consumerTag = await this.consumeQueue(
+				channel,
+				queue,
+				retryRoutingKey,
+				handler
+			);
 			this.jobConsumerReady = Boolean(consumerTag);
 		});
 	}
@@ -406,6 +426,7 @@ export class OperationsRabbitMqService
 	private async consumeQueue(
 		channel: ConfirmChannel,
 		queue: string,
+		retryRoutingKey: string,
 		handler: OperationsJobHandler
 	): Promise<string> {
 		const consumer = await channel.consume(
@@ -421,13 +442,76 @@ export class OperationsRabbitMqService
 						if (decision === 'ack') channel.ack(message);
 						else if (decision === 'reject') {
 							channel.nack(message, false, false);
-						} else channel.nack(message, false, true);
+						} else {
+							this.scheduleOperationalRetry(
+								channel,
+								message,
+								retryRoutingKey
+							);
+						}
 					})
-					.catch(() => channel.nack(message, false, true));
+					.catch(() =>
+						this.scheduleOperationalRetry(
+							channel,
+							message,
+							retryRoutingKey
+						)
+					);
 			},
 			{ noAck: false }
 		);
 		return consumer.consumerTag;
+	}
+
+	private scheduleOperationalRetry(
+		channel: ConfirmChannel,
+		message: ConsumeMessage,
+		retryRoutingKey: string
+	): void {
+		void this.publishOperationalRetry(message, retryRoutingKey)
+			.then(() => channel.ack(message))
+			.catch(error => {
+				this.logger.error(
+					`Operations job retry publication failed routingKey=${retryRoutingKey}: ${String(error)}`
+				);
+				channel.nack(message, false, true);
+			});
+	}
+
+	private publishOperationalRetry(
+		message: ConsumeMessage,
+		retryRoutingKey: string
+	): Promise<void> {
+		const currentAttempt = this.retryAttempt(
+			message.properties.headers?.['x-retry-attempt']
+		);
+		return this.publishBuffer(
+			OPERATIONS_RETRY_EXCHANGE,
+			retryRoutingKey,
+			message.content,
+			{
+				messageId: message.properties.messageId,
+				correlationId: message.properties.correlationId,
+				type: message.properties.type,
+				expiration: String(OPERATIONS_OPERATIONAL_RETRY_DELAY_MS),
+				headers: {
+					...(message.properties.headers ?? {}),
+					'x-retry-attempt': Math.min(
+						Number.MAX_SAFE_INTEGER,
+						currentAttempt + 1
+					)
+				}
+			}
+		);
+	}
+
+	private retryAttempt(raw: unknown): number {
+		const value = Buffer.isBuffer(raw)
+			? Number(raw.toString('utf8'))
+			: typeof raw === 'number' || typeof raw === 'string'
+				? Number(raw)
+				: 0;
+		return Number.isSafeInteger(value) && value >= 0 ? value : 0;
 	}
 
 	private handleConsumerCancellation(

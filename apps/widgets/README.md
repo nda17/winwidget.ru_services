@@ -55,7 +55,11 @@ config этот prompt не возвращает. Клиентская исто�
 владельца сайта, которая раскрывает обработку через Cloudflare Workers AI и
 Turnstile. Политика на домене WinWidget запрещена в клиентской настройке и не
 подставляется виджетам по умолчанию. Публичный config возвращает точный текст,
-версию и hash явного согласия. Runtime сначала фиксирует отдельный consent
+версию и hash явного согласия. Consent contract
+`ai-consultant-consent-v2` раскрывает обработку вопроса и до 12 последних
+сообщений через Workers AI, передачу Turnstile технических сигналов
+безопасности и самостоятельную роль Cloudflare при улучшении обнаружения
+ботов. Runtime сначала фиксирует отдельный consent
 receipt и только после этого загружает Turnstile и создаёт одноразовую
 bootstrap-сессию. Неподтверждённый receipt удаляется через 15 минут;
 подтверждённый минимальный receipt без переписки, raw IP и raw session ID
@@ -63,8 +67,12 @@ bootstrap-сессию. Неподтверждённый receipt удаляет�
 вводить специальные категории, биометрические и избыточные персональные
 данные. Запросы к AI Gateway
 всегда передают `cf-aig-collect-log: false` и
-`cf-aig-collect-log-payload: false`, поэтому Gateway не сохраняет ни payload,
-ни metadata запроса.
+`cf-aig-collect-log-payload: false`, поэтому для запроса пропускается вся log
+entry AI Gateway, включая payload и metadata. Это не означает отсутствия
+обработки запроса Workers AI или технических сигналов Turnstile.
+Аутентифицированный `POST /ai-consultants/:id/test-message` fail-closed требует
+`aiCloudflareDisclosureAcknowledged: true` до чтения draft, quota-check и
+вызова провайдера; acknowledgment не добавляет хранение переписки.
 
 ## Ресурсы и хранилище
 

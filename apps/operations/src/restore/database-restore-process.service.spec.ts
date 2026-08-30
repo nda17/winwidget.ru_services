@@ -178,32 +178,60 @@ describe('DatabaseRestoreProcessService command plans', () => {
 		);
 	});
 
-	it.each([
-		['ok\n', true],
-		['missing\n', false]
-	])(
-		'maps the exact ledger query output %p to %p',
-		async (stdout, expected) => {
-			command.mockResolvedValue({ stdout });
+	it('extracts only the Prisma migration ledger from the source without database credentials', async () => {
+		command.mockResolvedValue({ stdout: 'COPY ledger' });
 
-			await expect(
-				service.verifyMigrationLedger(connection, target)
-			).resolves.toBe(expected);
-			expect(command).toHaveBeenCalledWith(
-				'psql',
-				[
-					'--no-password',
-					'--tuples-only',
-					'--no-align',
-					...connectionArguments,
-					'--command',
-					"SELECT CASE WHEN to_regclass('operations._prisma_migrations') IS NOT NULL THEN 'ok' ELSE 'missing' END;"
-				],
-				connection.password,
-				{ signal: undefined }
-			);
-		}
-	);
+		await expect(
+			service.extractMigrationLedger('/restore/source.dump', target)
+		).resolves.toBe('COPY ledger');
+		expect(command).toHaveBeenCalledWith(
+			'pg_restore',
+			[
+				'--data-only',
+				'--strict-names',
+				'--schema',
+				'operations',
+				'--table',
+				'_prisma_migrations',
+				'--file',
+				'-',
+				'/restore/source.dump'
+			],
+			null,
+			{
+				stdoutOverflowError:
+					'Restore migration ledger exceeds the safe size limit',
+				signal: undefined
+			}
+		);
+	});
+
+	it('reads the complete restored Prisma ledger as bounded JSON', async () => {
+		command.mockResolvedValue({ stdout: '[]\n' });
+
+		await expect(
+			service.readMigrationLedger(connection, target)
+		).resolves.toBe('[]\n');
+		expect(command).toHaveBeenCalledWith(
+			'psql',
+			[
+				'--no-password',
+				'--set',
+				'ON_ERROR_STOP=1',
+				'--tuples-only',
+				'--no-align',
+				...connectionArguments,
+				'--command',
+				`SELECT COALESCE(json_agg(json_build_object('migrationName', migration_name, 'checksum', checksum, 'finished', finished_at IS NOT NULL, 'rolledBack', rolled_back_at IS NOT NULL, 'appliedStepsCount', applied_steps_count) ORDER BY migration_name, started_at, id)::text, '[]') FROM "operations"."_prisma_migrations";`
+			],
+			connection.password,
+			{
+				stdoutOverflowError:
+					'Restore migration ledger exceeds the safe size limit',
+				signal: undefined
+			}
+		);
+	});
 
 	it('keeps connection arguments, minimal environment, and identifier validation exact', () => {
 		const internal = service as unknown as ProcessInternals;

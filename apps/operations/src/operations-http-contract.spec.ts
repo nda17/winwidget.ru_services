@@ -87,7 +87,7 @@ describe('Operations HTTP access contract', () => {
 		});
 	});
 
-	it('keeps the restore control surface DEV-only', () => {
+	it('keeps restore reads ADMIN-visible and every mutation DEV-only', () => {
 		expect(
 			Reflect.getMetadata(PATH_METADATA, DatabaseRestoreController)
 		).toBe('dev-tools');
@@ -96,7 +96,19 @@ describe('Operations HTTP access contract', () => {
 				OPERATIONS_REQUIRED_ROLES,
 				DatabaseRestoreController
 			)
-		).toEqual(['DEV']);
+		).toEqual(['ADMIN', 'DEV']);
+		expect(
+			Reflect.getMetadata(
+				OPERATIONS_REQUIRED_ROLES,
+				DatabaseRestoreController.prototype.settings
+			)
+		).toBeUndefined();
+		expect(
+			Reflect.getMetadata(
+				OPERATIONS_REQUIRED_ROLES,
+				DatabaseRestoreController.prototype.getJob
+			)
+		).toBeUndefined();
 		expect(
 			Reflect.getMetadata(
 				PATH_METADATA,
@@ -109,6 +121,21 @@ describe('Operations HTTP access contract', () => {
 				DatabaseRestoreController.prototype.enqueue
 			)
 		).toBe(RequestMethod.POST);
+		for (const method of [
+			'createPermit',
+			'approvePermit',
+			'cancel',
+			'createRecoveryAction',
+			'approveRecoveryAction',
+			'enqueue'
+		] as const) {
+			expect(
+				Reflect.getMetadata(
+					OPERATIONS_REQUIRED_ROLES,
+					DatabaseRestoreController.prototype[method]
+				)
+			).toEqual(['DEV']);
+		}
 	});
 
 	it('preserves the current-admin active database-backup polling route', () => {

@@ -1,5 +1,5 @@
 const { readFileSync } = require('node:fs');
-const { resolve } = require('node:path');
+const { isAbsolute, relative, resolve, sep } = require('node:path');
 
 const fail = message => {
 	throw new Error(message);
@@ -10,6 +10,16 @@ const assert = (condition, message) => {
 const normalizeCommand = command =>
 	Array.isArray(command) ? command.join(' ') : String(command ?? '');
 const sorted = values => [...values].sort();
+const pathsOverlap = (first, second) => {
+	const isWithin = (base, candidate) => {
+		const path = relative(base, candidate);
+		return (
+			path === '' ||
+			(path !== '..' && !path.startsWith('..' + sep) && !isAbsolute(path))
+		);
+	};
+	return isWithin(first, second) || isWithin(second, first);
+};
 const parseUrl = (value, label) => {
 	try {
 		return new URL(value);
@@ -1029,7 +1039,9 @@ assert(
 	'Widgets Cloudflare AI timeout is invalid'
 );
 assert(
-	Number.isInteger(Number(widgetsEnvironment.CLOUDFLARE_TURNSTILE_TIMEOUT_MS)) &&
+	Number.isInteger(
+		Number(widgetsEnvironment.CLOUDFLARE_TURNSTILE_TIMEOUT_MS)
+	) &&
 		Number(widgetsEnvironment.CLOUDFLARE_TURNSTILE_TIMEOUT_MS) >= 1000 &&
 		Number(widgetsEnvironment.CLOUDFLARE_TURNSTILE_TIMEOUT_MS) <= 30000,
 	'Widgets Cloudflare Turnstile timeout is invalid'
@@ -1377,8 +1389,13 @@ assert(
 assert(
 	operationsApiEnvironment.DATABASE_RESTORE_ENABLED ===
 		expected('DATABASE_RESTORE_ENABLED') &&
-		operationsApiEnvironment.DATABASE_RESTORE_STORAGE_DIR ===
-			'/var/lib/winwidget-operations/restores',
+		operationsApiEnvironment.DATABASE_RESTORE_STAGING_DIR ===
+			'/var/lib/winwidget-operations/restore-staging' &&
+		!('DATABASE_RESTORE_SEALED_DIR' in operationsApiEnvironment) &&
+		operationsApiEnvironment.DATABASE_RESTORE_RECEIPT_HMAC_KEY_BASE64 ===
+			expected('DATABASE_RESTORE_RECEIPT_HMAC_KEY_BASE64') &&
+		operationsApiEnvironment.DATABASE_RESTORE_RECEIPT_HMAC_KEY_ID ===
+			expected('DATABASE_RESTORE_RECEIPT_HMAC_KEY_ID'),
 	'operations-api restore enqueue boundary drifted'
 );
 
@@ -1394,7 +1411,12 @@ const restoreBaseKeys = [
 	'RABBITMQ_CONNECTION_NAME',
 	'RABBITMQ_ASSERT_TOPOLOGY',
 	'RABBITMQ_MAX_MESSAGE_BYTES',
-	'DATABASE_RESTORE_STORAGE_DIR'
+	'DATABASE_RESTORE_ENABLED',
+	'DATABASE_RESTORE_STAGING_DIR',
+	'DATABASE_RESTORE_SEALED_DIR',
+	'DATABASE_RESTORE_ARTIFACT_RETENTION_HOURS',
+	'DATABASE_RESTORE_RECEIPT_HMAC_KEY_BASE64',
+	'DATABASE_RESTORE_RECEIPT_HMAC_KEY_ID'
 ];
 const restoreTargets = databaseTargets.filter(
 	target => !['billing', 'operations'].includes(target.slug)
@@ -1445,6 +1467,23 @@ assert(
 	'operations-restore-worker RabbitMQ contract drifted'
 );
 assert(
+	operationsRestoreEnvironment.DATABASE_RESTORE_ENABLED ===
+		expected('DATABASE_RESTORE_ENABLED'),
+	'operations-restore-worker kill switch contract drifted'
+);
+assert(
+	operationsRestoreEnvironment.DATABASE_RESTORE_RECEIPT_HMAC_KEY_BASE64 ===
+		expected('DATABASE_RESTORE_RECEIPT_HMAC_KEY_BASE64') &&
+		operationsRestoreEnvironment.DATABASE_RESTORE_RECEIPT_HMAC_KEY_ID ===
+			expected('DATABASE_RESTORE_RECEIPT_HMAC_KEY_ID'),
+	'operations-restore-worker receipt signing contract drifted'
+);
+assert(
+	operationsRestoreEnvironment.DATABASE_RESTORE_ARTIFACT_RETENTION_HOURS ===
+		expected('DATABASE_RESTORE_ARTIFACT_RETENTION_HOURS'),
+	'operations-restore-worker artifact retention contract drifted'
+);
+assert(
 	!('TELEGRAM_INFO_BOT_TOKEN' in operationsRestoreEnvironment),
 	'restore-worker must not receive Telegram token'
 );
@@ -1464,32 +1503,67 @@ assert(
 	'operations-restore-worker secret mount set drifted'
 );
 
-const assertRestoreMount = (service, name) => {
-	const mounts = service.volumes ?? [];
-	assert(
-		mounts.length === 1 &&
-			mounts[0].type === 'bind' &&
-			mounts[0].source === expected('DATABASE_RESTORE_STORAGE_DIR') &&
-			mounts[0].target === '/var/lib/winwidget-operations/restores',
-		name + ' restore bind drifted'
-	);
-};
-assertRestoreMount(operationsApi, 'operations-api');
-assertRestoreMount(operationsRestoreWorker, 'operations-restore-worker');
+const restoreStagingHostPath = expected('DATABASE_RESTORE_STAGING_DIR');
+const restoreSealedHostPath = expected('DATABASE_RESTORE_SEALED_DIR');
+assert(
+	typeof restoreStagingHostPath === 'string' &&
+		isAbsolute(restoreStagingHostPath) &&
+		typeof restoreSealedHostPath === 'string' &&
+		isAbsolute(restoreSealedHostPath) &&
+		!pathsOverlap(
+			resolve(restoreStagingHostPath),
+			resolve(restoreSealedHostPath)
+		),
+	'Operations restore staging/sealed host paths must be absolute non-nested siblings'
+);
+const apiRestoreMounts = operationsApi.volumes ?? [];
+assert(
+	apiRestoreMounts.length === 1 &&
+		apiRestoreMounts[0].type === 'bind' &&
+		apiRestoreMounts[0].source ===
+			expected('DATABASE_RESTORE_STAGING_DIR') &&
+		apiRestoreMounts[0].target ===
+			'/var/lib/winwidget-operations/restore-staging',
+	'operations-api restore staging bind drifted'
+);
+const workerRestoreMounts = operationsRestoreWorker.volumes ?? [];
+assert(
+	workerRestoreMounts.length === 2 &&
+		workerRestoreMounts.some(
+			mount =>
+				mount.type === 'bind' &&
+				mount.source === expected('DATABASE_RESTORE_STAGING_DIR') &&
+				mount.target === '/var/lib/winwidget-operations/restore-staging'
+		) &&
+		workerRestoreMounts.some(
+			mount =>
+				mount.type === 'bind' &&
+				mount.source === expected('DATABASE_RESTORE_SEALED_DIR') &&
+				mount.target === '/var/lib/winwidget-operations/restore-sealed'
+		),
+	'operations-restore-worker staging/sealed bind boundary drifted'
+);
 for (const [name, service] of Object.entries(services)) {
 	if (name === 'operations-api' || name === 'operations-restore-worker')
 		continue;
 	assert(
 		!(service.volumes ?? []).some(
 			mount =>
-				mount.source === expected('DATABASE_RESTORE_STORAGE_DIR') ||
-				mount.target === '/var/lib/winwidget-operations/restores'
+				mount.source === expected('DATABASE_RESTORE_STAGING_DIR') ||
+				mount.source === expected('DATABASE_RESTORE_SEALED_DIR') ||
+				mount.target === '/var/lib/winwidget-operations/restore-staging' ||
+				mount.target === '/var/lib/winwidget-operations/restore-sealed'
 		),
 		name + ' must not mount Operations restore storage'
 	);
 }
 
 const restoreTmpfs = (operationsRestoreWorker.tmpfs ?? []).map(String);
+assert(
+	operationsRestoreWorker.labels?.['com.winwidget.singleton'] === 'true' &&
+		operationsRestoreWorker.deploy?.replicas === 1,
+	'operations-restore-worker must remain an exact single-replica control plane'
+);
 assert(
 	operationsRestoreWorker.read_only === true,
 	'operations-restore-worker must be read-only'

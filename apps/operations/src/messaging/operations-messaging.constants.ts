@@ -14,15 +14,20 @@ export const OPERATIONS_SCHEDULED_JOB_ROUTING_KEY =
 export const OPERATIONS_SCHEDULED_JOB_QUEUE =
 	'winwidget.operations.scheduled-jobs.v1';
 export const OPERATIONS_SCHEDULED_JOB_RETRY_QUEUE = `${OPERATIONS_SCHEDULED_JOB_QUEUE}.retry-v1`;
+export const OPERATIONS_SCHEDULED_JOB_RETRY_ROUTING_KEY = `${OPERATIONS_SCHEDULED_JOB_ROUTING_KEY}.retry.v1`;
 export const OPERATIONS_SCHEDULED_JOB_DLQ = `${OPERATIONS_SCHEDULED_JOB_QUEUE}.dead-letter`;
 export const OPERATIONS_DATABASE_RESTORE_EVENT_TYPE =
 	'operations.database-restore.requested.v1';
+export const OPERATIONS_DATABASE_RESTORE_RECOVERY_EVENT_TYPE =
+	'operations.database-restore.recovery-action.requested.v1';
 export const OPERATIONS_DATABASE_RESTORE_ROUTING_KEY =
 	'operations.database-restore.requested.v1';
 export const OPERATIONS_DATABASE_RESTORE_QUEUE =
 	'winwidget.operations.database-restore.v1';
 export const OPERATIONS_DATABASE_RESTORE_RETRY_QUEUE = `${OPERATIONS_DATABASE_RESTORE_QUEUE}.retry-v1`;
+export const OPERATIONS_DATABASE_RESTORE_RETRY_ROUTING_KEY = `${OPERATIONS_DATABASE_RESTORE_ROUTING_KEY}.retry.v1`;
 export const OPERATIONS_DATABASE_RESTORE_DLQ = `${OPERATIONS_DATABASE_RESTORE_QUEUE}.dead-letter`;
+export const OPERATIONS_OPERATIONAL_RETRY_DELAY_MS = 30_000;
 export const OPERATIONS_NOTIFICATION_ROUTING_CHANGED_EVENT_TYPE =
 	'operations.notification-routing.changed.v1';
 export const OPERATIONS_NOTIFICATION_ROUTING_CHANGED_ROUTING_KEY =

@@ -672,7 +672,7 @@ function browserPage(browserCase) {
 			}, 'consultant privacy policy');
 			if (
 				!shadow.querySelector('.waic-privacy').textContent.includes(
-					'Не указывайте персональные данные'
+					'Не указывайте специальные категории, биометрические и иные избыточные персональные данные'
 				) ||
 				!shadow.querySelector('.waic-privacy').textContent.includes(
 					'обрабатываются Cloudflare Workers AI'

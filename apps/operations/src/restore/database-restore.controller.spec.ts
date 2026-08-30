@@ -3,7 +3,8 @@ import {
 	CallHandler,
 	ExecutionContext,
 	NestInterceptor,
-	Type
+	Type,
+	ValidationPipe
 } from '@nestjs/common';
 import { INTERCEPTORS_METADATA } from '@nestjs/common/constants';
 import { Readable } from 'node:stream';
@@ -13,6 +14,7 @@ import {
 	DatabaseRestoreController,
 	transformDatabaseRestoreUploadException
 } from './database-restore.controller';
+import { CreateDatabaseRestorePermitDto } from './database-restore.dto';
 
 type MultipartPart = {
 	name: string;
@@ -151,5 +153,50 @@ describe('Database restore upload contract', () => {
 		const error = new Error('Unexpected upload failure');
 
 		expect(transformDatabaseRestoreUploadException(error)).toBe(error);
+	});
+});
+
+describe('Database restore permit request contract', () => {
+	const pipe = new ValidationPipe({
+		whitelist: true,
+		forbidNonWhitelisted: true,
+		transform: true
+	});
+	const metadata = {
+		type: 'body' as const,
+		metatype: CreateDatabaseRestorePermitDto
+	};
+
+	it('accepts operator bindings without a client-supplied migration manifest SHA', async () => {
+		await expect(
+			pipe.transform(
+				{
+					target: 'reporting',
+					sourceSha256: 'a'.repeat(64),
+					expectedServicesSha: 'b'.repeat(40)
+				},
+				metadata
+			)
+		).resolves.toEqual(
+			expect.objectContaining({
+				target: 'reporting',
+				sourceSha256: 'a'.repeat(64),
+				expectedServicesSha: 'b'.repeat(40)
+			})
+		);
+	});
+
+	it('rejects a client-supplied migration manifest SHA', async () => {
+		await expect(
+			pipe.transform(
+				{
+					target: 'reporting',
+					sourceSha256: 'a'.repeat(64),
+					expectedServicesSha: 'b'.repeat(40),
+					migrationManifestSha: 'c'.repeat(64)
+				},
+				metadata
+			)
+		).rejects.toBeInstanceOf(BadRequestException);
 	});
 });

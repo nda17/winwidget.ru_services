@@ -1401,12 +1401,14 @@ services:
       TELEGRAM_INFO_BOT_CONFIGURED: 'true'
       TELEGRAM_INFO_BOT_USERNAME: ${TELEGRAM_INFO_BOT_USERNAME:?TELEGRAM_INFO_BOT_USERNAME is required}
       DATABASE_RESTORE_ENABLED: ${DATABASE_RESTORE_ENABLED:-false}
-      DATABASE_RESTORE_STORAGE_DIR: /var/lib/winwidget-operations/restores
+      DATABASE_RESTORE_STAGING_DIR: /var/lib/winwidget-operations/restore-staging
+      DATABASE_RESTORE_RECEIPT_HMAC_KEY_BASE64: ${DATABASE_RESTORE_RECEIPT_HMAC_KEY_BASE64:?DATABASE_RESTORE_RECEIPT_HMAC_KEY_BASE64 is required}
+      DATABASE_RESTORE_RECEIPT_HMAC_KEY_ID: ${DATABASE_RESTORE_RECEIPT_HMAC_KEY_ID:?DATABASE_RESTORE_RECEIPT_HMAC_KEY_ID is required}
     network_mode: host
     volumes:
       - type: bind
-        source: ${DATABASE_RESTORE_STORAGE_DIR:?DATABASE_RESTORE_STORAGE_DIR is required}
-        target: /var/lib/winwidget-operations/restores
+        source: ${DATABASE_RESTORE_STAGING_DIR:?DATABASE_RESTORE_STAGING_DIR is required}
+        target: /var/lib/winwidget-operations/restore-staging
     command: ['node', 'dist/src/main.js']
     healthcheck:
       test:
@@ -1627,6 +1629,9 @@ services:
     labels:
       com.winwidget.owner: operations
       com.winwidget.purpose: database-restore-worker
+      com.winwidget.singleton: 'true'
+    deploy:
+      replicas: 1
     environment:
       APP_REVISION: ${OPERATIONS_REVISION:?OPERATIONS_REVISION is required}
       NODE_ENV: production
@@ -1639,7 +1644,12 @@ services:
       RABBITMQ_CONNECTION_NAME: winwidget-operations-restore-worker
       RABBITMQ_ASSERT_TOPOLOGY: 'true'
       RABBITMQ_MAX_MESSAGE_BYTES: ${RABBITMQ_MAX_MESSAGE_BYTES:-262144}
-      DATABASE_RESTORE_STORAGE_DIR: /var/lib/winwidget-operations/restores
+      DATABASE_RESTORE_ENABLED: ${DATABASE_RESTORE_ENABLED:-false}
+      DATABASE_RESTORE_STAGING_DIR: /var/lib/winwidget-operations/restore-staging
+      DATABASE_RESTORE_SEALED_DIR: /var/lib/winwidget-operations/restore-sealed
+      DATABASE_RESTORE_ARTIFACT_RETENTION_HOURS: ${DATABASE_RESTORE_ARTIFACT_RETENTION_HOURS:-168}
+      DATABASE_RESTORE_RECEIPT_HMAC_KEY_BASE64: ${DATABASE_RESTORE_RECEIPT_HMAC_KEY_BASE64:?DATABASE_RESTORE_RECEIPT_HMAC_KEY_BASE64 is required}
+      DATABASE_RESTORE_RECEIPT_HMAC_KEY_ID: ${DATABASE_RESTORE_RECEIPT_HMAC_KEY_ID:?DATABASE_RESTORE_RECEIPT_HMAC_KEY_ID is required}
       NOTIFICATION_DELIVERY_POSTGRES_ADMIN_USER: ${NOTIFICATION_DELIVERY_POSTGRES_ADMIN_USER:?NOTIFICATION_DELIVERY_POSTGRES_ADMIN_USER is required}
       NOTIFICATION_DELIVERY_POSTGRES_PORT: ${NOTIFICATION_DELIVERY_POSTGRES_PORT:?NOTIFICATION_DELIVERY_POSTGRES_PORT is required}
       DATABASE_RESTORE_NOTIFICATION_DELIVERY_ADMIN_PASSWORD_FILE: /run/secrets/database-restore-notification-delivery-admin-password
@@ -1664,8 +1674,11 @@ services:
     network_mode: host
     volumes:
       - type: bind
-        source: ${DATABASE_RESTORE_STORAGE_DIR:?DATABASE_RESTORE_STORAGE_DIR is required}
-        target: /var/lib/winwidget-operations/restores
+        source: ${DATABASE_RESTORE_STAGING_DIR:?DATABASE_RESTORE_STAGING_DIR is required}
+        target: /var/lib/winwidget-operations/restore-staging
+      - type: bind
+        source: ${DATABASE_RESTORE_SEALED_DIR:?DATABASE_RESTORE_SEALED_DIR is required}
+        target: /var/lib/winwidget-operations/restore-sealed
     secrets:
       - source: notification-delivery-postgres-admin-password
         target: database-restore-notification-delivery-admin-password

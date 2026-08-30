@@ -453,7 +453,7 @@
 	privacyNotice.className = 'waic-privacy';
 	privacyNotice.appendChild(
 		document.createTextNode(
-			'Не указывайте персональные данные. Вопрос и контекст диалога обрабатываются Cloudflare Workers AI. '
+			'Не указывайте специальные категории, биометрические и иные избыточные персональные данные. Вопрос и контекст диалога обрабатываются Cloudflare Workers AI. '
 		)
 	);
 	var privacyLink = document.createElement('a');

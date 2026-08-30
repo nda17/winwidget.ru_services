@@ -6,6 +6,7 @@ import {
 } from './database-restore-target-registry.service';
 
 type AclRow = readonly [objectName: string, privilege: string];
+export type DatabaseRestoreAclRoleMode = 'OPEN' | 'FENCED' | 'EITHER';
 
 const PLATFORM_TABLES = [
 	'_prisma_migrations',
@@ -54,11 +55,12 @@ export class DatabaseRestoreAclService {
 	async verify(
 		connection: DatabaseRestoreConnection,
 		target: DatabaseRestoreTargetConfiguration,
-		signal?: AbortSignal
+		signal?: AbortSignal,
+		roleMode: DatabaseRestoreAclRoleMode = 'OPEN'
 	): Promise<void> {
 		await this.process.executeSql(
 			connection,
-			this.verificationSql(target),
+			this.verificationSql(target, roleMode),
 			signal
 		);
 	}
@@ -66,17 +68,19 @@ export class DatabaseRestoreAclService {
 	async reconcileAndVerify(
 		connection: DatabaseRestoreConnection,
 		target: DatabaseRestoreTargetConfiguration,
-		signal?: AbortSignal
+		signal?: AbortSignal,
+		roleMode: DatabaseRestoreAclRoleMode = 'OPEN'
 	): Promise<void> {
 		await this.process.executeSql(
 			connection,
-			this.reconciliationSql(target),
+			this.reconciliationSql(target, roleMode),
 			signal
 		);
 	}
 
 	private reconciliationSql(
-		target: DatabaseRestoreTargetConfiguration
+		target: DatabaseRestoreTargetConfiguration,
+		roleMode: DatabaseRestoreAclRoleMode
 	): string {
 		const schema = this.identifier(target.schema);
 		const migration = this.identifier(target.migrationRole);
@@ -129,7 +133,7 @@ export class DatabaseRestoreAclService {
 			standardRuntimeDefaults,
 			`ALTER DEFAULT PRIVILEGES FOR ROLE ${migration} IN SCHEMA ${schema} GRANT SELECT ON TABLES TO ${backup};`,
 			`ALTER DEFAULT PRIVILEGES FOR ROLE ${migration} IN SCHEMA ${schema} GRANT SELECT ON SEQUENCES TO ${backup};`,
-			this.verificationSql(target),
+			this.verificationSql(target, roleMode),
 			'COMMIT;'
 		]
 			.filter(Boolean)
@@ -137,7 +141,8 @@ export class DatabaseRestoreAclService {
 	}
 
 	private verificationSql(
-		target: DatabaseRestoreTargetConfiguration
+		target: DatabaseRestoreTargetConfiguration,
+		roleMode: DatabaseRestoreAclRoleMode
 	): string {
 		const database = this.literal(target.database);
 		const schema = this.literal(target.schema);
@@ -145,6 +150,18 @@ export class DatabaseRestoreAclService {
 		const migration = this.literal(target.migrationRole);
 		const runtime = this.literal(target.runtimeRole);
 		const backup = this.literal(target.backupRole);
+		const loginBoundary =
+			roleMode === 'OPEN'
+				? 'NOT role_state.rolcanlogin'
+				: roleMode === 'FENCED'
+					? 'role_state.rolcanlogin'
+					: 'FALSE';
+		const loginConsistencyBoundary =
+			roleMode === 'EITHER'
+				? `(SELECT count(*) FROM pg_roles AS writer_state
+					WHERE writer_state.oid IN (migration_oid, runtime_oid, backup_oid)
+						AND writer_state.rolcanlogin) NOT IN (0, 3)`
+				: 'FALSE';
 		const routineValues = this.stringValues(
 			target.acl.routines.map(routine => `${target.schema}.${routine}`),
 			'signature'
@@ -183,16 +200,23 @@ BEGIN
 			RAISE EXCEPTION 'Database restore bootstrap admin boundary drifted';
 		END IF;
 		IF EXISTS (
+			SELECT 1 FROM pg_roles AS role_state
+			WHERE role_state.oid <> admin_oid
+				AND role_state.rolcanlogin AND role_state.rolsuper
+		) THEN
+			RAISE EXCEPTION 'Database restore has an unexpected login superuser';
+		END IF;
+		IF EXISTS (
 		SELECT 1 FROM pg_roles AS role_state
 		WHERE role_state.oid IN (migration_oid, runtime_oid, backup_oid)
-			AND (NOT role_state.rolcanlogin OR role_state.rolsuper
+			AND (${loginBoundary} OR ${loginConsistencyBoundary} OR role_state.rolsuper
 				OR role_state.rolcreatedb OR role_state.rolcreaterole
 				OR role_state.rolinherit OR role_state.rolreplication
 				OR role_state.rolbypassrls)
 		) OR EXISTS (
 			SELECT 1 FROM pg_auth_members AS membership
-			WHERE membership.member IN (migration_oid, runtime_oid, backup_oid)
-				OR membership.roleid IN (migration_oid, runtime_oid, backup_oid)
+			WHERE membership.member IN (admin_oid, migration_oid, runtime_oid, backup_oid)
+				OR membership.roleid IN (admin_oid, migration_oid, runtime_oid, backup_oid)
 	) THEN
 		RAISE EXCEPTION 'Database restore ACL role boundary drifted';
 	END IF;

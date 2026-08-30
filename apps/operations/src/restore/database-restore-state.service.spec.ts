@@ -12,7 +12,9 @@ import {
 const event = (): DatabaseRestoreEventIdentity => ({
 	eventId: randomUUID(),
 	jobId: randomUUID(),
-	target: 'reporting'
+	target: 'reporting',
+	expectedServicesSha: 'a'.repeat(40),
+	migrationManifestSha: 'b'.repeat(64)
 });
 
 const lease = (
@@ -25,9 +27,26 @@ const lease = (
 });
 
 const transactionPrisma = (updateMany: jest.Mock) => {
-	const transaction = { databaseRestoreJob: { updateMany } };
+	const executionLeaseUpdateMany = jest
+		.fn()
+		.mockResolvedValue({ count: 1 });
+	const transaction = {
+		databaseRestoreJob: { updateMany },
+		databaseRestoreExecutionLease: {
+			updateMany: executionLeaseUpdateMany
+		},
+		databaseRestoreTerminalReceipt: {
+			findUnique: jest.fn().mockResolvedValue({ id: randomUUID() })
+		},
+		databaseRestoreReleaseAuthorization: {
+			findFirst: jest.fn().mockResolvedValue({
+				payloadSha256: 'f'.repeat(64)
+			})
+		}
+	};
 	return {
 		transaction,
+		executionLeaseUpdateMany,
 		prisma: {
 			databaseRestoreJob: {
 				updateMany,
@@ -45,6 +64,59 @@ const transactionPrisma = (updateMany: jest.Mock) => {
 };
 
 describe('DatabaseRestoreStateService', () => {
+	it('never shortens an exact lease when an older renewal finishes later', async () => {
+		const value = lease();
+		const laterExpiry = new Date(Date.now() + 120_000);
+		const executionLeaseUpdateMany = jest
+			.fn()
+			.mockResolvedValue({ count: 0 });
+		const jobUpdateMany = jest.fn().mockResolvedValue({ count: 0 });
+		const transaction = {
+			databaseRestoreExecutionLease: {
+				updateMany: executionLeaseUpdateMany,
+				findFirst: jest.fn().mockResolvedValue({
+					leaseExpiresAt: laterExpiry
+				})
+			},
+			databaseRestoreJob: {
+				updateMany: jobUpdateMany,
+				findFirst: jest.fn().mockResolvedValue({
+					leaseExpiresAt: laterExpiry
+				})
+			}
+		};
+		const service = new DatabaseRestoreStateService(
+			{
+				$transaction: jest.fn(
+					(callback: (client: typeof transaction) => unknown) =>
+						callback(transaction)
+				)
+			} as never,
+			{} as never
+		);
+
+		await expect(service.renew(value)).resolves.toBe(true);
+		expect(value.leaseExpiresAt).toEqual(laterExpiry);
+		expect(executionLeaseUpdateMany).toHaveBeenCalledWith(
+			expect.objectContaining({
+				where: expect.objectContaining({
+					leaseExpiresAt: expect.objectContaining({
+						lt: expect.any(Date)
+					})
+				})
+			})
+		);
+		expect(jobUpdateMany).toHaveBeenCalledWith(
+			expect.objectContaining({
+				where: expect.objectContaining({
+					leaseExpiresAt: expect.objectContaining({
+						lt: expect.any(Date)
+					})
+				})
+			})
+		);
+	});
+
 	it('claims with event fencing, a lease, and an incremented attempt', async () => {
 		const updateMany = jest.fn().mockResolvedValue({ count: 1 });
 		const { prisma } = transactionPrisma(updateMany);
@@ -67,6 +139,8 @@ describe('DatabaseRestoreStateService', () => {
 				id: value.jobId,
 				target: value.target,
 				eventId: value.eventId,
+				expectedServicesSha: value.expectedServicesSha,
+				migrationManifestSha: value.migrationManifestSha,
 				status: DatabaseRestoreJobStatus.QUEUED
 			},
 			data: expect.objectContaining({
@@ -94,6 +168,27 @@ describe('DatabaseRestoreStateService', () => {
 		});
 	});
 
+	it('does not steal an expired singleton before the recovery sweep re-fences it', async () => {
+		const updateMany = jest.fn().mockResolvedValue({ count: 1 });
+		const { prisma, executionLeaseUpdateMany } =
+			transactionPrisma(updateMany);
+		executionLeaseUpdateMany.mockResolvedValue({ count: 0 });
+		const service = new DatabaseRestoreStateService(
+			prisma as never,
+			{} as never
+		);
+
+		await expect(service.claim(event())).resolves.toEqual({
+			state: 'busy'
+		});
+		expect(executionLeaseUpdateMany).toHaveBeenCalledWith(
+			expect.objectContaining({
+				where: { id: 'singleton', leaseExpiresAt: null }
+			})
+		);
+		expect(updateMany).not.toHaveBeenCalled();
+	});
+
 	it('persists every checkpoint by exact phase and lease before advancing memory state', async () => {
 		const updateMany = jest.fn().mockResolvedValue({ count: 1 });
 		const { prisma } = transactionPrisma(updateMany);
@@ -101,7 +196,7 @@ describe('DatabaseRestoreStateService', () => {
 			prisma as never,
 			{} as never
 		);
-		const value = lease();
+		const value = lease(DatabaseRestoreJobPhase.FENCED);
 
 		await service.checkpoint(value, {
 			phase: 'SAFETY_READY',
@@ -114,7 +209,7 @@ describe('DatabaseRestoreStateService', () => {
 				id: value.event.jobId,
 				eventId: value.event.eventId,
 				status: DatabaseRestoreJobStatus.PROCESSING,
-				phase: DatabaseRestoreJobPhase.PREPARING,
+				phase: DatabaseRestoreJobPhase.FENCED,
 				leaseToken: value.leaseToken,
 				leaseExpiresAt: { gt: expect.any(Date) }
 			}),
@@ -133,7 +228,7 @@ describe('DatabaseRestoreStateService', () => {
 			prisma as never,
 			{} as never
 		);
-		const value = lease();
+		const value = lease(DatabaseRestoreJobPhase.FENCED);
 
 		await expect(
 			service.checkpoint(value, {
@@ -142,14 +237,14 @@ describe('DatabaseRestoreStateService', () => {
 				safetyBackupSha256: 'b'.repeat(64)
 			})
 		).rejects.toThrow('checkpoint could not be persisted');
-		expect(value.phase).toBe(DatabaseRestoreJobPhase.PREPARING);
+		expect(value.phase).toBe(DatabaseRestoreJobPhase.FENCED);
 	});
 
 	it.each([
 		[DatabaseRestoreJobPhase.PREPARING, DatabaseRestoreJobStatus.FAILED],
 		[
 			DatabaseRestoreJobPhase.SAFETY_READY,
-			DatabaseRestoreJobStatus.FAILED
+			DatabaseRestoreJobStatus.RECOVERY_REQUIRED
 		],
 		[
 			DatabaseRestoreJobPhase.MUTATING,
@@ -205,7 +300,13 @@ describe('DatabaseRestoreStateService', () => {
 		const alerts = { recordInTransaction: jest.fn() };
 		const service = new DatabaseRestoreStateService(
 			prisma as never,
-			alerts as never
+			alerts as never,
+			{} as never,
+			{
+				assertRestore: jest.fn().mockResolvedValue({
+					payloadSha256: 'f'.repeat(64)
+				})
+			} as never
 		);
 
 		await expect(service.fail(lease(), new Error('failed'))).resolves.toBe(
@@ -222,9 +323,15 @@ describe('DatabaseRestoreStateService', () => {
 		};
 		const service = new DatabaseRestoreStateService(
 			prisma as never,
-			alerts as never
+			alerts as never,
+			{} as never,
+			{
+				assertRestore: jest.fn().mockResolvedValue({
+					payloadSha256: 'f'.repeat(64)
+				})
+			} as never
 		);
-		const value = lease(DatabaseRestoreJobPhase.VERIFIED);
+		const value = lease(DatabaseRestoreJobPhase.UNFENCED);
 
 		await expect(
 			service.succeed(value, { target: 'reporting' })
@@ -241,9 +348,13 @@ describe('DatabaseRestoreStateService', () => {
 			DatabaseRestoreJobPhase.MUTATING,
 			DatabaseRestoreJobStatus.RECOVERY_REQUIRED
 		],
+		[
+			DatabaseRestoreJobPhase.UNFENCED,
+			DatabaseRestoreJobStatus.RECOVERY_REQUIRED
+		],
 		[null, DatabaseRestoreJobStatus.RECOVERY_REQUIRED]
 	])(
-		'recovers an expired %s lease to %s with an atomic alert',
+		'reserves and recovers an expired %s lease to %s with an atomic alert',
 		async (phase, expectedStatus) => {
 			const updateMany = jest.fn().mockResolvedValue({ count: 1 });
 			const { prisma, transaction } = transactionPrisma(updateMany);
@@ -257,13 +368,26 @@ describe('DatabaseRestoreStateService', () => {
 			const job = {
 				id: randomUUID(),
 				target: 'reporting',
+				eventId: randomUUID(),
+				expectedServicesSha: 'a'.repeat(40),
+				migrationManifestSha: 'b'.repeat(64),
 				status: DatabaseRestoreJobStatus.PROCESSING,
 				phase,
 				leaseToken: randomUUID(),
 				leaseExpiresAt: new Date(Date.now() - 1)
 			};
 
-			await expect(service.recoverExpiredJob(job)).resolves.toEqual({
+			const reserved = await service.reserveExpiredJob(job);
+			expect(reserved).toEqual({
+				...job,
+				leaseToken: expect.any(String),
+				leaseExpiresAt: expect.any(Date)
+			});
+			expect(reserved?.leaseToken).not.toBe(job.leaseToken);
+
+			await expect(
+				service.recoverReservedExpiredJob(reserved!)
+			).resolves.toEqual({
 				id: job.id,
 				target: job.target,
 				status: expectedStatus,
@@ -275,4 +399,125 @@ describe('DatabaseRestoreStateService', () => {
 			);
 		}
 	);
+
+	it('atomically closes the one-shot permit and creates a signed immutable terminal receipt', async () => {
+		const previousKey =
+			process.env.DATABASE_RESTORE_RECEIPT_HMAC_KEY_BASE64;
+		const previousKeyId = process.env.DATABASE_RESTORE_RECEIPT_HMAC_KEY_ID;
+		process.env.DATABASE_RESTORE_RECEIPT_HMAC_KEY_BASE64 = Buffer.alloc(
+			32,
+			7
+		).toString('base64');
+		process.env.DATABASE_RESTORE_RECEIPT_HMAC_KEY_ID =
+			'operations-restore-v1';
+		const jobId = randomUUID();
+		const permitId = randomUUID();
+		const completedAt = new Date('2026-08-30T18:00:00.000Z');
+		const permitCreatedAt = new Date('2026-08-30T17:50:00.000Z');
+		const permitApprovedAt = new Date('2026-08-30T17:51:00.000Z');
+		const permitConsumedAt = new Date('2026-08-30T17:52:00.000Z');
+		const permitExpiresAt = new Date('2026-08-30T18:01:00.000Z');
+		const createReceipt = jest.fn().mockResolvedValue({});
+		const closePermit = jest.fn().mockResolvedValue({ count: 1 });
+		const transaction = {
+			databaseRestoreTerminalReceipt: {
+				findUnique: jest.fn().mockResolvedValue(null),
+				create: createReceipt
+			},
+			databaseRestoreJob: {
+				findUniqueOrThrow: jest.fn().mockResolvedValue({
+					id: jobId,
+					permitId,
+					requestedById: 'requester',
+					permit: {
+						id: permitId,
+						jobId,
+						status: 'CONSUMED',
+						requestedById: 'requester',
+						approvedById: 'approver',
+						createdAt: permitCreatedAt,
+						approvedAt: permitApprovedAt,
+						expiresAt: permitExpiresAt,
+						consumedAt: permitConsumedAt
+					},
+					target: 'reporting',
+					status: DatabaseRestoreJobStatus.SUCCEEDED,
+					phase: DatabaseRestoreJobPhase.UNFENCED,
+					writerFenceRoles: [
+						'winwidget_reporting_runtime',
+						'winwidget_reporting_migration',
+						'winwidget_reporting_backup'
+					],
+					writerFenceRequestedAt: completedAt,
+					writerFenceAppliedAt: completedAt,
+					writerFenceReleasedAt: completedAt,
+					writerFenceEvidenceSha256: 'e'.repeat(64),
+					writerFenceReleaseEvidenceSha256: 'f'.repeat(64),
+					sourceSha256: 'a'.repeat(64),
+					safetyBackupSha256: 'b'.repeat(64),
+					expectedServicesSha: 'c'.repeat(40),
+					migrationManifestSha: 'd'.repeat(64),
+					result: { verified: true },
+					lastError: null,
+					finishedAt: completedAt
+				})
+			},
+			databaseRestorePermit: { updateMany: closePermit },
+			databaseRestoreReleaseAuthorization: {
+				findFirst: jest.fn().mockResolvedValue({
+					payloadSha256: 'g'.repeat(64)
+				})
+			}
+		};
+		const service = new DatabaseRestoreStateService(
+			{} as never,
+			{} as never
+		);
+
+		try {
+			await service.createTerminalReceiptInTransaction(
+				transaction as never,
+				jobId
+			);
+			expect(closePermit).toHaveBeenCalledWith({
+				where: expect.objectContaining({
+					id: permitId,
+					jobId,
+					status: 'CONSUMED'
+				}),
+				data: {
+					status: 'CLOSED',
+					closedAt: completedAt,
+					closeReason: 'TERMINAL_SUCCEEDED'
+				}
+			});
+			expect(createReceipt).toHaveBeenCalledWith({
+				data: expect.objectContaining({
+					jobId,
+					permitId,
+					permitRequestedById: 'requester',
+					permitApprovedById: 'approver',
+					permitCreatedAt,
+					permitApprovedAt,
+					permitExpiresAt,
+					permitConsumedAt,
+					terminalStatus: DatabaseRestoreJobStatus.SUCCEEDED,
+					payloadSha256: expect.stringMatching(/^[0-9a-f]{64}$/),
+					signatureHmacSha256: expect.stringMatching(/^[0-9a-f]{64}$/),
+					signatureKeyId: 'operations-restore-v1'
+				})
+			});
+		} finally {
+			if (previousKey === undefined) {
+				delete process.env.DATABASE_RESTORE_RECEIPT_HMAC_KEY_BASE64;
+			} else {
+				process.env.DATABASE_RESTORE_RECEIPT_HMAC_KEY_BASE64 = previousKey;
+			}
+			if (previousKeyId === undefined) {
+				delete process.env.DATABASE_RESTORE_RECEIPT_HMAC_KEY_ID;
+			} else {
+				process.env.DATABASE_RESTORE_RECEIPT_HMAC_KEY_ID = previousKeyId;
+			}
+		}
+	});
 });

@@ -711,7 +711,7 @@ for (const [source, label] of [
 	],
 	['history: previousHistory', 'bounded in-memory history'],
 	[
-		"'Не указывайте персональные данные. Вопрос и контекст диалога обрабатываются Cloudflare Workers AI. '",
+		"'Не указывайте специальные категории, биометрические и иные избыточные персональные данные. Вопрос и контекст диалога обрабатываются Cloudflare Workers AI. '",
 		'personal-data warning and provider disclosure'
 	],
 	[

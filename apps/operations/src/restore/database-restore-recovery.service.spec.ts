@@ -8,11 +8,28 @@ import { DatabaseRestoreRecoveryService } from './database-restore-recovery.serv
 const processingJob = (leaseExpiresAt: Date) => ({
 	id: randomUUID(),
 	target: 'reporting',
+	eventId: randomUUID(),
+	expectedServicesSha: 'a'.repeat(40),
+	migrationManifestSha: 'b'.repeat(64),
 	status: DatabaseRestoreJobStatus.PROCESSING,
 	phase: DatabaseRestoreJobPhase.PREPARING,
 	leaseToken: randomUUID(),
 	leaseExpiresAt
 });
+
+const recoveryService = (state: unknown) =>
+	new DatabaseRestoreRecoveryService(
+		{
+			confirmReleaseAuthorized: jest.fn().mockResolvedValue(null),
+			...(state as Record<string, unknown>)
+		} as never,
+		{
+			get: jest.fn(() => ({ database: 'winwidget_reporting' })),
+			connection: jest.fn(async () => ({}))
+		} as never,
+		{ apply: jest.fn(async () => ({})) } as never,
+		{ reconcileSucceeded: jest.fn(async () => ({})) } as never
+	);
 
 describe('DatabaseRestoreRecoveryService', () => {
 	afterEach(() => jest.useRealTimers());
@@ -26,14 +43,17 @@ describe('DatabaseRestoreRecoveryService', () => {
 				state: 'processing',
 				job: processingJob(new Date(Date.now() + 60_000))
 			})),
-			recoverExpiredJob: jest.fn()
+			reserveExpiredJob: jest.fn(),
+			recoverReservedExpiredJob: jest.fn()
 		};
-		const service = new DatabaseRestoreRecoveryService(state as never);
+		const service = recoveryService(state);
 		const result = service.waitForEventSettlement(
 			{
 				eventId: randomUUID(),
 				jobId: randomUUID(),
-				target: 'reporting'
+				target: 'reporting',
+				expectedServicesSha: 'a'.repeat(40),
+				migrationManifestSha: 'b'.repeat(64)
 			},
 			65_000
 		);
@@ -42,27 +62,30 @@ describe('DatabaseRestoreRecoveryService', () => {
 		await expect(result).resolves.toEqual(
 			expect.objectContaining({ state: 'processing' })
 		);
-		expect(state.recoverExpiredJob).not.toHaveBeenCalled();
+		expect(state.reserveExpiredJob).not.toHaveBeenCalled();
 	});
 
 	it('acks responsibility only after an expired lease reaches terminal recovery', async () => {
 		const job = processingJob(new Date(Date.now() - 1));
 		const state = {
 			observe: jest.fn().mockResolvedValue({ state: 'processing', job }),
-			recoverExpiredJob: jest.fn().mockResolvedValue({
+			reserveExpiredJob: jest.fn().mockResolvedValue(job),
+			recoverReservedExpiredJob: jest.fn().mockResolvedValue({
 				id: job.id,
 				target: job.target,
 				status: DatabaseRestoreJobStatus.FAILED
 			})
 		};
-		const service = new DatabaseRestoreRecoveryService(state as never);
+		const service = recoveryService(state);
 
 		await expect(
 			service.waitForEventSettlement(
 				{
 					eventId: randomUUID(),
 					jobId: job.id,
-					target: 'reporting'
+					target: 'reporting',
+					expectedServicesSha: 'a'.repeat(40),
+					migrationManifestSha: 'b'.repeat(64)
 				},
 				65_000
 			)
@@ -70,7 +93,11 @@ describe('DatabaseRestoreRecoveryService', () => {
 			state: 'terminal',
 			status: DatabaseRestoreJobStatus.FAILED
 		});
-		expect(state.recoverExpiredJob).toHaveBeenCalledWith(job);
+		expect(state.reserveExpiredJob).toHaveBeenCalledWith(job);
+		expect(state.recoverReservedExpiredJob).toHaveBeenCalledWith(
+			job,
+			null
+		);
 	});
 
 	it('recovers an expired singleton before reporting the slot available', async () => {
@@ -80,18 +107,23 @@ describe('DatabaseRestoreRecoveryService', () => {
 				.fn()
 				.mockResolvedValueOnce(job)
 				.mockResolvedValueOnce(null),
-			recoverExpiredJob: jest.fn().mockResolvedValue({
+			reserveExpiredJob: jest.fn().mockResolvedValue(job),
+			recoverReservedExpiredJob: jest.fn().mockResolvedValue({
 				id: job.id,
 				target: job.target,
 				status: DatabaseRestoreJobStatus.FAILED
 			})
 		};
-		const service = new DatabaseRestoreRecoveryService(state as never);
+		const service = recoveryService(state);
 
 		await expect(
 			service.waitForProcessingSlot('reporting', 65_000)
 		).resolves.toBe(true);
-		expect(state.recoverExpiredJob).toHaveBeenCalledWith(job);
+		expect(state.reserveExpiredJob).toHaveBeenCalledWith(job);
+		expect(state.recoverReservedExpiredJob).toHaveBeenCalledWith(
+			job,
+			null
+		);
 	});
 
 	it('keeps a RECOVERY_REQUIRED target fenced for the bounded wait', async () => {
@@ -105,14 +137,15 @@ describe('DatabaseRestoreRecoveryService', () => {
 				leaseToken: null,
 				leaseExpiresAt: null
 			}),
-			recoverExpiredJob: jest.fn()
+			reserveExpiredJob: jest.fn(),
+			recoverReservedExpiredJob: jest.fn()
 		};
-		const service = new DatabaseRestoreRecoveryService(state as never);
+		const service = recoveryService(state);
 		const result = service.waitForProcessingSlot('reporting', 65_000);
 
 		await jest.advanceTimersByTimeAsync(65_000);
 		await expect(result).resolves.toBe(false);
-		expect(state.recoverExpiredJob).not.toHaveBeenCalled();
+		expect(state.reserveExpiredJob).not.toHaveBeenCalled();
 	});
 
 	it('runs startup recovery through the exact expired batch', async () => {
@@ -121,24 +154,51 @@ describe('DatabaseRestoreRecoveryService', () => {
 			...processingJob(new Date(Date.now() - 1)),
 			phase: DatabaseRestoreJobPhase.MUTATING
 		};
+		const afterReleased = {
+			...processingJob(new Date(Date.now() - 1)),
+			phase: DatabaseRestoreJobPhase.UNFENCED
+		};
+		const calls: string[] = [];
 		const state = {
+			confirmReleaseAuthorized: jest.fn().mockResolvedValue(null),
 			findExpired: jest
 				.fn()
-				.mockResolvedValue([beforeMutation, afterMutation]),
-			recoverExpiredJob: jest
-				.fn()
-				.mockResolvedValueOnce({
-					id: beforeMutation.id,
-					target: beforeMutation.target,
-					status: DatabaseRestoreJobStatus.FAILED
-				})
-				.mockResolvedValueOnce({
-					id: afterMutation.id,
-					target: afterMutation.target,
-					status: DatabaseRestoreJobStatus.RECOVERY_REQUIRED
-				})
+				.mockResolvedValue([beforeMutation, afterMutation, afterReleased]),
+			reserveExpiredJob: jest.fn(async job => {
+				calls.push(`reserve:${job.id}`);
+				return {
+					...job,
+					leaseToken: randomUUID(),
+					leaseExpiresAt: new Date(Date.now() + 60_000)
+				};
+			}),
+			recoverReservedExpiredJob: jest.fn(async job => {
+				calls.push(`finalize:${job.id}`);
+				return {
+					id: job.id,
+					target: job.target,
+					status:
+						job.phase === DatabaseRestoreJobPhase.PREPARING
+							? DatabaseRestoreJobStatus.FAILED
+							: DatabaseRestoreJobStatus.RECOVERY_REQUIRED
+				};
+			})
 		};
-		const service = new DatabaseRestoreRecoveryService(state as never);
+		const pendingFenceIds = [afterMutation.id, afterReleased.id];
+		const writerFence = {
+			apply: jest.fn(async () => {
+				calls.push(`fence:${pendingFenceIds.shift()}`);
+			})
+		};
+		const service = new DatabaseRestoreRecoveryService(
+			state as never,
+			{
+				get: jest.fn(() => ({ database: 'winwidget_reporting' })),
+				connection: jest.fn(async () => ({}))
+			} as never,
+			writerFence as never,
+			{ reconcileSucceeded: jest.fn(async () => ({})) } as never
+		);
 
 		await expect(service.recoverExpired(25)).resolves.toEqual([
 			expect.objectContaining({
@@ -148,8 +208,22 @@ describe('DatabaseRestoreRecoveryService', () => {
 			expect.objectContaining({
 				id: afterMutation.id,
 				status: DatabaseRestoreJobStatus.RECOVERY_REQUIRED
+			}),
+			expect.objectContaining({
+				id: afterReleased.id,
+				status: DatabaseRestoreJobStatus.RECOVERY_REQUIRED
 			})
 		]);
 		expect(state.findExpired).toHaveBeenCalledWith(25);
+		expect(calls).toEqual([
+			`reserve:${beforeMutation.id}`,
+			`finalize:${beforeMutation.id}`,
+			`reserve:${afterMutation.id}`,
+			`fence:${afterMutation.id}`,
+			`finalize:${afterMutation.id}`,
+			`reserve:${afterReleased.id}`,
+			`fence:${afterReleased.id}`,
+			`finalize:${afterReleased.id}`
+		]);
 	});
 });

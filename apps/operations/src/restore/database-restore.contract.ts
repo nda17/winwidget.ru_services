@@ -11,6 +11,12 @@ export const DATABASE_RESTORE_TARGETS = [
 ] as const satisfies ReadonlyArray<DatabaseBackupTarget>;
 export type DatabaseRestoreTarget =
 	(typeof DATABASE_RESTORE_TARGETS)[number];
+export const DATABASE_RESTORE_SERVICES_SHA_PATTERN = /^[0-9a-f]{40}$/;
+export const DATABASE_RESTORE_SHA256_PATTERN = /^[0-9a-f]{64}$/;
+export const DATABASE_RESTORE_PHYSICAL_FENCE_UNCONFIRMED =
+	'PHYSICAL_WRITER_FENCE_UNCONFIRMED';
+export const DATABASE_RESTORE_PERMIT_TTL_MS = 10 * 60 * 1000;
+export const DATABASE_RESTORE_RECOVERY_ACTION_TTL_MS = 15 * 60 * 1000;
 export const DATABASE_RESTORE_MAX_FILE_SIZE_BYTES = 49 * 1024 * 1024;
 export const DATABASE_RESTORE_UPLOAD_LIMITS = {
 	fieldNameSize: 64,

@@ -4,6 +4,7 @@ set -euo pipefail
 
 bash -n .github/scripts/validate-production-compose.sh
 node --check .github/scripts/validate-production-compose.cjs
+node --check apps/operations/test/integration/database-restore-postgres18.rehearsal.mjs
 
 env \
 	GITHUB_CLIENT_ID=ci_identity_github_client_id \
@@ -202,6 +203,16 @@ for (const app of apps) {
 const operationsPackage = JSON.parse(
 	readFileSync('apps/operations/package.json', 'utf8')
 );
+const operationsRestoreRehearsal =
+	'apps/operations/test/integration/database-restore-postgres18.rehearsal.mjs';
+if (
+	!existsSync(operationsRestoreRehearsal) ||
+	!lstatSync(operationsRestoreRehearsal).isFile() ||
+	operationsPackage.scripts?.['test:integration:restore-rehearsal'] !==
+		'node test/integration/database-restore-postgres18.rehearsal.mjs'
+) {
+	throw new Error('Operations PostgreSQL 18 restore rehearsal is missing');
+}
 for (const script of [
 	'cutover:status',
 	'cutover:import',
@@ -389,18 +400,23 @@ exactFiles('.github/workflows', ['ci.yml']);
 exactFiles('.github/scripts', [
 	'static-check-services-lifecycle.sh',
 	'validate-production-compose.cjs',
-	'validate-production-compose.sh'
+	'validate-production-compose.sh',
+	'verify-production-audit.cjs'
 ]);
 exactFiles('deploy', ['docker-compose.prod.yml']);
 
 const servicesWorkflow = readFileSync('.github/workflows/ci.yml', 'utf8');
 const pinnedInfraRevision =
-	'036854a4bfa5001245f28a6a041a30afc2359184';
+	'856990e6a43de1308c5df276ecfb7682adc7d0bf';
 for (const evidence of [
 	"cancel-in-progress: ${{ github.ref != 'refs/heads/prod' }}",
+	'operations-restore-rehearsal:',
+	'--label winwidget.operations-restore-rehearsal=true',
+	'pnpm --dir apps/operations run test:integration:restore-rehearsal',
 	'deploy-production:',
 	'needs:',
 	'- lifecycle-contract',
+	'- operations-restore-rehearsal',
 	'- production-image',
 	'- service',
 	'- service-integration',

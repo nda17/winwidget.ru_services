@@ -1,11 +1,15 @@
 import {
+	BadRequestException,
 	ConflictException,
 	ForbiddenException,
 	ServiceUnavailableException,
 	ValidationPipe
 } from '@nestjs/common';
 import { createHash, randomUUID } from 'node:crypto';
-import { AiConsultantMessageDto } from '../http/widgets.dto';
+import {
+	AiConsultantMessageDto,
+	AiConsultantTestMessageDto
+} from '../http/widgets.dto';
 import { WidgetsAiConsultantService } from './widgets-ai-consultant.service';
 import {
 	WidgetsAiProviderResponseError,
@@ -89,7 +93,7 @@ const setup = (provider: WidgetsAiProvider) => {
 			sessionId: 'session',
 			consentReceiptId: '11111111-1111-4111-8111-111111111111',
 			acceptanceId: '22222222-2222-4222-8222-222222222222',
-			documentVersion: 'ai-consultant-consent-v1',
+			documentVersion: 'ai-consultant-consent-v2',
 			documentHash: 'a'.repeat(64),
 			requestHostname: 'example.test'
 		}),
@@ -103,7 +107,7 @@ const setup = (provider: WidgetsAiProvider) => {
 	const consentClaims = {
 		consentReceiptId: '11111111-1111-4111-8111-111111111111',
 		acceptanceId: '22222222-2222-4222-8222-222222222222',
-		documentVersion: 'ai-consultant-consent-v1',
+		documentVersion: 'ai-consultant-consent-v2',
 		documentHash: 'a'.repeat(64),
 		requestHostname: 'example.test'
 	};
@@ -519,6 +523,50 @@ describe('WidgetsAiConsultantService', () => {
 				metadata
 			)
 		).rejects.toThrow();
+	});
+
+	it('requires the current AI and Cloudflare disclosure acknowledgment before authenticated testing', async () => {
+		const generate = groundedGenerate();
+		const { service, access, quota } = setup({ generate });
+
+		await expect(
+			service.testMessage(
+				widget.id,
+				{ subject: 'owner-1', roles: ['USER'] },
+				input({ aiCloudflareDisclosureAcknowledged: false }) as never,
+				'127.0.0.1'
+			)
+		).rejects.toBeInstanceOf(BadRequestException);
+		expect(access.owned).not.toHaveBeenCalled();
+		expect(access.require).not.toHaveBeenCalled();
+		expect(quota.aiSnapshot).not.toHaveBeenCalled();
+		expect(generate).not.toHaveBeenCalled();
+
+		const pipe = new ValidationPipe({
+			whitelist: true,
+			forbidNonWhitelisted: true,
+			transform: true
+		});
+		const metadata = {
+			type: 'body' as const,
+			metatype: AiConsultantTestMessageDto,
+			data: ''
+		};
+		await expect(pipe.transform(input(), metadata)).rejects.toThrow();
+		await expect(
+			pipe.transform(
+				input({ aiCloudflareDisclosureAcknowledged: false }),
+				metadata
+			)
+		).rejects.toThrow();
+		await expect(
+			pipe.transform(
+				input({ aiCloudflareDisclosureAcknowledged: true }),
+				metadata
+			)
+		).resolves.toMatchObject({
+			aiCloudflareDisclosureAcknowledged: true
+		});
 	});
 
 	it('applies all in-process rate scopes without persisting a transcript', async () => {
@@ -1032,7 +1080,7 @@ describe('WidgetsAiConsultantService', () => {
 		await service.testMessage(
 			widget.id,
 			{ subject: 'admin-1', roles: ['ADMIN'] },
-			input() as never,
+			input({ aiCloudflareDisclosureAcknowledged: true }) as never,
 			'127.0.0.1'
 		);
 		expect(access.require).toHaveBeenCalled();

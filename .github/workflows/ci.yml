@@ -69,9 +69,15 @@ jobs:
       - name: Install ${{ matrix.app }}
         run: pnpm --dir "apps/${{ matrix.app }}" install --frozen-lockfile
       - name: Audit production dependencies
+        if: matrix.app == 'billing'
         run: >-
           pnpm --dir "apps/${{ matrix.app }}" audit
           --prod --audit-level high
+      - name: Verify production dependency allowlist
+        if: matrix.app != 'billing'
+        run: >-
+          node .github/scripts/verify-production-audit.cjs
+          "${{ matrix.app }}"
       - name: Generate Prisma client
         if: matrix.app != 'api-gateway'
         run: pnpm --dir "apps/${{ matrix.app }}" run prisma:generate
@@ -141,6 +147,54 @@ jobs:
         run: test -x "$WIDGETS_BROWSER_EXECUTABLE"
       - name: Run Widgets behavior integration
         run: pnpm --dir apps/widgets run test:integration:behavior
+
+  operations-restore-rehearsal:
+    name: Operations restore PostgreSQL 18 rehearsal
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    services:
+      postgres:
+        image: postgres:18-bookworm@sha256:1961f96e6029a02c3812d7cb329a3b03a3ac2bb067058dec17b0f5596aca9296
+        env:
+          POSTGRES_USER: operations_restore_rehearsal_superuser
+          POSTGRES_PASSWORD: operations_restore_rehearsal_password_A9
+          POSTGRES_DB: operations_restore_rehearsal_control
+        options: >-
+          --label winwidget.operations-restore-rehearsal=true
+          --health-cmd "pg_isready -U operations_restore_rehearsal_superuser -d operations_restore_rehearsal_control"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 30
+    env:
+      OPERATIONS_RESTORE_REHEARSAL_ALLOW_MUTATION: 'true'
+      OPERATIONS_RESTORE_REHEARSAL_POSTGRES_CONTAINER_ID: ${{ job.services.postgres.id }}
+      OPERATIONS_RESTORE_REHEARSAL_POSTGRES_USER: operations_restore_rehearsal_superuser
+      OPERATIONS_RESTORE_REHEARSAL_POSTGRES_PASSWORD: operations_restore_rehearsal_password_A9
+      OPERATIONS_RESTORE_REHEARSAL_POSTGRES_DB: operations_restore_rehearsal_control
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Verify immutable revision
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.9
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 20
+          cache: pnpm
+          cache-dependency-path: apps/operations/pnpm-lock.yaml
+      - name: Install Operations
+        run: pnpm --dir apps/operations install --frozen-lockfile
+      - name: Generate Operations Prisma client
+        run: pnpm --dir apps/operations run prisma:generate
+      - name: Build Operations
+        run: pnpm --dir apps/operations run build
+      - name: Run isolated restore rehearsal
+        run: pnpm --dir apps/operations run test:integration:restore-rehearsal
 
   service-integration:
     name: Service integration / ${{ matrix.app }}
@@ -304,12 +358,13 @@ jobs:
     name: Deploy production
     needs:
       - lifecycle-contract
+      - operations-restore-rehearsal
       - production-image
       - service
       - service-integration
       - widgets-integration
     if: github.event_name == 'push' && github.ref == 'refs/heads/prod'
-    uses: nda17/winwidget.ru_infra/.github/workflows/deploy-production.yml@036854a4bfa5001245f28a6a041a30afc2359184
+    uses: nda17/winwidget.ru_infra/.github/workflows/deploy-production.yml@856990e6a43de1308c5df276ecfb7682adc7d0bf
     with:
       services_revision: ${{ github.sha }}
     secrets:

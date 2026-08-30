@@ -12,9 +12,11 @@ import {
 const DATABASE_COMMAND_TIMEOUT_MS = 30 * 60_000;
 const DATABASE_COMMAND_TERMINATION_GRACE_MS = 10_000;
 const DATABASE_COMMAND_STDOUT_TAIL_CHARACTERS = 2_000_000;
-const RESTORE_TOC_MAX_BYTES = 2_000_000;
+const RESTORE_COMMAND_CAPTURE_MAX_BYTES = 2_000_000;
 const RESTORE_TOC_OVERFLOW_ERROR =
 	'Restore dump table of contents exceeds the safe size limit';
+const RESTORE_LEDGER_OVERFLOW_ERROR =
+	'Restore migration ledger exceeds the safe size limit';
 
 @Injectable()
 export class DatabaseRestoreProcessService {
@@ -149,26 +151,61 @@ export class DatabaseRestoreProcessService {
 		);
 	}
 
-	async verifyMigrationLedger(
+	async extractMigrationLedger(
+		source: string,
+		target: DatabaseRestoreTargetConfiguration,
+		signal?: AbortSignal
+	): Promise<string> {
+		signal?.throwIfAborted();
+		return (
+			await this.command(
+				'pg_restore',
+				[
+					'--data-only',
+					'--strict-names',
+					'--schema',
+					target.schema,
+					'--table',
+					'_prisma_migrations',
+					'--file',
+					'-',
+					source
+				],
+				null,
+				{
+					stdoutOverflowError: RESTORE_LEDGER_OVERFLOW_ERROR,
+					signal
+				}
+			)
+		).stdout;
+	}
+
+	async readMigrationLedger(
 		connection: DatabaseRestoreConnection,
 		target: DatabaseRestoreTargetConfiguration,
 		signal?: AbortSignal
-	): Promise<boolean> {
+	): Promise<string> {
 		signal?.throwIfAborted();
-		const verification = await this.command(
-			'psql',
-			[
-				'--no-password',
-				'--tuples-only',
-				'--no-align',
-				...this.connectionArguments(connection),
-				'--command',
-				`SELECT CASE WHEN to_regclass('${target.schema}._prisma_migrations') IS NOT NULL THEN 'ok' ELSE 'missing' END;`
-			],
-			connection.password,
-			{ signal }
-		);
-		return verification.stdout.trim() === 'ok';
+		return (
+			await this.command(
+				'psql',
+				[
+					'--no-password',
+					'--set',
+					'ON_ERROR_STOP=1',
+					'--tuples-only',
+					'--no-align',
+					...this.connectionArguments(connection),
+					'--command',
+					`SELECT COALESCE(json_agg(json_build_object('migrationName', migration_name, 'checksum', checksum, 'finished', finished_at IS NOT NULL, 'rolledBack', rolled_back_at IS NOT NULL, 'appliedStepsCount', applied_steps_count) ORDER BY migration_name, started_at, id)::text, '[]') FROM ${this.identifier(target.schema)}."_prisma_migrations";`
+				],
+				connection.password,
+				{
+					stdoutOverflowError: RESTORE_LEDGER_OVERFLOW_ERROR,
+					signal
+				}
+			)
+		).stdout;
 	}
 
 	private async command(
@@ -199,7 +236,7 @@ export class DatabaseRestoreProcessService {
 			}
 			if (
 				stdoutOverflow ||
-				stdoutBytes + buffer.length > RESTORE_TOC_MAX_BYTES
+				stdoutBytes + buffer.length > RESTORE_COMMAND_CAPTURE_MAX_BYTES
 			) {
 				stdoutOverflow = true;
 				stdoutChunks.length = 0;

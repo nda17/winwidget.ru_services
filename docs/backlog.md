@@ -153,18 +153,99 @@ recovery evidence не вынесены из восстанавливаемой 
 
 Осталось:
 
+- до включения production restore закрыть trust gate custom archive одним из
+  двух способов: предпочтительно подписывать в `maintenance-worker`
+  исчерпывающую service-owned backup evidence отдельным Ed25519 private key и
+  проверять её встроенным public key в API/restore-worker, либо выполнять
+  `pg_restore` через dedicated least-privileged restore principal;
+  bootstrap-admin connection с `--role` не считать sandbox, private signing
+  key не передавать API/restore-worker, а binding обязан включать target,
+  database/schema, artifact SHA-256, manifest/services SHA, backup job/time и
+  tool/image revision;
 - выполнить exact-SHA Linux/Docker/PostgreSQL 18 rehearsal всех targets,
   включая несовместимый dump, нехватку места, cancel race, restart checkpoint,
   ACL drift и изоляцию чужих БД;
 - проверить one-shot permit, signed receipt и обязательное закрытие API после
   success, timeout и отмены workflow;
-- реализовать и отрепетировать `RECOVERY_REQUIRED` recovery-action с проверкой
-  terminal/lock/fence evidence и dual approval;
+- отрепетировать реализованные `RECOVERY_REQUIRED` recovery-actions с
+  проверкой terminal/lock/fence evidence и dual approval;
 - если потребуется вернуть Operations self-restore, вынести control ledger,
   lease, incidents и recovery evidence в отдельную невосстанавливаемую границу;
 - решить, остаётся ли in-place restore приемлемым, либо перейти к восстановлению
   в новую изолированную PostgreSQL с проверкой до switch;
-- закрепить retention restore artifacts и alerts на зависшие job/fence.
+- подтвердить на production rehearsal заданный retention restore artifacts и
+  alerts на зависшие job/fence.
+
+### P2 — выделенная recovery session boundary перед расширением control plane
+
+Текущий restore-контракт сознательно доверяет единственному bootstrap-admin и
+single-replica `operations-restore-worker`: admin secret не получают API и
+остальные containers, а глобальный CAS запрещает overlapping mutation.
+PostgreSQL `CONNECTION LIMIT` не является барьером для superuser и не
+используется как гарантия fence.
+
+До запуска нескольких restore-worker replicas, удалённого recovery или выдачи
+admin secret другому процессу добавить отдельный recovery proxy/session
+boundary с единоличным lease-aware допуском, отзывом сессий и аудитируемым
+fail-closed shutdown. До этого не расширять текущую trusted boundary и не
+утверждать защиту при компрометации restore-worker/admin secret.
+
+### P2 — keyring для ротации подписей recovery receipt
+
+Первичный rollout использует один active HMAC key и запрещает его замену, пока
+есть `PROCESSING`, `RECOVERY_REQUIRED` или незавершённые recovery-actions. До
+первой ротации добавить current/previous keyring и проверку подписи по key ID,
+зафиксировать approve/rehearsal procedure и удалять прежний ключ только после
+доказанного отсутствия незавершённых receipt, подписанных этим ключом.
+
+### P2 — lease-guarded compensation writer fence
+
+Pre-authorization compensation сейчас повторно применяет physical writer fence
+после ошибки, но потерявший lease процесс может сделать это уже поверх новой
+generation. Это не открывает writer roles и остаётся fail-closed, однако может
+перезаписать operation marker, закрыть активные sessions нового recovery и
+создать production availability incident. До включения destructive restore
+добавить DB guard exact current lease перед re-fence, отказ при более новом
+target marker и two-worker fault test: старый process теряет lease, новый
+записывает generation, поздний compensation не меняет marker и sessions.
+
+### P2 — durable upload intent для безопасной очистки no-DB restore dump
+
+Upload сохраняет UUID staging dump до транзакции permit/job/Outbox. Отсутствие
+job даже спустя 24 часа не доказывает rollback: исходный PostgreSQL backend
+может всё ещё ждать lock или завершать неоднозначный commit. Поэтому текущий
+cleanup fail-closed не удаляет no-DB `.dump` автоматически. До автоматической
+очистки таких файлов добавить отдельный durable upload-intent, зафиксированный
+до появления sweepable artifact и атомарно переводимый вместе с job/Outbox;
+sweep может удалять dump только по terminal/abandoned intent после повторной DB
+проверки. Покрыть blocked transaction дольше retention, ambiguous commit,
+restart и bounded batch без starvation.
+
+### P2 — усилить DB-инварианты control ledger восстановления
+
+Application CAS и signed receipts сейчас fail-closed проверяют допустимые
+переходы, но PostgreSQL constraints ещё не выражают полную матрицу
+`status ↔ phase ↔ release authorization ↔ terminal receipt`. До разрешения
+production restore добавить exact CHECK/immutable triggers для terminal job и
+recovery-action, сделать `recovery_resolved_at` монотонным и запретить cleanup
+для строк без подтверждённой terminal shape. Отдельный CI gate должен поднять
+чистую Operations PostgreSQL 18, применить все Prisma migrations и выполнить
+negative SQL matrix для cross-binding, unknown target, mutable terminal state и
+release-authorization/receipt constraints; service-target restore rehearsal не
+считать заменой этому control-ledger gate.
+
+### P2 — lease-bound compensation для writer fence
+
+До release authorization compensation намеренно fail-closed повторно закрывает
+writer roles. Старый worker после потери lease теоретически может возобновить
+такой `apply`, перезаписать target generation marker уже новой operation и
+создать availability-инцидент, хотя открыть writers без авторизации он не
+может. Перед каждым compensation добавить финальный exact-lease CAS guard,
+прочитать текущий target marker под advisory lock и запретить overwrite/terminate,
+если marker принадлежит другой operation; сохранить HIGH alert с физическим
+состоянием вместо ложного утверждения о закрытом fence. Покрыть двух-worker
+fault matrix: старый process остановлен до apply, новая generation fenced,
+старый process продолжен и не меняет marker, роли или сессии новой generation.
 
 ## Платежи и юридические требования
 
@@ -264,19 +345,6 @@ replicas.
 явное согласие до загрузки Turnstile, хранит version/hash/acceptedAt и
 псевдонимизированный receipt без переписки и отключает AI Gateway logging. Это
 не заменяет внешнее юридическое заключение и договорные документы.
-
-### P3 — большие отчёты и экспорт заявок
-
-Оставлять синхронными, пока генерация быстрая. При измеримой нагрузке перевести
-в durable job: API создаёт ID, worker формирует потоковый файл, object storage
-выдаёт временную ссылку, retention удаляет артефакт.
-
-### P3 — CDN для `/widgets/*` при измеримой необходимости
-
-Переходить на CDN только при подтверждённой нагрузке, задержке или независимом
-release cycle. Сохранить старые embed URLs через коротко кешируемый
-loader/manifest, публиковать immutable assets по content hash, не передавать S3
-credentials в browser и проверить все семь типов на внешнем сайте и rollback.
 
 ## Инженерная эксплуатация
 

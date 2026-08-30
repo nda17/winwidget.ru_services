@@ -34,15 +34,22 @@ import { ReportingPolicyGuard } from './reporting-policy/reporting-policy.guard'
 import { ReportingPolicyService } from './reporting-policy/reporting-policy.service';
 import { DatabaseRestoreArtifactValidatorService } from './restore/database-restore-artifact-validator.service';
 import { DatabaseRestoreAclService } from './restore/database-restore-acl.service';
+import { DatabaseRestoreAuthorizationService } from './restore/database-restore-authorization.service';
 import { DatabaseRestoreCleanupService } from './restore/database-restore-cleanup.service';
 import { DatabaseRestoreController } from './restore/database-restore.controller';
 import { DatabaseRestoreExecutorService } from './restore/database-restore-executor.service';
+import { DatabaseRestoreMigrationManifestService } from './restore/database-restore-migration-manifest.service';
 import { DatabaseRestoreProcessService } from './restore/database-restore-process.service';
 import { DatabaseRestoreRecoveryService } from './restore/database-restore-recovery.service';
+import { DatabaseRestoreRecoveryExecutorService } from './restore/database-restore-recovery-executor.service';
+import { DatabaseRestoreRecoveryStateService } from './restore/database-restore-recovery-state.service';
+import { DatabaseRestoreReceiptService } from './restore/database-restore-receipt.service';
+import { DatabaseRestoreReleaseAuthorizationService } from './restore/database-restore-release-authorization.service';
 import { DatabaseRestoreService } from './restore/database-restore.service';
 import { DatabaseRestoreStateService } from './restore/database-restore-state.service';
 import { DatabaseRestoreTargetRegistryService } from './restore/database-restore-target-registry.service';
 import { DatabaseRestoreWorkerService } from './restore/database-restore-worker.service';
+import { DatabaseRestoreWriterFenceService } from './restore/database-restore-writer-fence.service';
 import { OperationsRuntimeModule } from './runtime/operations-runtime.module';
 import {
 	OperationsProcessRole,
@@ -111,11 +118,18 @@ const ROLE_SCOPED_PROVIDERS =
 		DatabaseRestoreTargetRegistryService,
 		DatabaseRestoreArtifactValidatorService,
 		DatabaseRestoreAclService,
+		DatabaseRestoreMigrationManifestService,
+		DatabaseRestoreReceiptService,
+		DatabaseRestoreReleaseAuthorizationService,
+		DatabaseRestoreAuthorizationService,
 		DatabaseRestoreProcessService,
 		DatabaseRestoreExecutorService,
+		DatabaseRestoreWriterFenceService,
+		DatabaseRestoreRecoveryExecutorService,
 		DatabaseRestoreCleanupService,
 		DatabaseRestoreStateService,
 		DatabaseRestoreRecoveryService,
+		DatabaseRestoreRecoveryStateService,
 		DatabaseRestoreService,
 		DatabaseRestoreWorkerService,
 		ReportingPolicyService,

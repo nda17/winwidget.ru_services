@@ -221,6 +221,12 @@ export class AiConsultantMessageDto {
 	history?: AiConsultantHistoryMessageDto[];
 }
 
+export class AiConsultantTestMessageDto extends AiConsultantMessageDto {
+	@IsBoolean()
+	@Equals(true)
+	aiCloudflareDisclosureAcknowledged: true;
+}
+
 export class AiConsultantPublicMessageDto extends AiConsultantMessageDto {
 	@IsString()
 	@MinLength(80)

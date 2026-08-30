@@ -66,6 +66,10 @@ export interface AiConsultantPublicMessageInput extends AiConsultantMessageInput
 	sessionToken: string;
 }
 
+export interface AiConsultantTestMessageInput extends AiConsultantMessageInput {
+	aiCloudflareDisclosureAcknowledged: boolean;
+}
+
 export interface AiConsultantMessageResult {
 	requestId: string;
 	outcome: AiConsultantOutcome;
@@ -256,9 +260,14 @@ export class WidgetsAiConsultantService {
 	async testMessage(
 		widgetId: string,
 		actor: { subject: string; roles: readonly string[] },
-		input: AiConsultantMessageInput,
+		input: AiConsultantTestMessageInput,
 		ip: string
 	): Promise<AiConsultantMessageResult> {
+		if (input.aiCloudflareDisclosureAcknowledged !== true) {
+			throw new BadRequestException(
+				'Подтвердите актуальное раскрытие обработки данных через Cloudflare Workers AI и Turnstile'
+			);
+		}
 		const elevated = actor.roles.some(role =>
 			['ADMIN', 'DEV'].includes(role)
 		);

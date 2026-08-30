@@ -22,7 +22,7 @@ const publicWidget = (type: WidgetType) => ({
 });
 
 const consentDocument = {
-	documentVersion: 'ai-consultant-consent-v1',
+	documentVersion: 'ai-consultant-consent-v2',
 	documentHash: 'a'.repeat(64),
 	statementText: 'Текст явного согласия',
 	privacyUrl: 'https://example.test/privacy'

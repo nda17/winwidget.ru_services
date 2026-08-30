@@ -31,9 +31,9 @@ import {
 import type { IntrospectedWidgetsActor } from '../internal/widgets-identity.client';
 import {
 	AiConsultantConsentDto,
-	AiConsultantMessageDto,
 	AiConsultantPublicMessageDto,
-	AiConsultantSessionDto
+	AiConsultantSessionDto,
+	AiConsultantTestMessageDto
 } from './widgets.dto';
 import { CurrentWidgetsActor } from './widgets-http.util';
 
@@ -131,7 +131,7 @@ export class WidgetsAiConsultantManagementController {
 	@HttpCode(200)
 	testMessage(
 		@Param('id') id: string,
-		@Body() dto: AiConsultantMessageDto,
+		@Body() dto: AiConsultantTestMessageDto,
 		@Req() request: Request,
 		@CurrentWidgetsActor() actor: IntrospectedWidgetsActor
 	) {

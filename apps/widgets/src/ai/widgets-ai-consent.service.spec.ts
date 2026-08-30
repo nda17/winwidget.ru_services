@@ -156,6 +156,10 @@ describe('WidgetsAiConsentService', () => {
 
 	it('builds a deterministic consent document and hashes its exact canonical evidence', () => {
 		const { service } = setup();
+		expect(AI_CONSENT_DOCUMENT_VERSION).toBe('ai-consultant-consent-v2');
+		expect(AI_CONSENT_STATEMENT_TEXT).toBe(
+			'Я согласен(на), что Cloudflare Workers AI обработает мой вопрос и до 12 последних сообщений контекста для формирования и проверки ответа. Для защиты от автоматизированных запросов в Cloudflare Turnstile будут переданы и обработаны технические сигналы безопасности (IP-адрес, TLS-отпечаток, User-Agent, ключ сайта и связанный домен); Cloudflare также использует эти сигналы как самостоятельный оператор для улучшения обнаружения ботов. Я ознакомлен(а) с политикой обработки данных владельца сайта и обязуюсь не указывать специальные категории персональных данных, биометрические и иные избыточные персональные данные.'
+		);
 		const first = service.publicDocument(widget, HOSTNAME);
 		const second = service.publicDocument(widget, HOSTNAME);
 		const canonical = JSON.stringify({

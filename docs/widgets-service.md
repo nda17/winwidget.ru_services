@@ -132,6 +132,10 @@ AI Consultant не создаёт заявку и не изменяет lead cou
   сессии и каждое сообщение по уже выданному session token;
 - публичный config возвращает immutable consent contract: точный текст,
   `documentVersion`, SHA-256 `documentHash` и проверенную ссылку владельца;
+- consent contract `ai-consultant-consent-v2` раскрывает обработку вопроса и
+  до 12 последних сообщений через Cloudflare Workers AI, передачу Turnstile
+  технических сигналов безопасности и самостоятельную роль Cloudflare при
+  использовании этих сигналов для улучшения обнаружения ботов;
 - runtime требует отдельный checkbox и `POST /consents` до загрузки Turnstile;
   одно согласие разрешает ровно один session bootstrap, а истечение или `401`
   возвращает новый consent gate без переиспользования receipt;
@@ -142,6 +146,9 @@ AI Consultant не создаёт заявку и не изменяет lead cou
 - runtime у поля ввода называет Cloudflare Workers AI, предупреждает не
   указывать специальные категории, биометрические и избыточные персональные
   данные и показывает ссылку на политику владельца;
+- аутентифицированный `POST /ai-consultants/:id/test-message` требует явное
+  `aiCloudflareDisclosureAcknowledged: true`; отсутствие или `false`
+  отклоняется до чтения draft, quota-check и вызова провайдера;
 - конфигурация отклоняет PEM/private keys и распространённые token/password
   строки фиксированной ошибкой без вывода содержимого;
 - PDF/Word, RAG, отдельная база знаний, заявки и хранение transcript отсутствуют;
@@ -156,7 +163,10 @@ AI Consultant не создаёт заявку и не изменяет lead cou
 переменными. API token требует Workers AI и Turnstile Sites Write. Payload
 logging в AI Gateway принудительно отключён обоими заголовками
 `cf-aig-collect-log: false` и `cf-aig-collect-log-payload: false`, поэтому
-Cloudflare AI Gateway не сохраняет payload или metadata этих запросов.
+для этих запросов пропускается вся log entry AI Gateway, включая payload и
+metadata. Это утверждение относится только к логированию AI Gateway и не
+отменяет обработку запроса Cloudflare Workers AI и технических сигналов
+Cloudflare Turnstile.
 Для выбранного reasoning-моделя Qwen3 оба вызова принудительно завершают
 последнее сообщение строкой `/no_think`; пользовательский `/think` не может
 переопределить этот режим, а короткий verifier не расходует бюджет на reasoning.

@@ -286,35 +286,236 @@ model ReportingSchedulePolicy {
 }
 
 model DatabaseRestoreJob {
-  id                   String                   @id @default(uuid()) @db.Uuid
+  id                   String                          @id @default(uuid()) @db.Uuid
   target               String
-  status               DatabaseRestoreJobStatus @default(QUEUED)
+  status               DatabaseRestoreJobStatus        @default(QUEUED)
   phase                DatabaseRestoreJobPhase?
-  sourceFileName       String                   @map("source_file_name")
-  sourceSha256         String                   @map("source_sha256")
-  sourceSize           BigInt                   @map("source_size")
-  requestedById        String                   @map("requested_by_id")
-  idempotencyKey       String                   @map("idempotency_key") @db.Uuid
-  eventId              String                   @unique(map: "database_restore_jobs_event_id_unique") @map("event_id") @db.Uuid
-  leaseOwner           String?                  @map("lease_owner")
-  leaseToken           String?                  @map("lease_token") @db.Uuid
-  leaseExpiresAt       DateTime?                @map("lease_expires_at")
-  attempts             Int                      @default(0)
-  safetyBackupFileName String?                  @map("safety_backup_file_name")
-  safetyBackupSha256   String?                  @map("safety_backup_sha256")
-  sourceDeletedAt      DateTime?                @map("source_deleted_at")
-  safetyDeletedAt      DateTime?                @map("safety_deleted_at")
-  cleanupError         String?                  @map("cleanup_error") @db.Text
+  sourceFileName       String                          @map("source_file_name")
+  sourceSha256         String                          @map("source_sha256")
+  sourceSize           BigInt                          @map("source_size")
+  requestedById        String                          @map("requested_by_id")
+  idempotencyKey       String                          @map("idempotency_key") @db.Uuid
+  eventId              String                          @unique(map: "database_restore_jobs_event_id_unique") @map("event_id") @db.Uuid
+  permitId             String                          @unique(map: "database_restore_jobs_permit_id_unique") @map("permit_id") @db.Uuid
+  expectedServicesSha  String                          @map("expected_services_sha")
+  migrationManifestSha String                          @map("migration_manifest_sha")
+  leaseOwner           String?                         @map("lease_owner")
+  leaseToken           String?                         @map("lease_token") @db.Uuid
+  leaseExpiresAt       DateTime?                       @map("lease_expires_at")
+  attempts             Int                             @default(0)
+  safetyBackupFileName String?                         @map("safety_backup_file_name")
+  safetyBackupSha256   String?                         @map("safety_backup_sha256")
+  sourceDeletedAt      DateTime?                       @map("source_deleted_at")
+  safetyDeletedAt      DateTime?                       @map("safety_deleted_at")
+  cleanupError         String?                         @map("cleanup_error") @db.Text
+  recoveryResolvedAt   DateTime?                       @map("recovery_resolved_at")
+  artifactRetainUntil  DateTime?                       @map("artifact_retain_until")
+  writerFenceRoles     Json?                           @map("writer_fence_roles")
+  writerFenceRequestedAt DateTime?                     @map("writer_fence_requested_at")
+  writerFenceAppliedAt DateTime?                       @map("writer_fence_applied_at")
+  writerFenceReleasedAt DateTime?                      @map("writer_fence_released_at")
+  writerFenceEvidenceSha256 String?                    @map("writer_fence_evidence_sha256")
+  writerFenceReleaseEvidenceSha256 String?             @map("writer_fence_release_evidence_sha256")
   result               Json?
-  lastError            String?                  @map("last_error") @db.Text
-  startedAt            DateTime?                @map("started_at")
-  finishedAt           DateTime?                @map("finished_at")
-  createdAt            DateTime                 @default(now()) @map("created_at")
-  updatedAt            DateTime                 @updatedAt @map("updated_at")
+  lastError            String?                         @map("last_error") @db.Text
+  startedAt            DateTime?                       @map("started_at")
+  finishedAt           DateTime?                       @map("finished_at")
+  createdAt            DateTime                        @default(now()) @map("created_at")
+  updatedAt            DateTime                        @updatedAt @map("updated_at")
+  permit               DatabaseRestorePermit           @relation(fields: [permitId, id, target, sourceSha256, expectedServicesSha, migrationManifestSha], references: [id, jobId, target, sourceSha256, expectedServicesSha, migrationManifestSha], onDelete: Restrict, onUpdate: Restrict, map: "database_restore_jobs_permit_fkey")
+  terminalReceipt      DatabaseRestoreTerminalReceipt?
+  recoveryActions      DatabaseRestoreRecoveryAction[]
+  recoveryResolutionReceipt DatabaseRestoreRecoveryReceipt?
+  releaseAuthorizations DatabaseRestoreReleaseAuthorization[]
 
   @@unique([requestedById, idempotencyKey], map: "database_restore_jobs_actor_idempotency_key")
+  @@unique([permitId, id, target, sourceSha256, expectedServicesSha, migrationManifestSha], map: "database_restore_jobs_exact_permit_binding_unique")
   @@index([status, createdAt], map: "database_restore_jobs_dispatch_idx")
   @@map("database_restore_jobs")
+  @@schema("operations")
+}
+
+model DatabaseRestorePermit {
+  id                   String                      @id @default(uuid()) @db.Uuid
+  jobId                String                      @unique(map: "database_restore_permits_job_id_unique") @map("job_id") @db.Uuid
+  target               String
+  sourceSha256         String                      @map("source_sha256")
+  expectedServicesSha  String                      @map("expected_services_sha")
+  migrationManifestSha String                      @map("migration_manifest_sha")
+  status               DatabaseRestorePermitStatus @default(PENDING_APPROVAL)
+  requestedById        String                      @map("requested_by_id")
+  approvedById         String?                     @map("approved_by_id")
+  approvedAt           DateTime?                   @map("approved_at")
+  expiresAt            DateTime                    @map("expires_at")
+  consumedAt           DateTime?                   @map("consumed_at")
+  closedAt             DateTime?                   @map("closed_at")
+  closeReason          String?                     @map("close_reason")
+  createdAt            DateTime                    @default(now()) @map("created_at")
+  updatedAt            DateTime                    @updatedAt @map("updated_at")
+  restoreJob           DatabaseRestoreJob?
+  releaseAuthorization DatabaseRestoreReleaseAuthorization?
+
+  @@unique([id, jobId, target, sourceSha256, expectedServicesSha, migrationManifestSha], map: "database_restore_permits_exact_binding_unique")
+  @@index([status, expiresAt], map: "database_restore_permits_status_expiry_idx")
+  @@map("database_restore_permits")
+  @@schema("operations")
+}
+
+model DatabaseRestoreTerminalReceipt {
+  id                   String                   @id @default(uuid()) @db.Uuid
+  jobId                String                   @unique(map: "database_restore_terminal_receipts_job_id_unique") @map("job_id") @db.Uuid
+  permitId             String                   @map("permit_id") @db.Uuid
+  permitRequestedById  String                   @map("permit_requested_by_id")
+  permitApprovedById   String                   @map("permit_approved_by_id")
+  permitCreatedAt      DateTime                 @map("permit_created_at")
+  permitApprovedAt     DateTime                 @map("permit_approved_at")
+  permitExpiresAt      DateTime                 @map("permit_expires_at")
+  permitConsumedAt     DateTime                 @map("permit_consumed_at")
+  target               String
+  terminalStatus       DatabaseRestoreJobStatus @map("terminal_status")
+  phase                DatabaseRestoreJobPhase?
+  sourceSha256         String                   @map("source_sha256")
+  safetyBackupSha256   String?                  @map("safety_backup_sha256")
+  expectedServicesSha  String                   @map("expected_services_sha")
+  migrationManifestSha String                   @map("migration_manifest_sha")
+  resultSha256         String?                  @map("result_sha256")
+  errorSha256          String?                  @map("error_sha256")
+  payloadSha256        String                   @map("payload_sha256")
+  signatureHmacSha256  String                   @map("signature_hmac_sha256")
+  signatureKeyId       String                   @map("signature_key_id")
+  writerFenceRoles     Json?                    @map("writer_fence_roles")
+  writerFenceRequestedAt DateTime?              @map("writer_fence_requested_at")
+  writerFenceAppliedAt DateTime?                @map("writer_fence_applied_at")
+  writerFenceReleasedAt DateTime?               @map("writer_fence_released_at")
+  writerFenceEvidenceSha256 String?              @map("writer_fence_evidence_sha256")
+  writerFenceReleaseEvidenceSha256 String?       @map("writer_fence_release_evidence_sha256")
+  releaseAuthorizationPayloadSha256 String?      @map("release_authorization_payload_sha256")
+  completedAt          DateTime                 @map("completed_at")
+  createdAt            DateTime                 @default(now()) @map("created_at")
+  restoreJob           DatabaseRestoreJob       @relation(fields: [jobId], references: [id], onDelete: Restrict, onUpdate: Restrict, map: "database_restore_terminal_receipts_job_fkey")
+
+  @@map("database_restore_terminal_receipts")
+  @@schema("operations")
+}
+
+model DatabaseRestoreRecoveryAction {
+  id                String                              @id @default(uuid()) @db.Uuid
+  jobId             String                              @map("job_id") @db.Uuid
+  action            DatabaseRestoreRecoveryActionType
+  status            DatabaseRestoreRecoveryActionStatus @default(PENDING_APPROVAL)
+  phase             DatabaseRestoreRecoveryActionPhase?
+  eventId           String?                             @unique(map: "database_restore_recovery_actions_event_id_unique") @map("event_id") @db.Uuid
+  receiptPayloadSha String                              @map("receipt_payload_sha")
+  requestedById     String                              @map("requested_by_id")
+  approvedById      String?                             @map("approved_by_id")
+  approvedAt        DateTime?                           @map("approved_at")
+  expiresAt         DateTime                            @map("expires_at")
+  leaseOwner        String?                             @map("lease_owner")
+  leaseToken        String?                             @map("lease_token") @db.Uuid
+  leaseExpiresAt    DateTime?                           @map("lease_expires_at")
+  attempts          Int                                 @default(0)
+  artifactSha256    String?                             @map("artifact_sha256")
+  writerFenceRoles  Json?                               @map("writer_fence_roles")
+  writerFenceRequestedAt DateTime?                      @map("writer_fence_requested_at")
+  writerFenceAppliedAt DateTime?                        @map("writer_fence_applied_at")
+  writerFenceReleasedAt DateTime?                       @map("writer_fence_released_at")
+  writerFenceEvidenceSha256 String?                     @map("writer_fence_evidence_sha256")
+  writerFenceReleaseEvidenceSha256 String?              @map("writer_fence_release_evidence_sha256")
+  result            Json?
+  lastError         String?                             @map("last_error") @db.Text
+  startedAt         DateTime?                           @map("started_at")
+  finishedAt        DateTime?                           @map("finished_at")
+  createdAt         DateTime                            @default(now()) @map("created_at")
+  updatedAt         DateTime                            @updatedAt @map("updated_at")
+  restoreJob        DatabaseRestoreJob                  @relation(fields: [jobId], references: [id], onDelete: Restrict, onUpdate: Restrict, map: "database_restore_recovery_actions_job_fkey")
+  resolutionReceipt DatabaseRestoreRecoveryReceipt?
+  releaseAuthorization DatabaseRestoreReleaseAuthorization?
+
+  @@index([jobId, status], map: "database_restore_recovery_actions_job_status_idx")
+  @@index([status, expiresAt], map: "database_restore_recovery_actions_status_expiry_idx")
+  @@map("database_restore_recovery_actions")
+  @@schema("operations")
+}
+
+model DatabaseRestoreExecutionLease {
+  id             String                                @id @default("singleton")
+  operationType  DatabaseRestoreExecutionOperationType? @map("operation_type")
+  operationId    String?                               @map("operation_id") @db.Uuid
+  leaseOwner     String?                               @map("lease_owner")
+  leaseToken     String?                               @map("lease_token") @db.Uuid
+  leaseExpiresAt DateTime?                             @map("lease_expires_at")
+  updatedAt      DateTime                              @updatedAt @map("updated_at")
+
+  @@map("database_restore_execution_lease")
+  @@schema("operations")
+}
+
+model DatabaseRestoreReleaseAuthorization {
+  id                           String                                @id @default(uuid()) @db.Uuid
+  operationType                DatabaseRestoreExecutionOperationType @map("operation_type")
+  operationId                  String                                @map("operation_id") @db.Uuid
+  jobId                        String                                @map("job_id") @db.Uuid
+  actionId                     String?                               @unique(map: "database_restore_release_authorizations_action_id_unique") @map("action_id") @db.Uuid
+  permitId                     String?                               @unique(map: "database_restore_release_authorizations_permit_id_unique") @map("permit_id") @db.Uuid
+  eventId                      String                                @map("event_id") @db.Uuid
+  target                       String
+  recoveryAction               DatabaseRestoreRecoveryActionType?    @map("recovery_action")
+  initialReceiptPayloadSha256  String?                               @map("initial_receipt_payload_sha256")
+  sourceSha256                 String                                @map("source_sha256")
+  artifactSha256               String?                               @map("artifact_sha256")
+  expectedServicesSha          String                                @map("expected_services_sha")
+  migrationManifestSha         String                                @map("migration_manifest_sha")
+  requestedById                String                                @map("requested_by_id")
+  approvedById                 String                                @map("approved_by_id")
+  approvedAt                   DateTime                              @map("approved_at")
+  approvalEvidenceSha256       String                                @map("approval_evidence_sha256")
+  writerFenceRoles             Json                                  @map("writer_fence_roles")
+  writerFenceAppliedAt         DateTime                              @map("writer_fence_applied_at")
+  writerFenceEvidenceSha256    String                                @map("writer_fence_evidence_sha256")
+  verifiedAt                   DateTime                              @map("verified_at")
+  migrationLedgerSha256        String                                @map("migration_ledger_sha256")
+  aclEvidenceSha256            String                                @map("acl_evidence_sha256")
+  verifiedWriterFenceSha256    String                                @map("verified_writer_fence_sha256")
+  payloadSha256                String                                @map("payload_sha256")
+  signatureHmacSha256          String                                @map("signature_hmac_sha256")
+  signatureKeyId               String                                @map("signature_key_id")
+  authorizedAt                 DateTime                              @map("authorized_at")
+  createdAt                    DateTime                              @default(now()) @map("created_at")
+  restoreJob                   DatabaseRestoreJob                    @relation(fields: [jobId], references: [id], onDelete: Restrict, onUpdate: Restrict, map: "database_restore_release_authorizations_job_fkey")
+  recoveryActionRecord         DatabaseRestoreRecoveryAction?        @relation(fields: [actionId], references: [id], onDelete: Restrict, onUpdate: Restrict, map: "database_restore_release_authorizations_action_fkey")
+  permit                       DatabaseRestorePermit?                 @relation(fields: [permitId], references: [id], onDelete: Restrict, onUpdate: Restrict, map: "database_restore_release_authorizations_permit_fkey")
+
+  @@unique([operationType, operationId], map: "database_restore_release_authorizations_operation_unique")
+  @@map("database_restore_release_authorizations")
+  @@schema("operations")
+}
+
+model DatabaseRestoreRecoveryReceipt {
+  id                    String                            @id @default(uuid()) @db.Uuid
+  jobId                 String                            @unique(map: "database_restore_recovery_receipts_job_id_unique") @map("job_id") @db.Uuid
+  actionId              String                            @unique(map: "database_restore_recovery_receipts_action_id_unique") @map("action_id") @db.Uuid
+  target                String
+  action                DatabaseRestoreRecoveryActionType
+  initialReceiptPayloadSha String                         @map("initial_receipt_payload_sha")
+  artifactSha256        String?                           @map("artifact_sha256")
+  expectedServicesSha   String                            @map("expected_services_sha")
+  migrationManifestSha  String                            @map("migration_manifest_sha")
+  writerFenceRoles      Json                              @map("writer_fence_roles")
+  writerFenceAppliedAt  DateTime                          @map("writer_fence_applied_at")
+  writerFenceReleasedAt DateTime                          @map("writer_fence_released_at")
+  writerFenceEvidenceSha256 String                        @map("writer_fence_evidence_sha256")
+  writerFenceReleaseEvidenceSha256 String                 @map("writer_fence_release_evidence_sha256")
+  releaseAuthorizationPayloadSha256 String                @map("release_authorization_payload_sha256")
+  resultSha256          String                            @map("result_sha256")
+  payloadSha256         String                            @map("payload_sha256")
+  signatureHmacSha256   String                            @map("signature_hmac_sha256")
+  signatureKeyId        String                            @map("signature_key_id")
+  resolvedAt            DateTime                          @map("resolved_at")
+  createdAt             DateTime                          @default(now()) @map("created_at")
+  restoreJob            DatabaseRestoreJob                @relation(fields: [jobId], references: [id], onDelete: Restrict, onUpdate: Restrict, map: "database_restore_recovery_receipts_job_fkey")
+  recoveryAction        DatabaseRestoreRecoveryAction     @relation(fields: [actionId], references: [id], onDelete: Restrict, onUpdate: Restrict, map: "database_restore_recovery_receipts_action_fkey")
+
+  @@map("database_restore_recovery_receipts")
   @@schema("operations")
 }
 
@@ -400,9 +601,62 @@ enum DatabaseRestoreJobStatus {
 
 enum DatabaseRestoreJobPhase {
   PREPARING
+  FENCING
+  FENCED
   SAFETY_READY
   MUTATING
   VERIFIED
+  UNFENCING
+  UNFENCED
+
+  @@schema("operations")
+}
+
+enum DatabaseRestorePermitStatus {
+  PENDING_APPROVAL
+  APPROVED
+  CONSUMED
+  CLOSED
+
+  @@schema("operations")
+}
+
+enum DatabaseRestoreRecoveryActionType {
+  VERIFY_AS_IS
+  ROLL_BACK_SAFETY
+  ROLL_FORWARD_SOURCE
+
+  @@schema("operations")
+}
+
+enum DatabaseRestoreRecoveryActionStatus {
+  PENDING_APPROVAL
+  APPROVED
+  PROCESSING
+  RESOLVED
+  BLOCKED
+  EXPIRED
+
+  @@schema("operations")
+}
+
+enum DatabaseRestoreRecoveryActionPhase {
+  PREPARING
+  FENCING
+  FENCED
+  MUTATING
+  VERIFYING
+  VERIFIED
+  UNFENCING
+  RESOLVED
+
+  @@schema("operations")
+}
+
+enum DatabaseRestoreExecutionOperationType {
+  RESTORE
+  RECOVERY
+  RECONCILIATION
 
   @@schema("operations")
 }

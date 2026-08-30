@@ -20,7 +20,7 @@ describe('WidgetsAiSessionTokenService', () => {
 	const binding = {
 		consentReceiptId: '11111111-1111-4111-8111-111111111111',
 		acceptanceId: '22222222-2222-4222-8222-222222222222',
-		documentVersion: 'ai-consultant-consent-v1',
+		documentVersion: 'ai-consultant-consent-v2',
 		documentHash: 'a'.repeat(64),
 		requestHostname: 'shop.example.test'
 	};
