@@ -80,6 +80,8 @@ try {
 		maxBatches: 10
 	});
 	assert.deepEqual(first, {
+		consentPendingDeleted: 0,
+		consentVerifiedDeleted: 0,
 		callbackOtpChallengesDeleted: 1,
 		callbackOtpChallengesRedacted: 1,
 		callbackOtpRateBucketsDeleted: 0,
@@ -110,6 +112,8 @@ try {
 		maxBatches: 10
 	});
 	assert.deepEqual(second, {
+		consentPendingDeleted: 0,
+		consentVerifiedDeleted: 0,
 		callbackOtpChallengesDeleted: 0,
 		callbackOtpChallengesRedacted: 0,
 		callbackOtpRateBucketsDeleted: 0,

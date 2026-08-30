@@ -262,6 +262,14 @@ function browserPage(browserCase) {
 	  var callbackMockLeadCount = 0;
 	  var callbackRateLimitOnce = false;
 	  var callbackEvents = [];
+	  var aiConsentConfig = null;
+	  var aiConsentToken = '';
+	  var aiSessionConsentTokenMatched = false;
+	  var aiSessionConsentTokenMatchCount = 0;
+	  var aiRejectNextMessage = false;
+	  var turnstileRenderCount = 0;
+	  var turnstileExecuteCount = 0;
+	  var turnstileRemoveCount = 0;
 
 	  if (testCase.type === 'callback') {
 		['ready', 'open', 'close'].forEach(function (name) {
@@ -400,6 +408,41 @@ function browserPage(browserCase) {
 		  })).then(complete, fail);
 		}
 
+		if (testCase.type === 'ai-consultant' && aiRejectNextMessage && pathname.endsWith('/messages')) {
+		  aiRejectNextMessage = false;
+		  return Promise.resolve(callbackJsonResponse(401, {
+			message: 'Session expired for browser renewal contract'
+		  })).then(complete, fail);
+		}
+
+		if (testCase.type === 'ai-consultant' && pathname.endsWith('/config')) {
+		  return nativeFetch(input, options).then(function (response) {
+			return response.clone().json().then(function (config) {
+			  aiConsentConfig = config && config.consent;
+			  return response;
+			});
+		  }).then(complete, fail);
+		}
+
+		if (testCase.type === 'ai-consultant' && pathname.endsWith('/consents')) {
+		  return nativeFetch(input, options).then(function (response) {
+			return response.clone().json().then(function (payload) {
+			  aiConsentToken = payload && typeof payload.consentToken === 'string' ? payload.consentToken : '';
+			  return response;
+			}, function () { return response; });
+		  }).then(complete, fail);
+		}
+
+		if (testCase.type === 'ai-consultant' && pathname.endsWith('/session')) {
+		  try {
+			var aiSessionPayload = JSON.parse(body || '{}');
+			aiSessionConsentTokenMatched = Boolean(aiConsentToken) && aiSessionPayload.consentToken === aiConsentToken;
+			if (aiSessionConsentTokenMatched) aiSessionConsentTokenMatchCount += 1;
+		  } catch (error) {
+			aiSessionConsentTokenMatched = false;
+		  }
+		}
+
 		return nativeFetch(input, options).then(complete, fail);
       };
 
@@ -422,16 +465,24 @@ function browserPage(browserCase) {
         var turnstileOptions = null;
         window.turnstile = {
           render: function (_container, options) {
+			var completedConsent = requests.find(function (request) {
+			  return request.method === 'POST' && new URL(request.url).pathname.endsWith('/consents') && request.status >= 200 && request.status < 300;
+			});
+			if (!completedConsent) throw new Error('Turnstile rendered before consent was accepted');
+			turnstileRenderCount += 1;
             turnstileOptions = options;
             return 'browser-turnstile-widget';
           },
           reset: function () {},
           execute: function () {
+			turnstileExecuteCount += 1;
             setTimeout(function () {
-              turnstileOptions.callback('turnstile-browser-' + testCase.publicKey);
+			  turnstileOptions.callback('turnstile-browser-' + testCase.publicKey + '-' + turnstileExecuteCount);
             }, 0);
           },
-          remove: function () {}
+          remove: function () {
+			turnstileRemoveCount += 1;
+		  }
         };
       } else if (testCase.type === 'calculator') {
         window.wincalculatorAutoOpen = true;
@@ -543,6 +594,79 @@ function browserPage(browserCase) {
 			) {
 				throw new Error('AI consultant strict CSP style contract drifted');
 			}
+			var consentPanel = await waitFor(function () {
+				return shadow.querySelector('.waic-consent');
+			}, 'consultant consent panel');
+			var consentCheckbox = consentPanel.querySelector(
+				'.waic-consent-checkbox'
+			);
+			var consentButton = consentPanel.querySelector(
+				'.waic-consent-submit'
+			);
+			var consentStatement = consentPanel.querySelector(
+				'.waic-consent-copy span'
+			);
+			var consentLink = consentPanel.querySelector('.waic-consent-link');
+			var consentPolicyUrl = aiConsentConfig
+				? new URL(aiConsentConfig.privacyUrl)
+				: null;
+			if (
+				!aiConsentConfig ||
+				!consentCheckbox ||
+				consentCheckbox.required !== true ||
+				consentCheckbox.getAttribute('aria-required') !== 'true' ||
+				!consentButton ||
+				consentButton.disabled !== true ||
+				consentButton.textContent !== 'Согласен, продолжить' ||
+				!consentStatement ||
+				consentStatement.textContent !== aiConsentConfig.statementText ||
+				!consentLink ||
+				!consentPolicyUrl ||
+				(consentPolicyUrl.protocol !== 'http:' &&
+					consentPolicyUrl.protocol !== 'https:') ||
+				consentPolicyUrl.username ||
+				consentPolicyUrl.password ||
+				consentLink.href !== consentPolicyUrl.href ||
+				shadow.querySelector('.waic-form').hidden !== true ||
+				shadow.querySelector('.waic-input').disabled !== true ||
+				shadow.querySelector('.waic-turnstile').hidden !== true ||
+				turnstileRenderCount !== 0 ||
+				turnstileExecuteCount !== 0 ||
+				document.querySelector('[data-win-ai-turnstile]') ||
+				observedRequest('/consents', 'POST') ||
+				observedRequest('/session', 'POST') ||
+				observedRequest('/messages', 'POST')
+			) {
+				throw new Error(
+					'AI consultant consent gate or pre-acceptance network boundary drifted'
+				);
+			}
+			click(consentCheckbox, 'consultant consent checkbox');
+			if (consentButton.disabled) {
+				throw new Error('AI consultant consent action stayed disabled');
+			}
+			click(consentButton, 'consultant consent action');
+			var consentRequest = await waitFor(function () {
+				var request = observedRequest('/consents', 'POST');
+				return request && request.status === 201 ? request : null;
+			}, 'consultant consent acceptance');
+			await waitFor(function () {
+				return shadow.querySelector('.waic-form').hidden === false;
+			}, 'consultant question flow');
+			if (
+				consentPanel.hidden !== true ||
+				shadow.querySelector('.waic-input').disabled !== false ||
+				shadow.querySelector('.waic-turnstile').hidden !== false ||
+				turnstileRenderCount !== 0 ||
+				turnstileExecuteCount !== 0 ||
+				observedRequest('/session', 'POST') ||
+				observedRequest('/messages', 'POST') ||
+				consentRequest.sequence <= observedRequest('/config', 'GET').sequence
+			) {
+				throw new Error(
+					'AI consultant unlocked the question flow out of order'
+				);
+			}
 			var privacyLink = await waitFor(function () {
 				return shadow.querySelector('.waic-privacy a');
 			}, 'consultant privacy policy');
@@ -553,7 +677,7 @@ function browserPage(browserCase) {
 				!shadow.querySelector('.waic-privacy').textContent.includes(
 					'обрабатываются Cloudflare Workers AI'
 				) ||
-				!/^https?:\/\//.test(privacyLink.getAttribute('href') || '')
+				privacyLink.href !== consentPolicyUrl.href
 			) {
 				throw new Error('AI consultant privacy notice drifted');
 			}
@@ -573,6 +697,86 @@ function browserPage(browserCase) {
         }
         throw new Error('Unsupported browser case ' + testCase.type);
       }
+
+	  async function exerciseAiConsentRenewal(shadow) {
+		var question = 'Нужно ли подтвердить согласие повторно?';
+		await waitFor(function () {
+		  var input = shadow.querySelector('.waic-input');
+		  return input && !input.disabled ? input : null;
+		}, 'consultant first response completion');
+		var firstConsent = observedRequest('/consents', 'POST');
+		var firstSession = observedRequest('/session', 'POST');
+		var firstConsentPayload = JSON.parse(firstConsent.body || '{}');
+		var firstSessionPayload = JSON.parse(firstSession.body || '{}');
+		var renewalStart = requests.length;
+		aiRejectNextMessage = true;
+		fill(shadow.querySelector('.waic-input'), question);
+		click(shadow.querySelector('.waic-send'), 'consultant expired-session send');
+		var unauthorizedMessage = await waitFor(function () {
+		  return observedRequestAfter(renewalStart, '/messages', 'POST', 401);
+		}, 'consultant expired session response');
+		var renewedConsentPanel = await waitFor(function () {
+		  var panel = shadow.querySelector('.waic-consent');
+		  var input = shadow.querySelector('.waic-input');
+		  return panel && !panel.hidden && input && input.value === question ? panel : null;
+		}, 'consultant renewed consent gate');
+		var requestsAfterUnauthorized = requests.slice(unauthorizedMessage.sequence + 1);
+		if (
+		  shadow.querySelector('.waic-form').hidden !== true ||
+		  shadow.querySelector('.waic-input').disabled !== true ||
+		  !renewedConsentPanel.querySelector('.waic-consent-checkbox') ||
+		  renewedConsentPanel.querySelector('.waic-consent-checkbox').checked ||
+		  !renewedConsentPanel.querySelector('.waic-consent-submit').disabled ||
+		  !renewedConsentPanel.querySelector('.waic-consent-error').textContent.includes('Срок сессии') ||
+		  turnstileRemoveCount !== 1 ||
+		  turnstileRenderCount !== 1 ||
+		  turnstileExecuteCount !== 1 ||
+		  requestsAfterUnauthorized.some(function (request) {
+			var pathname = new URL(request.url).pathname;
+			return request.method === 'POST' && (pathname.endsWith('/consents') || pathname.endsWith('/session'));
+		  })
+		) {
+		  throw new Error('AI consultant did not fail closed to a fresh consent gate after 401');
+		}
+		var secondConsentStart = requests.length;
+		click(renewedConsentPanel.querySelector('.waic-consent-checkbox'), 'renewed consultant consent checkbox');
+		click(renewedConsentPanel.querySelector('.waic-consent-submit'), 'renewed consultant consent action');
+		var secondConsent = await waitFor(function () {
+		  return observedRequestAfter(secondConsentStart, '/consents', 'POST', 201);
+		}, 'renewed consultant consent acceptance');
+		await waitFor(function () {
+		  return shadow.querySelector('.waic-form').hidden === false;
+		}, 'renewed consultant question flow');
+		var secondConsentPayload = JSON.parse(secondConsent.body || '{}');
+		if (
+		  secondConsentPayload.acceptanceId === firstConsentPayload.acceptanceId ||
+		  secondConsentPayload.sessionId === firstConsentPayload.sessionId ||
+		  shadow.querySelector('.waic-input').value !== question
+		) {
+		  throw new Error('AI consultant reused consent or session identity after 401');
+		}
+		var secondSessionStart = requests.length;
+		click(shadow.querySelector('.waic-send'), 'renewed consultant send');
+		var secondSession = await waitFor(function () {
+		  return observedRequestAfter(secondSessionStart, '/session', 'POST', 200);
+		}, 'renewed consultant session');
+		var renewedMessage = await waitFor(function () {
+		  return observedRequestAfter(secondSessionStart, '/messages', 'POST', 200);
+		}, 'renewed consultant response');
+		var secondSessionPayload = JSON.parse(secondSession.body || '{}');
+		var renewedMessagePayload = JSON.parse(renewedMessage.body || '{}');
+		if (
+		  secondSessionPayload.sessionId !== secondConsentPayload.sessionId ||
+		  secondSessionPayload.sessionId === firstSessionPayload.sessionId ||
+		  renewedMessagePayload.sessionId !== secondSessionPayload.sessionId ||
+		  renewedMessagePayload.message !== question
+		) {
+		  throw new Error('AI consultant renewed session/message binding drifted');
+		}
+		await waitFor(function () {
+		  return turnstileRenderCount === 2 && turnstileExecuteCount === 2 && aiSessionConsentTokenMatchCount === 2;
+		}, 'renewed consultant Turnstile/session binding');
+	  }
 
       function observedRequest(suffix, method) {
         return requests.find(function (request) {
@@ -843,6 +1047,12 @@ function browserPage(browserCase) {
           return requiredTelemetrySequence();
         }, testCase.type + ' completion telemetry', 10000);
         var events = telemetry.map(function (request) { return request.event; });
+		if (testCase.type === 'ai-consultant') {
+		  if (turnstileRenderCount !== 1 || turnstileExecuteCount !== 1 || !aiSessionConsentTokenMatched || aiSessionConsentTokenMatchCount !== 1) {
+			throw new Error('AI consultant consent/Turnstile/session ordering drifted');
+		  }
+		  await exerciseAiConsentRenewal(shadow);
+		}
 		if (testCase.type === 'callback') {
 		  await exerciseCallbackOtpPaths();
 		}
@@ -852,7 +1062,19 @@ function browserPage(browserCase) {
         if (runtimeErrors.length) {
           throw new Error('Browser runtime errors: ' + runtimeErrors.join('; '));
         }
-        await report({ ok: true, type: testCase.type, requests: requests, events: events, telemetry: telemetry });
+		await report({
+		  ok: true,
+		  type: testCase.type,
+		  requests: requests,
+		  events: events,
+		  telemetry: telemetry,
+		  aiConsentConfig: aiConsentConfig,
+		  aiSessionConsentTokenMatched: aiSessionConsentTokenMatched,
+		  aiSessionConsentTokenMatchCount: aiSessionConsentTokenMatchCount,
+		  turnstileRenderCount: turnstileRenderCount,
+		  turnstileExecuteCount: turnstileExecuteCount,
+		  turnstileRemoveCount: turnstileRemoveCount
+		});
       }
 
       run().catch(function (error) {
@@ -985,24 +1207,41 @@ function assertBrowserResult(result, expectedType, expectedPublicKey) {
 			new URL(request.url).pathname.endsWith('/config')
 	);
 	if (expectedType === 'ai-consultant') {
-		const session = result.requests.find(request => {
-			const pathname = new URL(request.url).pathname;
-			return (
-				request.method === 'POST' &&
-				pathname.endsWith(`/ai-consultant/${expectedPublicKey}/session`)
-			);
-		});
-		const message = result.requests.find(request => {
-			const pathname = new URL(request.url).pathname;
-			return (
-				request.method === 'POST' &&
-				pathname.endsWith(`/ai-consultant/${expectedPublicKey}/messages`)
-			);
-		});
+		const aiRequests = suffix =>
+			result.requests.filter(request => {
+				const pathname = new URL(request.url).pathname;
+				return (
+					request.method === 'POST' &&
+					pathname.endsWith(
+						`/ai-consultant/${expectedPublicKey}/${suffix}`
+					)
+				);
+			});
+		const consents = aiRequests('consents');
+		const sessions = aiRequests('session');
+		const messages = aiRequests('messages');
+		const [consent, renewedConsent] = consents;
+		const [session, renewedSession] = sessions;
+		const [message, unauthorizedMessage, renewedMessage] = messages;
 		if (
+			consents.length !== 2 ||
+			sessions.length !== 2 ||
+			messages.length !== 3 ||
 			config?.status !== 200 ||
+			consent?.status !== 201 ||
 			session?.status !== 200 ||
-			message?.status !== 200
+			message?.status !== 200 ||
+			unauthorizedMessage?.status !== 401 ||
+			renewedConsent?.status !== 201 ||
+			renewedSession?.status !== 200 ||
+			renewedMessage?.status !== 200 ||
+			config.sequence >= consent.sequence ||
+			consent.sequence >= session.sequence ||
+			session.sequence >= message.sequence ||
+			message.sequence >= unauthorizedMessage.sequence ||
+			unauthorizedMessage.sequence >= renewedConsent.sequence ||
+			renewedConsent.sequence >= renewedSession.sequence ||
+			renewedSession.sequence >= renewedMessage.sequence
 		) {
 			throw new Error(
 				'Widgets ai-consultant browser HTTP contract drifted'
@@ -1019,24 +1258,72 @@ function assertBrowserResult(result, expectedType, expectedPublicKey) {
 				'Widgets ai-consultant sent a forbidden lead request'
 			);
 		}
+		let consentPayload;
 		let sessionPayload;
 		let messagePayload;
+		let renewedConsentPayload;
+		let renewedSessionPayload;
+		let unauthorizedMessagePayload;
+		let renewedMessagePayload;
 		try {
+			consentPayload = JSON.parse(consent.body || '{}');
 			sessionPayload = JSON.parse(session.body || '{}');
 			messagePayload = JSON.parse(message.body || '{}');
+			renewedConsentPayload = JSON.parse(renewedConsent.body || '{}');
+			renewedSessionPayload = JSON.parse(renewedSession.body || '{}');
+			unauthorizedMessagePayload = JSON.parse(
+				unauthorizedMessage.body || '{}'
+			);
+			renewedMessagePayload = JSON.parse(renewedMessage.body || '{}');
 		} catch {
 			throw new Error(
-				'Widgets ai-consultant session/message payload is not JSON'
+				'Widgets ai-consultant consent/session/message payload is not JSON'
 			);
+		}
+		let consentPrivacyUrl;
+		try {
+			consentPrivacyUrl = new URL(result.aiConsentConfig?.privacyUrl);
+		} catch {
+			consentPrivacyUrl = null;
 		}
 		const requestIdPattern =
 			/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 		if (
+			!requestIdPattern.test(consentPayload.acceptanceId) ||
+			consentPayload.accepted !== true ||
+			!/^[A-Za-z0-9_-]{16,128}$/.test(consentPayload.sessionId) ||
+			!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(
+				result.aiConsentConfig?.documentVersion || ''
+			) ||
+			!/^[a-f0-9]{64}$/.test(result.aiConsentConfig?.documentHash || '') ||
+			typeof result.aiConsentConfig?.statementText !== 'string' ||
+			!result.aiConsentConfig.statementText ||
+			!consentPrivacyUrl ||
+			!['http:', 'https:'].includes(consentPrivacyUrl.protocol) ||
+			consentPrivacyUrl.username ||
+			consentPrivacyUrl.password ||
+			consentPayload.documentVersion !==
+				result.aiConsentConfig.documentVersion ||
+			consentPayload.documentHash !==
+				result.aiConsentConfig.documentHash ||
+			Object.keys(consentPayload).sort().join(',') !==
+				'acceptanceId,accepted,documentHash,documentVersion,sessionId' ||
 			!/^[A-Za-z0-9_-]{16,128}$/.test(sessionPayload.sessionId) ||
+			sessionPayload.sessionId !== consentPayload.sessionId ||
 			sessionPayload.turnstileToken !==
-				`turnstile-browser-${expectedPublicKey}` ||
+				`turnstile-browser-${expectedPublicKey}-1` ||
+			typeof sessionPayload.consentToken !== 'string' ||
+			!/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(
+				sessionPayload.consentToken
+			) ||
+			sessionPayload.consentToken.length > 3072 ||
+			result.aiSessionConsentTokenMatched !== true ||
+			result.aiSessionConsentTokenMatchCount !== 2 ||
+			result.turnstileRenderCount !== 2 ||
+			result.turnstileExecuteCount !== 2 ||
+			result.turnstileRemoveCount !== 1 ||
 			Object.keys(sessionPayload).sort().join(',') !==
-				'sessionId,turnstileToken' ||
+				'consentToken,sessionId,turnstileToken' ||
 			!requestIdPattern.test(messagePayload.requestId) ||
 			!/^[A-Za-z0-9_-]{16,128}$/.test(messagePayload.sessionId) ||
 			messagePayload.sessionId !== sessionPayload.sessionId ||
@@ -1046,6 +1333,41 @@ function assertBrowserResult(result, expectedType, expectedPublicKey) {
 			!Array.isArray(messagePayload.history) ||
 			messagePayload.history.length !== 0 ||
 			Object.keys(messagePayload).sort().join(',') !==
+				'history,message,requestId,sessionId,sessionToken' ||
+			!requestIdPattern.test(renewedConsentPayload.acceptanceId) ||
+			renewedConsentPayload.acceptanceId === consentPayload.acceptanceId ||
+			renewedConsentPayload.accepted !== true ||
+			renewedConsentPayload.sessionId === consentPayload.sessionId ||
+			renewedConsentPayload.documentVersion !==
+				consentPayload.documentVersion ||
+			renewedConsentPayload.documentHash !== consentPayload.documentHash ||
+			Object.keys(renewedConsentPayload).sort().join(',') !==
+				'acceptanceId,accepted,documentHash,documentVersion,sessionId' ||
+			renewedSessionPayload.sessionId !==
+				renewedConsentPayload.sessionId ||
+			renewedSessionPayload.sessionId === sessionPayload.sessionId ||
+			renewedSessionPayload.turnstileToken !==
+				`turnstile-browser-${expectedPublicKey}-2` ||
+			!/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(
+				renewedSessionPayload.consentToken
+			) ||
+			renewedSessionPayload.consentToken === sessionPayload.consentToken ||
+			Object.keys(renewedSessionPayload).sort().join(',') !==
+				'consentToken,sessionId,turnstileToken' ||
+			!requestIdPattern.test(unauthorizedMessagePayload.requestId) ||
+			unauthorizedMessagePayload.sessionId !== sessionPayload.sessionId ||
+			unauthorizedMessagePayload.message !==
+				'Нужно ли подтвердить согласие повторно?' ||
+			!requestIdPattern.test(renewedMessagePayload.requestId) ||
+			renewedMessagePayload.requestId ===
+				unauthorizedMessagePayload.requestId ||
+			renewedMessagePayload.sessionId !==
+				renewedSessionPayload.sessionId ||
+			renewedMessagePayload.message !==
+				unauthorizedMessagePayload.message ||
+			!Array.isArray(renewedMessagePayload.history) ||
+			renewedMessagePayload.history.length !== 0 ||
+			Object.keys(renewedMessagePayload).sort().join(',') !==
 				'history,message,requestId,sessionId,sessionToken'
 		) {
 			throw new Error('Widgets ai-consultant message payload drifted');

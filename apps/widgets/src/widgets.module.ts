@@ -57,6 +57,8 @@ import { WidgetsRetentionService } from './retention/widgets-retention.service';
 import { WidgetsRuntimeModule } from './runtime/widgets-runtime.module';
 import { WidgetsTelemetryService } from './telemetry/widgets-telemetry.service';
 import { WidgetsAiConsultantService } from './ai/widgets-ai-consultant.service';
+import { WidgetsAiConsentRepository } from './ai/widgets-ai-consent.repository';
+import { WidgetsAiConsentService } from './ai/widgets-ai-consent.service';
 import { WidgetsCloudflareAiProvider } from './ai/widgets-cloudflare-ai.provider';
 import { WIDGETS_AI_PROVIDER } from './ai/widgets-ai-provider';
 import { WidgetsAiSessionTokenService } from './ai/widgets-ai-session-token.service';
@@ -100,6 +102,8 @@ import {
 		WidgetsApiGuard,
 		WidgetsAuthGuard,
 		WidgetsAiConsultantService,
+		WidgetsAiConsentRepository,
+		WidgetsAiConsentService,
 		WidgetsAiSessionTokenService,
 		WidgetsCloudflareTurnstileService,
 		WidgetsCloudflareAiProvider,

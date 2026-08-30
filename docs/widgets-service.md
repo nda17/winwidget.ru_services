@@ -105,6 +105,7 @@ AI Consultant не создаёт заявку и не изменяет lead cou
 
 - slug и asset: `ai-consultant`, `ai-consultant.js`;
 - публичная конфигурация: `GET /api/v1/ai-consultant/:key/config`;
+- фиксация явного согласия: `POST /api/v1/ai-consultant/:key/consents`;
 - bootstrap защищённой сессии: `POST /api/v1/ai-consultant/:key/session`;
 - публичное сообщение: `POST /api/v1/ai-consultant/:key/messages`;
 - проверка сохранённого draft: `POST /api/v1/ai-consultants/:id/test-message`;
@@ -129,8 +130,18 @@ AI Consultant не создаёт заявку и не изменяет lead cou
   клиентской настройке независимо от введённого домена установки, а сохранённая
   ранее некорректная ссылка fail-closed выключает публичный config, создание
   сессии и каждое сообщение по уже выданному session token;
+- публичный config возвращает immutable consent contract: точный текст,
+  `documentVersion`, SHA-256 `documentHash` и проверенную ссылку владельца;
+- runtime требует отдельный checkbox и `POST /consents` до загрузки Turnstile;
+  одно согласие разрешает ровно один session bootstrap, а истечение или `401`
+  возвращает новый consent gate без переиспользования receipt;
+- PENDING receipt удаляется после 15-минутного proof window, VERIFIED receipt —
+  через 1095 дней от `acceptedAt`; receipt содержит exact документ, домены и
+  pseudonymous HMAC scopes, но не вопрос, историю, ответ, raw IP, raw session
+  ID, User-Agent или URL страницы;
 - runtime у поля ввода называет Cloudflare Workers AI, предупреждает не
-  указывать персональные данные и показывает ссылку на политику владельца;
+  указывать специальные категории, биометрические и избыточные персональные
+  данные и показывает ссылку на политику владельца;
 - конфигурация отклоняет PEM/private keys и распространённые token/password
   строки фиксированной ошибкой без вывода содержимого;
 - PDF/Word, RAG, отдельная база знаний, заявки и хранение transcript отсутствуют;
@@ -153,9 +164,13 @@ Cloudflare AI Gateway не сохраняет payload или metadata этих �
 verifier — 55-секундным browser deadline, а публичный Gateway route сохраняет
 60-секундный deadline.
 
-Публичный runtime получает одноразовый Turnstile token и обменивает его на
-короткоживущую подписанную сессию, привязанную к ключу виджета, IP и версии
-публикации. Free Turnstile widget всегда содержит `winwidget.ru`, максимум
+Публичный runtime сначала отправляет explicit consent с UUIDv4 idempotency key.
+Backend пересобирает текущий document hash, сохраняет immutable receipt и
+выдаёт 15-минутный подписанный consent proof. Только затем runtime загружает
+Turnstile, а backend атомарно переводит PENDING receipt в VERIFIED и выдаёт
+10-минутную подписанную session v2, привязанную к receipt, ключу виджета, IP,
+домену запроса и версии публикации. Старые session v1 не принимаются. Free
+Turnstile widget всегда содержит `winwidget.ru`, максимум
 восемь уникальных опубликованных клиентских доменов и один свободный
 transition-slot. Публикация fail-closed добавляет новый hostname, не удаляя
 старый live hostname до фиксации новой версии.

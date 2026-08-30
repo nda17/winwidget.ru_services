@@ -30,6 +30,7 @@ import {
 } from '../domain/widgets-domain.types';
 import type { IntrospectedWidgetsActor } from '../internal/widgets-identity.client';
 import {
+	AiConsultantConsentDto,
 	AiConsultantMessageDto,
 	AiConsultantPublicMessageDto,
 	AiConsultantSessionDto
@@ -51,6 +52,31 @@ export class WidgetsAiConsultantPublicController {
 		private readonly config: ConfigService
 	) {}
 
+	@Post('ai-consultant/:key/consents')
+	consent(
+		@Param('key') rawKey: string,
+		@Body() dto: AiConsultantConsentDto,
+		@Req() request: Request,
+		@Res({ passthrough: true }) response: Response
+	) {
+		response.setHeader('Access-Control-Allow-Origin', '*');
+		response.setHeader('Cache-Control', 'no-store');
+		const key = safePublicKey(rawKey);
+		const definition = getWidgetDefinition(WidgetType.AI_CONSULTANT);
+		return this.ai.publicConsent(
+			key,
+			dto,
+			getClientIp(request),
+			getRequestHostname(request),
+			isAiDirectPageRequest(
+				request,
+				definition.pagePath,
+				key,
+				this.config.get<string>('NODE_ENV')
+			)
+		);
+	}
+
 	@Post('ai-consultant/:key/session')
 	@HttpCode(200)
 	session(
@@ -67,6 +93,7 @@ export class WidgetsAiConsultantPublicController {
 			key,
 			dto.sessionId,
 			dto.turnstileToken,
+			dto.consentToken,
 			getClientIp(request),
 			getRequestHostname(request),
 			isAiDirectPageRequest(

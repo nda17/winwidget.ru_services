@@ -47,6 +47,11 @@ describe('DatabaseRestoreTargetRegistryService', () => {
 			}))
 		]);
 		expect(registry.all()).toHaveLength(DATABASE_RESTORE_TARGETS.length);
+		expect(registry.get('widgets').acl).toEqual({
+			profile: 'standard',
+			routines: ['enforce_ai_consent_receipt_immutability()'],
+			runtimeRoutines: []
+		});
 	});
 
 	it('builds the exact loopback target from admin user, port, and a secret file', async () => {

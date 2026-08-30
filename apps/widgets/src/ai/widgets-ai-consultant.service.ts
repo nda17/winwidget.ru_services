@@ -22,7 +22,6 @@ import {
 	getDraftConfig,
 	WidgetType
 } from '../domain/widgets-domain.types';
-import { isExactHostnameAllowed } from '../domain/widgets-domain.util';
 import { WidgetsQuotaService } from '../quota/widgets-quota.service';
 import {
 	WIDGETS_AI_PROVIDER,
@@ -36,6 +35,11 @@ import {
 	type WidgetsAiSessionTokenResult,
 	WidgetsAiSessionTokenService
 } from './widgets-ai-session-token.service';
+import {
+	type WidgetsAiConsentInput,
+	type WidgetsAiConsentResult,
+	WidgetsAiConsentService
+} from './widgets-ai-consent.service';
 import { WidgetsCloudflareTurnstileService } from './widgets-cloudflare-turnstile.service';
 
 export const AI_CONSULTANT_OUTCOMES = [
@@ -164,51 +168,67 @@ export class WidgetsAiConsultantService {
 		private readonly access: WidgetsAccessService,
 		private readonly quota: WidgetsQuotaService,
 		private readonly sessionTokens: WidgetsAiSessionTokenService,
+		private readonly consent: WidgetsAiConsentService,
 		private readonly turnstile: WidgetsCloudflareTurnstileService,
 		@Inject(WIDGETS_AI_PROVIDER)
 		private readonly provider: WidgetsAiProvider
 	) {}
 
+	publicConsent(
+		publicKey: string,
+		input: WidgetsAiConsentInput,
+		ip: string,
+		requestHostname: string | null,
+		directPageAccessAllowed: boolean
+	): Promise<WidgetsAiConsentResult> {
+		return this.consent.accept(
+			publicKey,
+			input,
+			ip,
+			requestHostname,
+			directPageAccessAllowed
+		);
+	}
+
 	async publicSession(
 		publicKey: string,
 		sessionId: string,
 		turnstileToken: string,
+		consentToken: string,
 		ip: string,
 		requestHostname: string | null,
 		directPageAccessAllowed: boolean
 	): Promise<WidgetsAiSessionTokenResult> {
 		this.cleanup();
 		this.consumeSessionBootstrapRateLimits(publicKey, ip, Date.now());
-		const widget = await this.requirePublicWidget(
+		const prepared = await this.consent.prepareSession(
 			publicKey,
+			sessionId,
+			consentToken,
+			ip,
 			requestHostname,
 			directPageAccessAllowed
 		);
-		const expectedHostname = directPageAccessAllowed
-			? requestHostname
-			: widget.installDomain;
-		if (!expectedHostname) {
-			throw new ForbiddenException('Домен установки виджета не совпадает');
-		}
-		if (!isAllowedAiPrivacyUrl(asJsonObject(widget.config).privacyUrl)) {
-			throw new ForbiddenException(
-				'Владелец сайта не настроил политику обработки данных AI-консультанта'
-			);
-		}
 		await this.turnstile.validate({
 			token: turnstileToken,
 			ip,
-			expectedHostname,
+			expectedHostname: prepared.expectedHostname,
 			publicKey
 		});
-		await this.quota.aiSnapshot(widget.userId);
+		await this.quota.aiSnapshot(prepared.widget.userId);
+		await this.consent.verifyPrepared(prepared);
 		return this.sessionTokens.issue({
 			publicKey,
 			sessionId,
-			ownerId: widget.userId,
-			widgetId: widget.id,
+			ownerId: prepared.widget.userId,
+			widgetId: prepared.widget.id,
 			ip,
-			publishedVersion: widget.publishedVersion
+			publishedVersion: prepared.widget.publishedVersion,
+			consentReceiptId: prepared.claims.consentReceiptId,
+			acceptanceId: prepared.claims.acceptanceId,
+			documentVersion: prepared.claims.documentVersion,
+			documentHash: prepared.claims.documentHash,
+			requestHostname: prepared.claims.requestHostname
 		});
 	}
 
@@ -282,7 +302,7 @@ export class WidgetsAiConsultantService {
 					'requestId уже использован для другого сообщения'
 				);
 			}
-			return existing.promise;
+			return context.resolveConfig().then(() => existing.promise);
 		}
 
 		const sessionKey = this.hash(
@@ -422,7 +442,7 @@ export class WidgetsAiConsultantService {
 		);
 		if (!widget) throw new NotFoundException('Виджет не найден');
 		this.assertPublicWidgetState(widget);
-		this.sessionTokens.assertWidget(claims, widget);
+		await this.consent.assertVerified(widget, claims);
 		const config = asJsonObject(
 			normalizeWidgetConfig(WidgetType.AI_CONSULTANT, widget.config)
 		);
@@ -433,26 +453,6 @@ export class WidgetsAiConsultantService {
 		}
 		await this.quota.aiSnapshot(widget.userId);
 		return this.aiConfig(config);
-	}
-
-	private async requirePublicWidget(
-		publicKey: string,
-		requestHostname: string | null,
-		directPageAccessAllowed: boolean
-	) {
-		const widget = await this.repository.findByPublicKey(
-			WidgetType.AI_CONSULTANT,
-			publicKey
-		);
-		if (!widget) throw new NotFoundException('Виджет не найден');
-		this.assertPublicWidgetState(widget);
-		if (
-			!directPageAccessAllowed &&
-			!isExactHostnameAllowed(widget.installDomain, requestHostname)
-		) {
-			throw new ForbiddenException('Домен установки виджета не совпадает');
-		}
-		return widget;
 	}
 
 	private assertPublicWidgetState(widget: {

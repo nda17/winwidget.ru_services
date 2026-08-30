@@ -28,6 +28,21 @@ const reportingTarget: DatabaseRestoreTargetConfiguration = {
 	}
 };
 
+const widgetsTarget: DatabaseRestoreTargetConfiguration = {
+	environmentPrefix: 'WIDGETS',
+	database: 'winwidget_widgets',
+	schema: 'widgets',
+	adminRole: 'winwidget_widgets_admin',
+	migrationRole: 'winwidget_widgets_migration',
+	runtimeRole: 'winwidget_widgets_runtime',
+	backupRole: 'winwidget_widgets_backup',
+	acl: {
+		profile: 'standard',
+		routines: ['enforce_ai_consent_receipt_immutability()'],
+		runtimeRoutines: []
+	}
+};
+
 const platformTarget: DatabaseRestoreTargetConfiguration = {
 	environmentPrefix: 'PLATFORM',
 	database: 'winwidget_platform',
@@ -150,6 +165,28 @@ describe('DatabaseRestoreAclService', () => {
 		);
 		expect(sql).toContain(
 			'Database restore global sequence default privileges drifted'
+		);
+	});
+
+	it('keeps the Widgets consent immutability trigger routine owner-only after restore', async () => {
+		const { process, service } = setup();
+		const widgetsConnection = {
+			...connection,
+			user: widgetsTarget.adminRole,
+			database: widgetsTarget.database
+		};
+
+		await service.reconcileAndVerify(widgetsConnection, widgetsTarget);
+
+		const sql = process.executeSql.mock.calls[0][1];
+		expect(sql).toContain(
+			"'widgets.enforce_ai_consent_receipt_immutability()'"
+		);
+		expect(sql).toContain(
+			'REVOKE ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA "widgets" FROM PUBLIC, "winwidget_widgets_runtime", "winwidget_widgets_backup";'
+		);
+		expect(sql).not.toContain(
+			'GRANT EXECUTE ON FUNCTION "widgets"."enforce_ai_consent_receipt_immutability"() TO "winwidget_widgets_runtime";'
 		);
 	});
 

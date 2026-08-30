@@ -1,5 +1,6 @@
 import {
 	ArrayMaxSize,
+	Equals,
 	IsArray,
 	IsBoolean,
 	IsDefined,
@@ -223,15 +224,43 @@ export class AiConsultantMessageDto {
 export class AiConsultantPublicMessageDto extends AiConsultantMessageDto {
 	@IsString()
 	@MinLength(80)
-	@MaxLength(2048)
+	@MaxLength(3072)
 	@Matches(/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/)
 	sessionToken: string;
+}
+
+export class AiConsultantConsentDto {
+	@IsUUID('4')
+	acceptanceId: string;
+
+	@IsString()
+	@Matches(/^[A-Za-z0-9_-]{16,128}$/)
+	sessionId: string;
+
+	@IsBoolean()
+	@Equals(true)
+	accepted: true;
+
+	@IsString()
+	@MaxLength(64)
+	@Matches(/^[a-z0-9][a-z0-9._-]{0,63}$/)
+	documentVersion: string;
+
+	@IsString()
+	@Matches(/^[a-f0-9]{64}$/)
+	documentHash: string;
 }
 
 export class AiConsultantSessionDto {
 	@IsString()
 	@Matches(/^[A-Za-z0-9_-]{16,128}$/)
 	sessionId: string;
+
+	@IsString()
+	@MinLength(80)
+	@MaxLength(3072)
+	@Matches(/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/)
+	consentToken: string;
 
 	@IsString()
 	@MinLength(1)

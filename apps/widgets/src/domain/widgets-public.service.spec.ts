@@ -21,6 +21,17 @@ const publicWidget = (type: WidgetType) => ({
 	}
 });
 
+const consentDocument = {
+	documentVersion: 'ai-consultant-consent-v1',
+	documentHash: 'a'.repeat(64),
+	statementText: 'Текст явного согласия',
+	privacyUrl: 'https://example.test/privacy'
+};
+
+const aiConsent = () => ({
+	publicDocument: jest.fn().mockReturnValue(consentDocument)
+});
+
 describe('WidgetsPublicService parity', () => {
 	it('returns 404 for a malformed canonical public key', () => {
 		expect(() => safePublicKey('invalid')).toThrow(NotFoundException);
@@ -75,7 +86,8 @@ describe('WidgetsPublicService parity', () => {
 					siteKey: () => 'turnstile-site-key',
 					action: () => 'ai-consultant-session'
 				} as never,
-				{} as never
+				{} as never,
+				aiConsent() as never
 			);
 
 			await expect(
@@ -91,7 +103,8 @@ describe('WidgetsPublicService parity', () => {
 					? {
 							isActive: true,
 							turnstileSiteKey: 'turnstile-site-key',
-							turnstileAction: 'ai-consultant-session'
+							turnstileAction: 'ai-consultant-session',
+							consent: consentDocument
 						}
 					: { isActive: expectedVisible }
 			);
@@ -156,7 +169,8 @@ describe('WidgetsPublicService parity', () => {
 					siteKey: () => 'turnstile-site-key',
 					action: () => 'ai-consultant-session'
 				} as never,
-				{} as never
+				{} as never,
+				aiConsent() as never
 			);
 
 			const result = await service.config(
@@ -181,6 +195,7 @@ describe('WidgetsPublicService parity', () => {
 		const service = new WidgetsPublicService(
 			repository as never,
 			quota as never,
+			{} as never,
 			{} as never,
 			{} as never,
 			{} as never,
@@ -244,7 +259,8 @@ describe('WidgetsPublicService parity', () => {
 			{} as never,
 			{} as never,
 			{} as never,
-			callbackOtp as never
+			callbackOtp as never,
+			aiConsent() as never
 		);
 
 		await expect(
@@ -342,7 +358,8 @@ describe('WidgetsPublicService parity', () => {
 			reporting as never,
 			new WidgetsTypeRegistryService(),
 			{} as never,
-			callbackOtp as never
+			callbackOtp as never,
+			aiConsent() as never
 		);
 		const challengeId = '11111111-1111-4111-8111-111111111111';
 
@@ -458,7 +475,8 @@ describe('WidgetsPublicService parity', () => {
 				{} as never,
 				new WidgetsTypeRegistryService(),
 				{} as never,
-				callbackOtp as never
+				callbackOtp as never,
+				aiConsent() as never
 			);
 
 			await expect(
@@ -550,7 +568,8 @@ describe('WidgetsPublicService parity', () => {
 			reporting as never,
 			new WidgetsTypeRegistryService(),
 			{} as never,
-			{} as never
+			{} as never,
+			aiConsent() as never
 		);
 
 		await service.submitLead(

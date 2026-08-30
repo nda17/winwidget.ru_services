@@ -374,7 +374,29 @@ async function exerciseAllWidgetTypes() {
 			!Object.hasOwn(directAiConfig, 'instructionsPrompt'),
 		'Direct-only AI consultant config drifted'
 	);
+	assertAiConsentConfig(directAiConfig.consent, directAiConfig.privacyUrl);
 	const directSessionId = randomUUID();
+	const directAcceptanceId = randomUUID();
+	const directAiConsent = await jsonRequest(
+		`/api/v1/ai-consultant/${created.aiConsultant.publicKey}/consents`,
+		{
+			method: 'POST',
+			expectedStatus: 201,
+			headers: directAiHeaders,
+			body: {
+				acceptanceId: directAcceptanceId,
+				sessionId: directSessionId,
+				accepted: true,
+				documentVersion: directAiConfig.consent.documentVersion,
+				documentHash: directAiConfig.consent.documentHash
+			}
+		}
+	);
+	assertAiConsentResponse(
+		directAiConsent,
+		directAcceptanceId,
+		'Direct-only AI consultant'
+	);
 	const directAiSession = await jsonRequest(
 		`/api/v1/ai-consultant/${created.aiConsultant.publicKey}/session`,
 		{
@@ -382,7 +404,8 @@ async function exerciseAllWidgetTypes() {
 			headers: directAiHeaders,
 			body: {
 				sessionId: directSessionId,
-				turnstileToken: `turnstile-direct-${created.aiConsultant.publicKey}`
+				turnstileToken: `turnstile-direct-${created.aiConsultant.publicKey}`,
+				consentToken: directAiConsent.consentToken
 			}
 		}
 	);
@@ -408,6 +431,7 @@ async function exerciseAllWidgetTypes() {
 		...externalAiDraft
 	};
 
+	let publishedAiConsentConfig = null;
 	for (const definition of CASES) {
 		let widget = created[definition.key];
 		widget = await publish(widget);
@@ -435,17 +459,17 @@ async function exerciseAllWidgetTypes() {
 			);
 		}
 		if (definition.key === 'aiConsultant') {
+			publishedAiConsentConfig = config.consent;
 			assert(
 				!Object.hasOwn(config, 'instructionsPrompt'),
 				'AI consultant public config exposed instructionsPrompt'
 			);
 			assert(
 				config.turnstileSiteKey === 'behavior-turnstile-site-key' &&
-					config.turnstileAction === 'ai-consultant-session' &&
-					typeof config.privacyUrl === 'string' &&
-					config.privacyUrl.startsWith('https://'),
+					config.turnstileAction === 'ai-consultant-session',
 				'AI consultant public Turnstile bootstrap config drifted'
 			);
+			assertAiConsentConfig(config.consent, config.privacyUrl);
 		}
 	}
 
@@ -532,6 +556,27 @@ async function exerciseAllWidgetTypes() {
 		message: 'Сколько стоит товар?',
 		history: []
 	};
+	const publicAiAcceptanceId = randomUUID();
+	const publicAiConsent = await jsonRequest(
+		`/api/v1/ai-consultant/${aiWidget.publicKey}/consents`,
+		{
+			method: 'POST',
+			expectedStatus: 201,
+			body: {
+				acceptanceId: publicAiAcceptanceId,
+				sessionId: publicAiRequest.sessionId,
+				accepted: true,
+				documentVersion: publishedAiConsentConfig.documentVersion,
+				documentHash: publishedAiConsentConfig.documentHash
+			},
+			publicRequest: true
+		}
+	);
+	assertAiConsentResponse(
+		publicAiConsent,
+		publicAiAcceptanceId,
+		'AI consultant public'
+	);
 	const forgedPreviewHeaders = {
 		origin: 'https://other.example.test',
 		referer: `https://winwidget.ru/page-ai-consultant/${aiWidget.publicKey}`
@@ -545,6 +590,28 @@ async function exerciseAllWidgetTypes() {
 			!Object.hasOwn(forgedConfig, 'turnstileSiteKey'),
 		'Forged platform Referer bypassed AI config hostname isolation'
 	);
+	const consentReceiptsBeforeForgedRequest =
+		await prisma.aiConsentReceipt.count();
+	await jsonRequest(
+		`/api/v1/ai-consultant/${aiWidget.publicKey}/consents`,
+		{
+			method: 'POST',
+			expectedStatus: 403,
+			headers: forgedPreviewHeaders,
+			body: {
+				acceptanceId: randomUUID(),
+				sessionId: publicAiRequest.sessionId,
+				accepted: true,
+				documentVersion: publishedAiConsentConfig.documentVersion,
+				documentHash: publishedAiConsentConfig.documentHash
+			}
+		}
+	);
+	assert(
+		(await prisma.aiConsentReceipt.count()) ===
+			consentReceiptsBeforeForgedRequest,
+		'Forged platform Referer persisted an AI consent receipt'
+	);
 	await jsonRequest(
 		`/api/v1/ai-consultant/${aiWidget.publicKey}/session`,
 		{
@@ -553,7 +620,8 @@ async function exerciseAllWidgetTypes() {
 			headers: forgedPreviewHeaders,
 			body: {
 				sessionId: publicAiRequest.sessionId,
-				turnstileToken: `forged-${aiWidget.publicKey}`
+				turnstileToken: `forged-${aiWidget.publicKey}`,
+				consentToken: publicAiConsent.consentToken
 			}
 		}
 	);
@@ -562,6 +630,7 @@ async function exerciseAllWidgetTypes() {
 		'Forged platform Referer reached Turnstile validation'
 	);
 	for (const path of [
+		`/api/v1/ai-consultant/${aiWidget.publicKey}/consents`,
 		`/api/v1/ai-consultant/${aiWidget.publicKey}/session`,
 		`/api/v1/ai-consultant/${aiWidget.publicKey}/messages`
 	]) {
@@ -592,7 +661,8 @@ async function exerciseAllWidgetTypes() {
 			method: 'POST',
 			body: {
 				sessionId: publicAiRequest.sessionId,
-				turnstileToken: `turnstile-${aiWidget.publicKey}`
+				turnstileToken: `turnstile-${aiWidget.publicKey}`,
+				consentToken: publicAiConsent.consentToken
 			},
 			publicRequest: true
 		}
@@ -1489,6 +1559,7 @@ async function assertCleanDatabase() {
 			['timers', prisma.countdownTimer.count()],
 			['stopOffers', prisma.stopOffer.count()],
 			['consultants', prisma.aiConsultant.count()],
+			['aiConsentReceipts', prisma.aiConsentReceipt.count()],
 			['calculators', prisma.calculator.count()],
 			['revisions', prisma.widgetConfigRevision.count()],
 			['runtimePresence', prisma.widgetRuntimePresence.count()],
@@ -1537,6 +1608,7 @@ async function assertCleanDatabase() {
 
 async function cleanupDatabase() {
 	await prisma.$transaction([
+		prisma.aiConsentReceipt.deleteMany(),
 		prisma.widgetConfigRevision.deleteMany(),
 		prisma.widgetRuntimeDailyStepMetric.deleteMany(),
 		prisma.widgetRuntimeDailyMetric.deleteMany(),
@@ -1723,16 +1795,12 @@ function createCloudflareServer() {
 			) {
 				const body = await readJson(request);
 				const rawToken = String(body.response || '');
-				const browserChallenge = rawToken.startsWith('turnstile-browser-');
-				const directChallenge = rawToken.startsWith('turnstile-direct-');
-				const publicKey = rawToken.replace(
-					browserChallenge
-						? /^turnstile-browser-/
-						: directChallenge
-							? /^turnstile-direct-/
-							: /^turnstile-/,
-					''
+				const challenge = rawToken.match(
+					/^turnstile-(browser-|direct-)?([a-f0-9]{12})(?:-[1-9][0-9]*)?$/
 				);
+				const browserChallenge = challenge?.[1] === 'browser-';
+				const directChallenge = challenge?.[1] === 'direct-';
+				const publicKey = challenge?.[2] || '';
 				if (
 					body.secret !== 'behavior-turnstile-secret-key' ||
 					usedTurnstileTokens.has(body.response) ||
@@ -2027,6 +2095,45 @@ function transparentPng() {
 
 function cuidLikeId() {
 	return `c${randomBytes(12).toString('hex')}`;
+}
+
+function assertAiConsentConfig(consent, privacyUrl) {
+	let parsedPrivacyUrl;
+	try {
+		parsedPrivacyUrl = new URL(consent?.privacyUrl);
+	} catch {
+		parsedPrivacyUrl = null;
+	}
+	assert(
+		consent &&
+			/^[a-z0-9][a-z0-9._-]{0,63}$/.test(consent.documentVersion) &&
+			/^[a-f0-9]{64}$/.test(consent.documentHash) &&
+			typeof consent.statementText === 'string' &&
+			consent.statementText.trim().length > 0 &&
+			parsedPrivacyUrl &&
+			['http:', 'https:'].includes(parsedPrivacyUrl.protocol) &&
+			!parsedPrivacyUrl.username &&
+			!parsedPrivacyUrl.password &&
+			consent.privacyUrl === privacyUrl,
+		'AI consultant public consent config drifted'
+	);
+}
+
+function assertAiConsentResponse(response, acceptanceId, context) {
+	const acceptedAt = Date.parse(response?.acceptedAt);
+	const expiresAt = Date.parse(response?.expiresAt);
+	assert(
+		response?.acceptanceId === acceptanceId &&
+			typeof response.consentToken === 'string' &&
+			/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(response.consentToken) &&
+			response.consentToken.length <= 3072 &&
+			Number.isFinite(acceptedAt) &&
+			Number.isFinite(expiresAt) &&
+			expiresAt - acceptedAt === 15 * 60 * 1000 &&
+			Object.keys(response).sort().join(',') ===
+				'acceptanceId,acceptedAt,consentToken,expiresAt',
+		`${context} consent response drifted`
+	);
 }
 
 function assert(condition, message) {

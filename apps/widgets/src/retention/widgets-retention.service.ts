@@ -18,6 +18,7 @@ const SHUTDOWN_TIMEOUT_MS = 20_000;
 const OUTBOX_RETENTION_MAX_DAYS = 365;
 const RECEIPT_RETENTION_MAX_DAYS = 730;
 const FAILURE_RETENTION_MAX_DAYS = 365;
+const AI_CONSENT_VERIFIED_RETENTION_DAYS = 1095;
 const CALLBACK_OTP_DESTINATION_TOMBSTONE = '0'.repeat(64);
 const CALLBACK_OTP_IP_TOMBSTONE = '1'.repeat(64);
 const CALLBACK_OTP_CODE_TOMBSTONE = '2'.repeat(64);
@@ -32,6 +33,8 @@ export interface WidgetsRetentionConfig {
 }
 
 export interface WidgetsRetentionResult {
+	consentPendingDeleted: number;
+	consentVerifiedDeleted: number;
 	callbackOtpChallengesDeleted: number;
 	callbackOtpChallengesRedacted: number;
 	callbackOtpRateBucketsDeleted: number;
@@ -45,6 +48,7 @@ export interface WidgetsRetentionResult {
 
 export interface WidgetsRetentionCleanupInput extends WidgetsRetentionConfig {
 	cleanupOutbox: boolean;
+	cleanupAiConsentState?: boolean;
 	cleanupOtpState?: boolean;
 	cleanupWorkerState: boolean;
 	now?: Date;
@@ -53,6 +57,8 @@ export interface WidgetsRetentionCleanupInput extends WidgetsRetentionConfig {
 }
 
 const emptyResult = (): WidgetsRetentionResult => ({
+	consentPendingDeleted: 0,
+	consentVerifiedDeleted: 0,
 	callbackOtpChallengesDeleted: 0,
 	callbackOtpChallengesRedacted: 0,
 	callbackOtpRateBucketsDeleted: 0,
@@ -102,6 +108,54 @@ export async function runWidgetsRetentionCleanup(
 	const maxBatches = input.maxBatches ?? CLEANUP_MAX_BATCHES;
 	assertCleanupBounds(batchSize, maxBatches);
 	const result = emptyResult();
+
+	if (input.cleanupAiConsentState) {
+		result.consentPendingDeleted = await executeBatches(
+			maxBatches,
+			batchSize,
+			() =>
+				prisma.$executeRaw(
+					Prisma.sql`
+						WITH expired AS (
+							SELECT receipt."id"
+							FROM "widgets"."ai_consent_receipts" AS receipt
+							WHERE receipt."status" = 'PENDING'::"widgets"."AiConsentReceiptStatus"
+								AND receipt."proof_expires_at" <= ${now}
+							ORDER BY receipt."proof_expires_at" ASC, receipt."id" ASC
+							LIMIT ${batchSize}
+							FOR UPDATE OF receipt SKIP LOCKED
+						)
+						DELETE FROM "widgets"."ai_consent_receipts" AS receipt
+						USING expired
+						WHERE receipt."id" = expired."id"
+					`
+				)
+		);
+		const verifiedCutoff = new Date(
+			now.getTime() - AI_CONSENT_VERIFIED_RETENTION_DAYS * DAY_MS
+		);
+		result.consentVerifiedDeleted = await executeBatches(
+			maxBatches,
+			batchSize,
+			() =>
+				prisma.$executeRaw(
+					Prisma.sql`
+						WITH expired AS (
+							SELECT receipt."id"
+							FROM "widgets"."ai_consent_receipts" AS receipt
+							WHERE receipt."status" = 'VERIFIED'::"widgets"."AiConsentReceiptStatus"
+								AND receipt."accepted_at" <= ${verifiedCutoff}
+							ORDER BY receipt."accepted_at" ASC, receipt."id" ASC
+							LIMIT ${batchSize}
+							FOR UPDATE OF receipt SKIP LOCKED
+						)
+						DELETE FROM "widgets"."ai_consent_receipts" AS receipt
+						USING expired
+						WHERE receipt."id" = expired."id"
+					`
+				)
+		);
+	}
 
 	if (input.cleanupOutbox) {
 		const cutoff = new Date(now.getTime() - input.outboxDays * DAY_MS);
@@ -522,6 +576,7 @@ export class WidgetsRetentionService
 			const result = await runWidgetsRetentionCleanup(this.prisma, {
 				...this.retention,
 				cleanupOutbox: this.runtime.publisherEnabled,
+				cleanupAiConsentState: this.runtime.publisherEnabled,
 				cleanupOtpState: this.runtime.publisherEnabled,
 				cleanupWorkerState: this.runtime.workerEnabled
 			});
@@ -539,7 +594,7 @@ export class WidgetsRetentionService
 			);
 			if (total) {
 				this.logger.log(
-					`Widgets retention cleanup callbackOtpChallenges=${result.callbackOtpChallengesDeleted} callbackOtpChallengesRedacted=${result.callbackOtpChallengesRedacted} callbackOtpRates=${result.callbackOtpRateBucketsDeleted} outbox=${result.publishedOutboxDeleted} snapshots=${result.credentialSnapshotsDeleted} integrationReceipts=${result.integrationReceiptsCompacted} consumerReceipts=${result.consumerReceiptsCompacted} integrationFailures=${result.integrationFailureDetailsRedacted} consumerFailures=${result.consumerFailureDetailsRedacted}`
+					`Widgets retention cleanup consentPending=${result.consentPendingDeleted} consentVerified=${result.consentVerifiedDeleted} callbackOtpChallenges=${result.callbackOtpChallengesDeleted} callbackOtpChallengesRedacted=${result.callbackOtpChallengesRedacted} callbackOtpRates=${result.callbackOtpRateBucketsDeleted} outbox=${result.publishedOutboxDeleted} snapshots=${result.credentialSnapshotsDeleted} integrationReceipts=${result.integrationReceiptsCompacted} consumerReceipts=${result.consumerReceiptsCompacted} integrationFailures=${result.integrationFailureDetailsRedacted} consumerFailures=${result.consumerFailureDetailsRedacted}`
 				);
 			}
 		} catch (error) {

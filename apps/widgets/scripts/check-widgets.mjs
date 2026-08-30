@@ -641,6 +641,11 @@ for (const [source, label] of [
 
 requireRuntimePattern(
 	'ai-consultant.js',
+	/['"]\/ai-consultant\/['"]\s*\+\s*encodeURIComponent\(KEY\)\s*\+\s*['"]\/consents['"]/,
+	'AI consent endpoint'
+);
+requireRuntimePattern(
+	'ai-consultant.js',
 	/['"]\/ai-consultant\/['"]\s*\+\s*encodeURIComponent\(KEY\)\s*\+\s*['"]\/session['"]/,
 	'AI session endpoint'
 );
@@ -665,9 +670,13 @@ const aiOpenChatSource = getNamedFunctionSource(
 );
 if (
 	!aiSendMessageSource.includes(
-		'if (isOpen && !destroyed && AUTO_FOCUS_ENABLED) input.focus();'
+		'if (isOpen && !destroyed && AUTO_FOCUS_ENABLED)'
 	) ||
-	!aiOpenChatSource.includes('if (AUTO_FOCUS_ENABLED) input.focus();')
+	!aiSendMessageSource.includes('if (consentAccepted) input.focus();') ||
+	!aiSendMessageSource.includes('else consentCheckbox.focus();') ||
+	!aiOpenChatSource.includes('if (!AUTO_FOCUS_ENABLED) return;') ||
+	!aiOpenChatSource.includes('if (consentAccepted) input.focus();') ||
+	!aiOpenChatSource.includes('else consentCheckbox.focus();')
 ) {
 	console.error(
 		'widgets: ai-consultant.js must not steal focus inside the settings preview'
@@ -682,8 +691,16 @@ for (const [source, label] of [
 	['requestId: uuid()', 'request idempotency key'],
 	['sessionId: sessionId', 'chat session identifier'],
 	['sessionToken: sessionToken', 'signed chat session token'],
+	['acceptanceId: consentAcceptanceId', 'consent idempotency key'],
+	['accepted: true', 'explicit consent acceptance'],
+	['documentVersion: consentConfig.documentVersion', 'consent version'],
+	['documentHash: consentConfig.documentHash', 'consent hash'],
+	['consentToken: consentToken', 'signed consent token'],
+	['scheduleSessionExpiry(expiresAt)', 'one-bootstrap session expiry'],
+	['resetTurnstileState()', 'Turnstile state cleanup'],
 	['turnstileToken: turnstileToken', 'one-time Turnstile token'],
 	['fetchWithRequestTimeout', 'request-only timeout phase'],
+	['CONSENT_REQUEST_TIMEOUT_MS = 30000', 'bounded consent request phase'],
 	['SESSION_REQUEST_TIMEOUT_MS = 30000', 'bounded session request phase'],
 	['MESSAGE_REQUEST_TIMEOUT_MS = 55000', 'bounded two-call AI phase'],
 	['TURNSTILE_CHALLENGE_TIMEOUT_MS = 120000', 'bounded challenge phase'],
@@ -698,8 +715,17 @@ for (const [source, label] of [
 		'personal-data warning and provider disclosure'
 	],
 	[
-		'getSafeExternalUrl(config.privacyUrl, false)',
-		'validated public privacy policy URL'
+		'getSafeConsentUrl(consent.privacyUrl)',
+		'validated consent privacy policy URL'
+	],
+	["consentButton.textContent = 'Согласен, продолжить'", 'consent action'],
+	[
+		"consentCheckbox.setAttribute('aria-required', 'true')",
+		'required consent'
+	],
+	[
+		'consentStatement.textContent = consentConfig.statementText',
+		'exact consent statement'
 	],
 	["aiBadge.textContent = 'AI-оператор'", 'explicit AI operator badge'],
 	[
@@ -753,6 +779,22 @@ const ensureAiSessionSource = getNamedFunctionSource(
 	runtimeSources['ai-consultant.js'],
 	'ensureSessionToken'
 );
+const acceptAiConsentSource = getNamedFunctionSource(
+	runtimeSources['ai-consultant.js'],
+	'acceptConsent'
+);
+const applyAiConfigSource = getNamedFunctionSource(
+	runtimeSources['ai-consultant.js'],
+	'applyConfig'
+);
+const openAiChatSource = getNamedFunctionSource(
+	runtimeSources['ai-consultant.js'],
+	'openChat'
+);
+const requestAiAnswerSource = getNamedFunctionSource(
+	runtimeSources['ai-consultant.js'],
+	'requestAnswer'
+);
 const turnstileTokenSource = getNamedFunctionSource(
 	runtimeSources['ai-consultant.js'],
 	'getTurnstileToken'
@@ -761,6 +803,36 @@ const turnstileLoaderSource = getNamedFunctionSource(
 	runtimeSources['ai-consultant.js'],
 	'loadTurnstile'
 );
+if (
+	!acceptAiConsentSource.includes("'/consents'") ||
+	!acceptAiConsentSource.includes('consentToken = payload.consentToken') ||
+	!acceptAiConsentSource.includes('consentAccepted = true') ||
+	!acceptAiConsentSource.includes('CONSENT_REQUEST_TIMEOUT_MS') ||
+	acceptAiConsentSource.includes('loadTurnstile(') ||
+	acceptAiConsentSource.includes('getTurnstileToken(') ||
+	!applyAiConfigSource.includes('readConsentConfig(config)') ||
+	!applyAiConfigSource.includes(
+		"if (!nextConsentConfig) throw new Error('AI_CONSENT_CONFIG_INVALID');"
+	) ||
+	applyAiConfigSource.includes('loadTurnstile(') ||
+	applyAiConfigSource.includes('getTurnstileToken(') ||
+	openAiChatSource.includes('loadTurnstile(') ||
+	openAiChatSource.includes('getTurnstileToken(') ||
+	!ensureAiSessionSource.includes(
+		'if (!consentAccepted || !consentToken)'
+	) ||
+	!ensureAiSessionSource.includes('consentToken: consentToken') ||
+	!ensureAiSessionSource.includes('scheduleSessionExpiry(expiresAt)') ||
+	!requestAiAnswerSource.includes('requireFreshConsent(') ||
+	requestAiAnswerSource.includes(
+		'ensureSessionToken(flowController, true)'
+	)
+) {
+	console.error(
+		'widgets: ai-consultant.js must obtain explicit consent before loading Turnstile and issuing a session'
+	);
+	process.exit(1);
+}
 if (
 	ensureAiSessionSource.indexOf('getTurnstileToken(flowController)') ===
 		-1 ||
@@ -776,10 +848,7 @@ if (
 		'window.clearTimeout(challengeTimeout)'
 	) ||
 	!ensureAiSessionSource.includes('SESSION_REQUEST_TIMEOUT_MS') ||
-	!getNamedFunctionSource(
-		runtimeSources['ai-consultant.js'],
-		'requestAnswer'
-	).includes('MESSAGE_REQUEST_TIMEOUT_MS')
+	!requestAiAnswerSource.includes('MESSAGE_REQUEST_TIMEOUT_MS')
 ) {
 	console.error(
 		'widgets: ai-consultant.js starts the request timeout before Turnstile completes'

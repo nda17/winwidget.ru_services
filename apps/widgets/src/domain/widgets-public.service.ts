@@ -12,6 +12,7 @@ import {
 	EntitlementPlan
 } from '@prisma/widgets-client';
 import { createHash } from 'node:crypto';
+import { WidgetsAiConsentService } from '../ai/widgets-ai-consent.service';
 import { WidgetsCloudflareTurnstileService } from '../ai/widgets-cloudflare-turnstile.service';
 import {
 	callbackOtpChannel,
@@ -69,7 +70,8 @@ export class WidgetsPublicService {
 		private readonly reporting: WidgetsReportingService,
 		private readonly registry: WidgetsTypeRegistryService,
 		private readonly turnstile: WidgetsCloudflareTurnstileService,
-		private readonly callbackOtp: WidgetsCallbackOtpService
+		private readonly callbackOtp: WidgetsCallbackOtpService,
+		private readonly aiConsent: WidgetsAiConsentService
 	) {}
 
 	async config(
@@ -142,7 +144,8 @@ export class WidgetsPublicService {
 			? {
 					...publicConfig,
 					turnstileSiteKey: this.turnstile.siteKey(),
-					turnstileAction: this.turnstile.action()
+					turnstileAction: this.turnstile.action(),
+					consent: this.aiConsent.publicDocument(widget, requestDomain)
 				}
 			: publicConfig;
 	}

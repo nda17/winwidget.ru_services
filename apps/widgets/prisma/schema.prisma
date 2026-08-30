@@ -34,23 +34,23 @@ model Widget {
 }
 
 model Callback {
-  id                         String         @id @default(cuid())
-  userId                     String         @map("user_id")
-  publicKey                  String         @unique @map("public_key")
-  name                       String         @default("Обратный звонок")
-  isActive                   Boolean        @default(true) @map("is_active")
-  installDomain              String         @default("") @map("install_domain")
-  config                     Json           @default("{}")
-  draftConfig                Json?          @map("draft_config")
-  draftInstallDomain         String?        @map("draft_install_domain")
-  draftRevision              Int            @default(0) @map("draft_revision")
-  publishedVersion           Int            @default(0) @map("published_version")
-  publishedFromDraftRevision Int            @default(0) @map("published_from_draft_revision")
-  publishedAt                DateTime?      @map("published_at")
+  id                         String                 @id @default(cuid())
+  userId                     String                 @map("user_id")
+  publicKey                  String                 @unique @map("public_key")
+  name                       String                 @default("Обратный звонок")
+  isActive                   Boolean                @default(true) @map("is_active")
+  installDomain              String                 @default("") @map("install_domain")
+  config                     Json                   @default("{}")
+  draftConfig                Json?                  @map("draft_config")
+  draftInstallDomain         String?                @map("draft_install_domain")
+  draftRevision              Int                    @default(0) @map("draft_revision")
+  publishedVersion           Int                    @default(0) @map("published_version")
+  publishedFromDraftRevision Int                    @default(0) @map("published_from_draft_revision")
+  publishedAt                DateTime?              @map("published_at")
   leads                      CallbackLead[]
   otpChallenges              CallbackOtpChallenge[]
-  createdAt                  DateTime       @default(now()) @map("created_at")
-  updatedAt                  DateTime       @updatedAt @map("updated_at")
+  createdAt                  DateTime               @default(now()) @map("created_at")
+  updatedAt                  DateTime               @updatedAt @map("updated_at")
 
   @@index([userId])
   @@map("callbacks")
@@ -224,6 +224,34 @@ model AiConsultant {
 
   @@index([userId])
   @@map("ai_consultants")
+  @@schema("widgets")
+}
+
+model AiConsentReceipt {
+  id                     String                 @id @default(uuid()) @db.Uuid
+  acceptanceId           String                 @unique(map: "ai_consent_receipts_acceptance_unique") @map("acceptance_id") @db.Uuid
+  widgetId               String                 @map("widget_id")
+  widgetPublicKey        String                 @map("widget_public_key") @db.Char(12)
+  ownerScope             String                 @map("owner_scope") @db.Char(43)
+  configuredSiteHostname String                 @map("configured_site_hostname") @db.VarChar(253)
+  requestHostname        String                 @map("request_hostname") @db.VarChar(253)
+  publishedVersion       Int                    @map("published_version")
+  sessionScope           String                 @map("session_scope") @db.Char(43)
+  sourceScope            String                 @map("source_scope") @db.Char(43)
+  documentVersion        String                 @map("document_version") @db.VarChar(64)
+  documentHash           String                 @map("document_hash") @db.Char(64)
+  statementText          String                 @map("statement_text") @db.Text
+  privacyUrl             String                 @map("privacy_url") @db.VarChar(500)
+  proofExpiresAt         DateTime               @map("proof_expires_at")
+  acceptedAt             DateTime               @map("accepted_at")
+  status                 AiConsentReceiptStatus @default(PENDING)
+  verifiedAt             DateTime?              @map("verified_at")
+  createdAt              DateTime               @default(now()) @map("created_at")
+  updatedAt              DateTime               @updatedAt @map("updated_at")
+
+  @@index([status, proofExpiresAt, id], map: "ai_consent_receipts_pending_retention_idx")
+  @@index([status, acceptedAt, id], map: "ai_consent_receipts_verified_retention_idx")
+  @@map("ai_consent_receipts")
   @@schema("widgets")
 }
 
@@ -763,6 +791,13 @@ enum CallbackVerificationMode {
 enum CallbackOtpChannel {
   SMS
   EMAIL
+
+  @@schema("widgets")
+}
+
+enum AiConsentReceiptStatus {
+  PENDING
+  VERIFIED
 
   @@schema("widgets")
 }

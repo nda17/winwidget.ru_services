@@ -31,8 +31,8 @@ PostgreSQL `widgets`. Браузерные assets виджетов также с
 - `POST /callback/:key/verification/start` для опционального callback OTP;
   финальный `/callback/:key/lead` требует challenge и шестизначный код при
   опубликованном режиме `SMS` или `EMAIL`
-- `GET /ai-consultant/:key/config`, `POST /ai-consultant/:key/session` и
-  `POST /ai-consultant/:key/messages`
+- `GET /ai-consultant/:key/config`, `POST /ai-consultant/:key/consents`,
+  `POST /ai-consultant/:key/session` и `POST /ai-consultant/:key/messages`
 - `POST /ai-consultants/:id/test-message` для проверки сохранённого draft
 
 Собранные assets обслуживаются по `/widgets/**`. Identity вызывает
@@ -54,8 +54,14 @@ config этот prompt не возвращает. Клиентская исто�
 всегда явно обозначен как AI. Для публикации обязательна HTTP(S)-ссылка на политику
 владельца сайта, которая раскрывает обработку через Cloudflare Workers AI и
 Turnstile. Политика на домене WinWidget запрещена в клиентской настройке и не
-подставляется виджетам по умолчанию. Runtime показывает провайдера, ссылку и
-предупреждение не вводить персональные данные. Запросы к AI Gateway
+подставляется виджетам по умолчанию. Публичный config возвращает точный текст,
+версию и hash явного согласия. Runtime сначала фиксирует отдельный consent
+receipt и только после этого загружает Turnstile и создаёт одноразовую
+bootstrap-сессию. Неподтверждённый receipt удаляется через 15 минут;
+подтверждённый минимальный receipt без переписки, raw IP и raw session ID
+хранится 1095 дней. Runtime показывает провайдера, ссылку и предупреждение не
+вводить специальные категории, биометрические и избыточные персональные
+данные. Запросы к AI Gateway
 всегда передают `cf-aig-collect-log: false` и
 `cf-aig-collect-log-payload: false`, поэтому Gateway не сохраняет ни payload,
 ни metadata запроса.

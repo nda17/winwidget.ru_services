@@ -32,6 +32,7 @@
 	}
 
 	var RUNTIME_VERSION = '2026.08';
+	var CONSENT_REQUEST_TIMEOUT_MS = 30000;
 	var SESSION_REQUEST_TIMEOUT_MS = 30000;
 	var MESSAGE_REQUEST_TIMEOUT_MS = 55000;
 	var TURNSTILE_CHALLENGE_TIMEOUT_MS = 120000;
@@ -147,6 +148,45 @@
 		return '';
 	}
 
+	function getSafeConsentUrl(value) {
+		if (typeof value !== 'string' || !value.trim()) return '';
+		try {
+			var url = new URL(value.trim());
+			if (
+				(url.protocol === 'http:' || url.protocol === 'https:') &&
+				!url.username &&
+				!url.password
+			) {
+				return url.href;
+			}
+		} catch (error) {}
+		return '';
+	}
+
+	function readConsentConfig(config) {
+		var consent = config && config.consent;
+		if (!consent || typeof consent !== 'object') return null;
+		var privacyUrl = getSafeConsentUrl(consent.privacyUrl);
+		if (
+			typeof consent.documentVersion !== 'string' ||
+			!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(consent.documentVersion) ||
+			typeof consent.documentHash !== 'string' ||
+			!/^[a-f0-9]{64}$/.test(consent.documentHash) ||
+			typeof consent.statementText !== 'string' ||
+			!consent.statementText.trim() ||
+			consent.statementText.length > 2000 ||
+			!privacyUrl
+		) {
+			return null;
+		}
+		return {
+			documentVersion: consent.documentVersion,
+			documentHash: consent.documentHash,
+			statementText: consent.statementText,
+			privacyUrl: privacyUrl
+		};
+	}
+
 	function safeText(value, fallback) {
 		return value == null || value === '' ? fallback : String(value);
 	}
@@ -204,10 +244,16 @@
 	var sessionId = uuid();
 	var sessionToken = '';
 	var sessionTokenExpiresAt = 0;
+	var consentConfig = null;
+	var consentAcceptanceId = uuid();
+	var consentToken = '';
+	var consentAccepted = false;
+	var consentInFlight = false;
 	var history = [];
 	var operatorJoined = false;
 	var sessionClosed = false;
 	var inactivityTimer = null;
+	var sessionExpiryTimer = null;
 	var typingNode = null;
 	var autoOpenTimer = null;
 	var activeController = null;
@@ -267,6 +313,19 @@
 		'.waic-form{display:flex;align-items:flex-end;gap:8px;border-top:1px solid rgba(31,41,55,.09);padding:11px;background:var(--waic-bg,#fff)}',
 		'.waic-input-area{display:flex;min-width:0;flex:1;flex-direction:column;gap:5px}',
 		'.waic-turnstile{display:flex;min-height:0;justify-content:center;background:var(--waic-bg,#fff)}',
+		'.waic-consent{display:flex;flex-direction:column;gap:12px;border-top:1px solid rgba(31,41,55,.09);padding:16px 14px;background:var(--waic-bg,#fff)}',
+		'.waic-consent[hidden],.waic-turnstile[hidden],.waic-form[hidden]{display:none}',
+		'.waic-consent-choice{display:flex;align-items:flex-start;gap:10px;color:var(--waic-text,#1f2937);font-size:12px;line-height:1.45;cursor:pointer}',
+		'.waic-consent-checkbox{width:18px;height:18px;flex:0 0 18px;margin:1px 0 0;accent-color:var(--waic-color,#4705fb)}',
+		'.waic-consent-checkbox:focus-visible,.waic-consent-submit:focus-visible{outline:3px solid rgba(71,5,251,.28);outline-offset:2px}',
+		'.waic-consent-copy{min-width:0}',
+		'.waic-consent-link{display:inline-block;margin-top:5px;color:var(--waic-color,#4705fb);text-decoration:underline;text-underline-offset:2px}',
+		'.waic-consent-submit{min-height:42px;border:0;border-radius:13px;background:var(--waic-color,#4705fb);padding:10px 14px;color:#fff;cursor:pointer;font:700 13px/1.35 ' +
+			SYSTEM_FONT_STACK +
+			'}',
+		'.waic-consent-submit:disabled{cursor:default;opacity:.48}',
+		'.waic-consent-error{margin:0;color:#a92626;font-size:11px;line-height:1.4}',
+		'.waic-consent-error:empty{display:none}',
 		'.waic-input{width:100%;min-height:42px;max-height:108px;resize:none;border:1px solid rgba(31,41,55,.16);border-radius:14px;background:#fff;padding:10px 12px;color:#1f2937;font:14px/1.4 ' +
 			SYSTEM_FONT_STACK +
 			';outline:none}',
@@ -344,8 +403,45 @@
 	chat.setAttribute('aria-live', 'polite');
 	var form = document.createElement('form');
 	form.className = 'waic-form';
+	form.hidden = true;
 	var turnstileContainer = document.createElement('div');
 	turnstileContainer.className = 'waic-turnstile';
+	turnstileContainer.hidden = true;
+	var consentPanel = document.createElement('section');
+	consentPanel.className = 'waic-consent';
+	consentPanel.setAttribute('aria-label', 'Согласие на обработку запроса');
+	var consentChoice = document.createElement('label');
+	consentChoice.className = 'waic-consent-choice';
+	var consentCheckbox = document.createElement('input');
+	consentCheckbox.className = 'waic-consent-checkbox';
+	consentCheckbox.type = 'checkbox';
+	consentCheckbox.required = true;
+	consentCheckbox.setAttribute('aria-required', 'true');
+	var consentCopy = document.createElement('span');
+	consentCopy.className = 'waic-consent-copy';
+	var consentStatement = document.createElement('span');
+	var consentLink = document.createElement('a');
+	consentLink.className = 'waic-consent-link';
+	consentLink.target = '_blank';
+	consentLink.rel = 'noopener noreferrer';
+	consentLink.textContent = 'Политика обработки данных';
+	consentCopy.appendChild(consentStatement);
+	consentCopy.appendChild(document.createElement('br'));
+	consentCopy.appendChild(consentLink);
+	consentChoice.appendChild(consentCheckbox);
+	consentChoice.appendChild(consentCopy);
+	var consentButton = document.createElement('button');
+	consentButton.className = 'waic-consent-submit';
+	consentButton.type = 'button';
+	consentButton.disabled = true;
+	consentButton.textContent = 'Согласен, продолжить';
+	var consentError = document.createElement('p');
+	consentError.className = 'waic-consent-error';
+	consentError.setAttribute('role', 'alert');
+	consentError.setAttribute('aria-live', 'assertive');
+	consentPanel.appendChild(consentChoice);
+	consentPanel.appendChild(consentButton);
+	consentPanel.appendChild(consentError);
 	var inputArea = document.createElement('div');
 	inputArea.className = 'waic-input-area';
 	var input = document.createElement('textarea');
@@ -384,6 +480,7 @@
 	brand.appendChild(brandLink);
 	modal.appendChild(header);
 	modal.appendChild(chat);
+	modal.appendChild(consentPanel);
 	modal.appendChild(turnstileContainer);
 	modal.appendChild(form);
 	modal.appendChild(brand);
@@ -458,6 +555,24 @@
 		inactivityTimer = null;
 	}
 
+	function clearSessionExpiryTimer() {
+		if (sessionExpiryTimer) window.clearTimeout(sessionExpiryTimer);
+		sessionExpiryTimer = null;
+	}
+
+	function resetTurnstileState() {
+		if (pendingTurnstile) {
+			pendingTurnstile.reject(new Error('TURNSTILE_ABORTED'));
+			pendingTurnstile = null;
+		}
+		if (window.turnstile && turnstileWidgetId !== null) {
+			try {
+				window.turnstile.remove(turnstileWidgetId);
+			} catch (error) {}
+		}
+		turnstileWidgetId = null;
+	}
+
 	function leaveForInactivity() {
 		if (!operatorJoined || sessionClosed || inFlight || destroyed) return;
 		appendMessage(
@@ -472,6 +587,7 @@
 		operatorJoined = false;
 		history = [];
 		clearInactivityTimer();
+		prepareNewSession(false);
 	}
 
 	function scheduleInactivity() {
@@ -483,23 +599,86 @@
 		);
 	}
 
-	function startNewSession() {
+	function resetConsentState() {
+		resetTurnstileState();
+		consentAcceptanceId = uuid();
+		consentToken = '';
+		consentAccepted = false;
+		consentInFlight = false;
+		consentPanel.removeAttribute('aria-busy');
+		consentCheckbox.checked = false;
+		consentCheckbox.disabled = false;
+		consentButton.disabled = true;
+		consentButton.textContent = 'Согласен, продолжить';
+		consentError.textContent = '';
+		consentPanel.hidden = false;
+		turnstileContainer.hidden = true;
+		form.hidden = true;
+		input.disabled = true;
+		sendButton.disabled = true;
+	}
+
+	function prepareNewSession(announce) {
+		clearInactivityTimer();
+		clearSessionExpiryTimer();
 		sessionId = uuid();
 		sessionToken = '';
 		sessionTokenExpiresAt = 0;
 		history = [];
 		sessionClosed = false;
 		operatorJoined = false;
-		appendSystem('Новый диалог');
+		resetConsentState();
+		if (announce) appendSystem('Новый диалог');
+	}
+
+	function startNewSession() {
+		prepareNewSession(true);
+	}
+
+	function requireFreshConsent(message) {
+		prepareNewSession(false);
+		consentError.textContent = message;
+		if (isOpen && AUTO_FOCUS_ENABLED) consentCheckbox.focus();
+	}
+
+	function expireSession() {
+		sessionExpiryTimer = null;
+		if (destroyed || !consentAccepted) return;
+		if (inFlight || consentInFlight) {
+			sessionExpiryTimer = window.setTimeout(expireSession, 1000);
+			return;
+		}
+		requireFreshConsent(
+			'Срок сессии истёк. Подтвердите согласие ещё раз.'
+		);
+	}
+
+	function scheduleSessionExpiry(expiresAt) {
+		clearSessionExpiryTimer();
+		sessionExpiryTimer = window.setTimeout(
+			expireSession,
+			Math.max(0, expiresAt - Date.now())
+		);
 	}
 
 	function setInFlight(value) {
 		inFlight = value;
-		input.disabled = value;
-		sendButton.disabled = value;
+		input.disabled = value || !consentAccepted;
+		sendButton.disabled = value || !consentAccepted;
 		statusText.textContent = value
 			? 'Формирует ответ…'
 			: 'Отвечает по инструкциям';
+	}
+
+	function setConsentInFlight(value) {
+		consentInFlight = value;
+		if (value) consentPanel.setAttribute('aria-busy', 'true');
+		else consentPanel.removeAttribute('aria-busy');
+		consentCheckbox.disabled = value;
+		consentButton.disabled = value || !consentCheckbox.checked;
+		consentButton.textContent = value
+			? 'Сохраняем согласие…'
+			: 'Согласен, продолжить';
 	}
 
 	function loadTurnstile() {
@@ -656,13 +835,86 @@
 		}
 	}
 
-	async function ensureSessionToken(flowController, forceRefresh) {
+	async function acceptConsent() {
 		if (
-			!forceRefresh &&
-			sessionToken &&
-			sessionTokenExpiresAt > Date.now() + 5000
+			consentInFlight ||
+			consentAccepted ||
+			inFlight ||
+			destroyed ||
+			!consentConfig ||
+			!consentCheckbox.checked
 		) {
+			return;
+		}
+		consentError.textContent = '';
+		setConsentInFlight(true);
+		var flowController = new AbortController();
+		activeController = flowController;
+		try {
+			var response = await fetchWithRequestTimeout(
+				API_BASE +
+					'/ai-consultant/' +
+					encodeURIComponent(KEY) +
+					'/consents',
+				getWidgetFetchOptions({
+					method: 'POST',
+					headers: { 'Content-Type': 'application/json' },
+					body: JSON.stringify({
+						acceptanceId: consentAcceptanceId,
+						sessionId: sessionId,
+						accepted: true,
+						documentVersion: consentConfig.documentVersion,
+						documentHash: consentConfig.documentHash
+					}),
+					credentials: 'omit',
+					cache: 'no-store'
+				}),
+				flowController,
+				CONSENT_REQUEST_TIMEOUT_MS
+			);
+			var payload = null;
+			try {
+				payload = await response.json();
+			} catch (error) {}
+			if (
+				!response.ok ||
+				!payload ||
+				typeof payload.consentToken !== 'string' ||
+				!payload.consentToken ||
+				payload.consentToken.length > 3072
+			) {
+				throw new Error('AI_CONSENT_UNAVAILABLE');
+			}
+			consentToken = payload.consentToken;
+			consentAccepted = true;
+			consentPanel.hidden = true;
+			turnstileContainer.hidden = false;
+			form.hidden = false;
+			setInFlight(false);
+			if (isOpen && AUTO_FOCUS_ENABLED) input.focus();
+		} catch (error) {
+			if (!destroyed) {
+				consentError.textContent =
+					'Не удалось сохранить согласие. Попробуйте ещё раз.';
+			}
+		} finally {
+			if (activeController === flowController) activeController = null;
+			setConsentInFlight(false);
+		}
+	}
+
+	async function ensureSessionToken(flowController) {
+		if (!consentAccepted || !consentToken) {
+			throw new Error('AI_CONSENT_REQUIRED');
+		}
+		if (sessionToken && sessionTokenExpiresAt > Date.now()) {
 			return sessionToken;
+		}
+		if (sessionToken) {
+			requireFreshConsent(
+				'Срок сессии истёк. Подтвердите согласие ещё раз.'
+			);
+			throw new Error('AI_CONSENT_REQUIRED');
 		}
 		var turnstileToken = await getTurnstileToken(flowController);
 		var response;
@@ -677,7 +929,8 @@
 					headers: { 'Content-Type': 'application/json' },
 					body: JSON.stringify({
 						sessionId: sessionId,
-						turnstileToken: turnstileToken
+						turnstileToken: turnstileToken,
+						consentToken: consentToken
 					}),
 					credentials: 'omit',
 					cache: 'no-store'
@@ -697,6 +950,12 @@
 			payload = await response.json();
 		} catch (error) {}
 		var expiresAt = payload ? Date.parse(payload.expiresAt) : NaN;
+		if (response.status === 401) {
+			requireFreshConsent(
+				'Согласие недействительно или уже использовано. Подтвердите его ещё раз.'
+			);
+			throw new Error('AI_CONSENT_REQUIRED');
+		}
 		if (
 			!response.ok ||
 			!payload ||
@@ -710,16 +969,12 @@
 		}
 		sessionToken = payload.sessionToken;
 		sessionTokenExpiresAt = expiresAt;
+		scheduleSessionExpiry(expiresAt);
 		return sessionToken;
 	}
 
-	async function requestAnswer(
-		text,
-		previousHistory,
-		flowController,
-		retrySession
-	) {
-		await ensureSessionToken(flowController, false);
+	async function requestAnswer(text, previousHistory, flowController) {
+		await ensureSessionToken(flowController);
 		var response = await fetchWithRequestTimeout(
 			API_BASE + '/ai-consultant/' + encodeURIComponent(KEY) + '/messages',
 			getWidgetFetchOptions({
@@ -738,11 +993,11 @@
 			flowController,
 			MESSAGE_REQUEST_TIMEOUT_MS
 		);
-		if (response.status === 401 && retrySession) {
-			sessionToken = '';
-			sessionTokenExpiresAt = 0;
-			await ensureSessionToken(flowController, true);
-			return requestAnswer(text, previousHistory, flowController, false);
+		if (response.status === 401) {
+			requireFreshConsent(
+				'Срок сессии истёк. Подтвердите согласие ещё раз.'
+			);
+			throw new Error('AI_CONSENT_REQUIRED');
 		}
 		var payload = null;
 		try {
@@ -760,11 +1015,11 @@
 	}
 
 	async function sendMessage(text) {
-		if (inFlight || destroyed) return;
+		if (inFlight || destroyed || !consentAccepted || !consentToken) return;
 		clearInactivityTimer();
 		if (sessionClosed) startNewSession();
 		var previousHistory = history.slice(-12);
-		appendMessage('user', text);
+		var userMessageNode = appendMessage('user', text);
 		if (!operatorJoined) {
 			operatorJoined = true;
 			appendSystem(
@@ -781,8 +1036,7 @@
 			var payload = await requestAnswer(
 				text,
 				previousHistory,
-				flowController,
-				true
+				flowController
 			);
 			hideTyping();
 			appendMessage('assistant', payload.reply.trim());
@@ -796,16 +1050,26 @@
 		} catch (error) {
 			hideTyping();
 			if (!destroyed) {
-				appendSystem(
-					'AI-оператор временно не может ответить. Попробуйте ещё раз.',
-					true
-				);
-				scheduleInactivity();
+				if (error && error.message === 'AI_CONSENT_REQUIRED') {
+					if (userMessageNode.parentNode) {
+						userMessageNode.parentNode.removeChild(userMessageNode);
+					}
+					input.value = text;
+				} else {
+					appendSystem(
+						'AI-оператор временно не может ответить. Попробуйте ещё раз.',
+						true
+					);
+					scheduleInactivity();
+				}
 			}
 		} finally {
 			if (activeController === flowController) activeController = null;
 			setInFlight(false);
-			if (isOpen && !destroyed && AUTO_FOCUS_ENABLED) input.focus();
+			if (isOpen && !destroyed && AUTO_FOCUS_ENABLED) {
+				if (consentAccepted) input.focus();
+				else consentCheckbox.focus();
+			}
 		}
 	}
 
@@ -817,7 +1081,9 @@
 		button.setAttribute('aria-expanded', 'true');
 		sendTelemetryEvent('OPEN');
 		window.setTimeout(function () {
-			if (AUTO_FOCUS_ENABLED) input.focus();
+			if (!AUTO_FOCUS_ENABLED) return;
+			if (consentAccepted) input.focus();
+			else consentCheckbox.focus();
 		}, 30);
 	}
 
@@ -831,7 +1097,10 @@
 	}
 
 	function applyConfig(config) {
+		var nextConsentConfig = readConsentConfig(config);
+		if (!nextConsentConfig) throw new Error('AI_CONSENT_CONFIG_INVALID');
 		cfg = config;
+		consentConfig = nextConsentConfig;
 		updatePublishedVersion(config.publishedVersion);
 		var side = config.buttonSide === 'left' ? 'left' : 'right';
 		var bottom = boundedNumber(config.buttonBottom, 3, 1, 50);
@@ -902,9 +1171,11 @@
 			config.inputPlaceholder,
 			'Задайте вопрос...'
 		);
-		var privacyUrl = getSafeExternalUrl(config.privacyUrl, false);
-		privacyLink.href = privacyUrl;
-		privacyLink.hidden = !privacyUrl;
+		consentStatement.textContent = consentConfig.statementText;
+		consentLink.href = consentConfig.privacyUrl;
+		privacyLink.href = consentConfig.privacyUrl;
+		privacyLink.hidden = false;
+		resetConsentState();
 		brand.hidden = config.developInfoActive === false;
 		appendMessage(
 			'assistant',
@@ -932,9 +1203,14 @@
 	function handleSubmit(event) {
 		event.preventDefault();
 		var text = input.value.trim();
-		if (!text || inFlight) return;
+		if (!text || inFlight || !consentAccepted || !consentToken) return;
 		input.value = '';
 		sendMessage(text);
+	}
+
+	function handleConsentChange() {
+		consentError.textContent = '';
+		consentButton.disabled = consentInFlight || !consentCheckbox.checked;
 	}
 
 	function handleInputKeydown(event) {
@@ -952,21 +1228,15 @@
 		if (destroyed) return;
 		destroyed = true;
 		clearInactivityTimer();
+		clearSessionExpiryTimer();
 		if (autoOpenTimer) window.clearTimeout(autoOpenTimer);
 		if (activeController) activeController.abort();
 		configController.abort();
-		if (pendingTurnstile) {
-			pendingTurnstile.reject(new Error('TURNSTILE_ABORTED'));
-			pendingTurnstile = null;
-		}
-		if (window.turnstile && turnstileWidgetId !== null) {
-			try {
-				window.turnstile.remove(turnstileWidgetId);
-			} catch (error) {}
-			turnstileWidgetId = null;
-		}
+		resetTurnstileState();
 		button.removeEventListener('click', handleLauncherClick);
 		closeButton.removeEventListener('click', closeChat);
+		consentCheckbox.removeEventListener('change', handleConsentChange);
+		consentButton.removeEventListener('click', acceptConsent);
 		form.removeEventListener('submit', handleSubmit);
 		input.removeEventListener('keydown', handleInputKeydown);
 		document.removeEventListener('keydown', handleDocumentKeydown);
@@ -982,6 +1252,8 @@
 
 	button.addEventListener('click', handleLauncherClick);
 	closeButton.addEventListener('click', closeChat);
+	consentCheckbox.addEventListener('change', handleConsentChange);
+	consentButton.addEventListener('click', acceptConsent);
 	form.addEventListener('submit', handleSubmit);
 	input.addEventListener('keydown', handleInputKeydown);
 	document.addEventListener('keydown', handleDocumentKeydown);

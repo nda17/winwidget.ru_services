@@ -21,7 +21,7 @@ export const DATABASE_RESTORE_ACL_CONTRACTS: Record<
 	'notification-delivery': STANDARD(),
 	campaigns: STANDARD(),
 	reporting: STANDARD(['reject_report_run_snapshot_mutation()']),
-	widgets: STANDARD(),
+	widgets: STANDARD(['enforce_ai_consent_receipt_immutability()']),
 	identity: STANDARD(),
 	platform: {
 		profile: 'platform',

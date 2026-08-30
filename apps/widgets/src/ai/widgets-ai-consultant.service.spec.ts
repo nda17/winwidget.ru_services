@@ -1,5 +1,6 @@
 import {
 	ConflictException,
+	ForbiddenException,
 	ServiceUnavailableException,
 	ValidationPipe
 } from '@nestjs/common';
@@ -85,7 +86,12 @@ const setup = (provider: WidgetsAiProvider) => {
 			sourceScope: 'source-scope',
 			publishedVersion: 1,
 			publicKey: widget.publicKey,
-			sessionId: 'session'
+			sessionId: 'session',
+			consentReceiptId: '11111111-1111-4111-8111-111111111111',
+			acceptanceId: '22222222-2222-4222-8222-222222222222',
+			documentVersion: 'ai-consultant-consent-v1',
+			documentHash: 'a'.repeat(64),
+			requestHostname: 'example.test'
 		}),
 		assertWidget: jest.fn(),
 		issue: jest.fn().mockReturnValue({
@@ -94,6 +100,23 @@ const setup = (provider: WidgetsAiProvider) => {
 			expiresAt: '2026-08-28T12:10:00.000Z'
 		})
 	};
+	const consentClaims = {
+		consentReceiptId: '11111111-1111-4111-8111-111111111111',
+		acceptanceId: '22222222-2222-4222-8222-222222222222',
+		documentVersion: 'ai-consultant-consent-v1',
+		documentHash: 'a'.repeat(64),
+		requestHostname: 'example.test'
+	};
+	const consent = {
+		accept: jest.fn(),
+		prepareSession: jest.fn().mockResolvedValue({
+			widget,
+			expectedHostname: 'example.test',
+			claims: consentClaims
+		}),
+		verifyPrepared: jest.fn().mockResolvedValue(undefined),
+		assertVerified: jest.fn().mockResolvedValue(undefined)
+	};
 	const turnstile = { validate: jest.fn().mockResolvedValue(undefined) };
 	return {
 		service: new WidgetsAiConsultantService(
@@ -101,6 +124,7 @@ const setup = (provider: WidgetsAiProvider) => {
 			access as never,
 			quota as never,
 			sessionTokens as never,
+			consent as never,
 			turnstile as never,
 			provider
 		),
@@ -108,13 +132,14 @@ const setup = (provider: WidgetsAiProvider) => {
 		access,
 		quota,
 		sessionTokens,
+		consent,
 		turnstile
 	};
 };
 
 describe('WidgetsAiConsultantService', () => {
 	it('validates Turnstile before issuing an IP-bound public session', async () => {
-		const { service, quota, sessionTokens, turnstile } = setup({
+		const { service, quota, sessionTokens, consent, turnstile } = setup({
 			generate: jest.fn()
 		});
 		const sessionId = 'session_abcdef1234567890';
@@ -124,6 +149,7 @@ describe('WidgetsAiConsultantService', () => {
 				widget.publicKey,
 				sessionId,
 				'one-time-turnstile-token',
+				'signed-consent-token',
 				'203.0.113.7',
 				'example.test',
 				false
@@ -136,6 +162,7 @@ describe('WidgetsAiConsultantService', () => {
 			publicKey: widget.publicKey
 		});
 		expect(quota.aiSnapshot).toHaveBeenCalledWith(widget.userId);
+		expect(consent.verifyPrepared).toHaveBeenCalledTimes(1);
 		expect(sessionTokens.issue).toHaveBeenCalledWith(
 			expect.objectContaining({
 				publicKey: widget.publicKey,
@@ -147,25 +174,21 @@ describe('WidgetsAiConsultantService', () => {
 	});
 
 	it('rejects a client widget that still uses the WinWidget consent URL', async () => {
-		const { service, repository, quota, sessionTokens, turnstile } = setup(
-			{
-				generate: jest.fn()
-			}
-		);
-		repository.findByPublicKey.mockResolvedValue({
-			...widget,
-			config: {
-				...widget.config,
-				privacyUrl:
-					'https://winwidget.ru/legal-documentation/consent-processing'
-			}
+		const { service, quota, sessionTokens, consent, turnstile } = setup({
+			generate: jest.fn()
 		});
+		consent.prepareSession.mockRejectedValueOnce(
+			new ForbiddenException(
+				'Владелец сайта не настроил политику обработки данных AI-консультанта'
+			)
+		);
 
 		await expect(
 			service.publicSession(
 				widget.publicKey,
 				'session_abcdef1234567890',
 				'one-time-turnstile-token',
+				'signed-consent-token',
 				'203.0.113.7',
 				'example.test',
 				false
@@ -178,7 +201,7 @@ describe('WidgetsAiConsultantService', () => {
 
 	it('rejects an existing public session after its widget loses an owner privacy policy', async () => {
 		const generate = groundedGenerate();
-		const { service, repository, quota, sessionTokens } = setup({
+		const { service, repository, quota, consent } = setup({
 			generate
 		});
 		repository.findByPublicKey.mockResolvedValue({
@@ -197,13 +220,38 @@ describe('WidgetsAiConsultantService', () => {
 				'127.0.0.1'
 			)
 		).rejects.toMatchObject({ status: 403 });
-		expect(sessionTokens.assertWidget).toHaveBeenCalled();
+		expect(consent.assertVerified).toHaveBeenCalled();
 		expect(quota.aiSnapshot).not.toHaveBeenCalled();
 		expect(generate).not.toHaveBeenCalled();
 	});
 
+	it('revalidates consent and policy before returning a deduplicated reply', async () => {
+		const generate = groundedGenerate();
+		const { service, consent } = setup({ generate });
+		const request = input();
+
+		await expect(
+			service.publicMessage(
+				widget.publicKey,
+				request as never,
+				'127.0.0.1'
+			)
+		).resolves.toMatchObject({ outcome: 'ANSWER' });
+		consent.assertVerified.mockRejectedValueOnce(
+			new ForbiddenException('Согласие больше не действует')
+		);
+		await expect(
+			service.publicMessage(
+				widget.publicKey,
+				request as never,
+				'127.0.0.1'
+			)
+		).rejects.toMatchObject({ status: 403 });
+		expect(generate).toHaveBeenCalledTimes(2);
+	});
+
 	it('rejects an exhausted session-bootstrap bucket before repository work', async () => {
-		const { service, repository, quota, turnstile } = setup({
+		const { service, repository, quota, consent, turnstile } = setup({
 			generate: jest.fn()
 		});
 		const state = service as unknown as {
@@ -219,12 +267,14 @@ describe('WidgetsAiConsultantService', () => {
 				widget.publicKey,
 				'session_abcdef1234567890',
 				'one-time-turnstile-token',
+				'signed-consent-token',
 				'203.0.113.8',
 				'example.test',
 				false
 			)
 		).rejects.toMatchObject({ status: 429 });
 		expect(repository.findByPublicKey).not.toHaveBeenCalled();
+		expect(consent.prepareSession).not.toHaveBeenCalled();
 		expect(quota.aiSnapshot).not.toHaveBeenCalled();
 		expect(turnstile.validate).not.toHaveBeenCalled();
 	});

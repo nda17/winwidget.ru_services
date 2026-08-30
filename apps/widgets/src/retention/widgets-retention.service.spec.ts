@@ -71,6 +71,8 @@ describe('Widgets retention', () => {
 				maxBatches: 2
 			})
 		).resolves.toEqual({
+			consentPendingDeleted: 0,
+			consentVerifiedDeleted: 0,
 			callbackOtpChallengesDeleted: 0,
 			callbackOtpChallengesRedacted: 0,
 			callbackOtpRateBucketsDeleted: 0,
@@ -144,7 +146,7 @@ describe('Widgets retention', () => {
 		service.onModuleInit();
 		await new Promise(resolve => setImmediate(resolve));
 
-		expect(prisma.$executeRaw).toHaveBeenCalledTimes(4);
+		expect(prisma.$executeRaw).toHaveBeenCalledTimes(6);
 		expect(service.isReady()).toBe(true);
 		expect(service.status()).toEqual(
 			expect.objectContaining({
@@ -155,10 +157,71 @@ describe('Widgets retention', () => {
 				consecutiveFailures: 0,
 				lastAttemptAt: expect.any(String),
 				lastSuccessfulCleanupAt: expect.any(String),
-				lastFailureAt: null
+				lastFailureAt: null,
+				totals: expect.objectContaining({
+					consentPendingDeleted: 0,
+					consentVerifiedDeleted: 0
+				})
 			})
 		);
 		await service.beforeApplicationShutdown();
+	});
+
+	it('hard-deletes only expired pending and 1095-day verified consent receipts', async () => {
+		const executeRaw = jest.fn().mockResolvedValue(0);
+		const prisma = {
+			$executeRaw: executeRaw
+		} as unknown as WidgetsPrismaService;
+		const now = new Date('2026-08-30T00:00:00.000Z');
+
+		await expect(
+			runWidgetsRetentionCleanup(prisma, {
+				outboxDays: 7,
+				receiptDays: 90,
+				failureDetailDays: 30,
+				cleanupOutbox: false,
+				cleanupAiConsentState: true,
+				cleanupWorkerState: false,
+				now,
+				batchSize: 10,
+				maxBatches: 2
+			})
+		).resolves.toEqual(
+			expect.objectContaining({
+				consentPendingDeleted: 0,
+				consentVerifiedDeleted: 0
+			})
+		);
+
+		expect(executeRaw).toHaveBeenCalledTimes(2);
+		const pendingQuery = executeRaw.mock.calls[0][0] as {
+			strings: readonly string[];
+			values: readonly unknown[];
+		};
+		const verifiedQuery = executeRaw.mock.calls[1][0] as {
+			strings: readonly string[];
+			values: readonly unknown[];
+		};
+		const pendingSql = pendingQuery.strings.join('?');
+		const verifiedSql = verifiedQuery.strings.join('?');
+		expect(pendingSql).toContain(
+			'"status" = \'PENDING\'::"widgets"."AiConsentReceiptStatus"'
+		);
+		expect(pendingSql).toContain('"proof_expires_at" <=');
+		expect(pendingSql).toContain(
+			'DELETE FROM "widgets"."ai_consent_receipts"'
+		);
+		expect(verifiedSql).toContain(
+			'"status" = \'VERIFIED\'::"widgets"."AiConsentReceiptStatus"'
+		);
+		expect(verifiedSql).toContain('"accepted_at" <=');
+		expect(verifiedSql).toContain(
+			'DELETE FROM "widgets"."ai_consent_receipts"'
+		);
+		expect(pendingQuery.values).toContain(now);
+		expect(verifiedQuery.values).toContainEqual(
+			new Date(now.getTime() - 1095 * 24 * 60 * 60 * 1000)
+		);
 	});
 
 	it('deletes unconsumed OTP state and redacts expired consumed challenges in bounded batches', async () => {
