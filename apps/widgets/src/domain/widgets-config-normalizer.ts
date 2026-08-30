@@ -65,6 +65,26 @@ const AI_SECRET_PATTERNS = [
 
 const AI_PRIVACY_URL_MAX_LENGTH = 500;
 const AI_INSTRUCTIONS_PROMPT_MAX_BYTES = 16_000;
+const isWinWidgetHostname = (value: string): boolean => {
+	const hostname = value
+		.trim()
+		.toLowerCase()
+		.replace(/^www\./, '')
+		.replace(/\.+$/, '');
+	return hostname === 'winwidget.ru' || hostname.endsWith('.winwidget.ru');
+};
+
+export const isAllowedAiPrivacyUrl = (value: unknown): boolean => {
+	if (typeof value !== 'string' || !value.trim()) return false;
+	try {
+		const parsed = new URL(value.trim());
+		if (!['http:', 'https:'].includes(parsed.protocol)) return false;
+		if (parsed.username || parsed.password) return false;
+		return !isWinWidgetHostname(parsed.hostname);
+	} catch {
+		return false;
+	}
+};
 
 const aiInstructionsPrompt = (value: unknown): string => {
 	const prompt = stringValue(value).trim();

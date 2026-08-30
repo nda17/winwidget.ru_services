@@ -124,12 +124,18 @@ AI Consultant не создаёт заявку и не изменяет lead cou
 - текст инструкции ограничен 16 000 байт UTF-8; перед вызовом провайдера
   действует общий conservative input budget, в который сначала укладывается
   текущий вопрос, а затем только самая новая часть истории;
-- для публикации обязательна нормализованная HTTP(S)-ссылка `privacyUrl`, а
-  runtime показывает у поля ввода предупреждение не указывать персональные
-  данные и ссылку на политику;
+- для публикации обязательна нормализованная HTTP(S)-ссылка `privacyUrl`
+  владельца сайта; политика на `winwidget.ru` или его поддоменах запрещена в
+  клиентской настройке независимо от введённого домена установки, а сохранённая
+  ранее некорректная ссылка fail-closed выключает публичный config, создание
+  сессии и каждое сообщение по уже выданному session token;
+- runtime у поля ввода называет Cloudflare Workers AI, предупреждает не
+  указывать персональные данные и показывает ссылку на политику владельца;
 - конфигурация отклоняет PEM/private keys и распространённые token/password
   строки фиксированной ошибкой без вывода содержимого;
-- PDF/Word, RAG, отдельная база знаний, заявки и хранение transcript отсутствуют.
+- PDF/Word, RAG, отдельная база знаний, заявки и хранение transcript отсутствуют;
+  ответ `requestId` dedupe хранится только в памяти процесса и удаляется не
+  позднее чем через 5 минут.
 
 Провайдер вызывается через Cloudflare Workers AI REST API. Обязательные
 переменные: `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN`,
@@ -137,7 +143,9 @@ AI Consultant не создаёт заявку и не изменяет lead cou
 `CLOUDFLARE_TURNSTILE_SITE_KEY`, `CLOUDFLARE_TURNSTILE_SECRET_KEY` и
 `WIDGETS_AI_SESSION_SECRET`; timeout задаётся отдельными AI/Turnstile
 переменными. API token требует Workers AI и Turnstile Sites Write. Payload
-logging в AI Gateway принудительно отключён.
+logging в AI Gateway принудительно отключён обоими заголовками
+`cf-aig-collect-log: false` и `cf-aig-collect-log-payload: false`, поэтому
+Cloudflare AI Gateway не сохраняет payload или metadata этих запросов.
 Для выбранного reasoning-моделя Qwen3 оба вызова принудительно завершают
 последнее сообщение строкой `/no_think`; пользовательский `/think` не может
 переопределить этот режим, а короткий verifier не расходует бюджет на reasoning.

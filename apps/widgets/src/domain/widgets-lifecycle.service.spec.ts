@@ -44,7 +44,12 @@ describe('WidgetsLifecycleService AI consultant readiness', () => {
 		'',
 		'javascript:alert(1)',
 		'ftp://example.test/privacy',
-		'not-a-url'
+		'not-a-url',
+		'https://winwidget.ru/legal-documentation/consent-processing',
+		'https://winwidget.ru/legal-documentation/consent-processing?source=client',
+		'https://privacy.winwidget.ru/policy',
+		'https://privacy.winwidget.ru./policy',
+		'https://winwidget.ru@privacy.example.test/policy'
 	])('blocks publish without an HTTP(S) privacy URL: %s', privacyUrl => {
 		const lifecycle = service() as unknown as {
 			assertPublishCandidate(
@@ -94,6 +99,41 @@ describe('WidgetsLifecycleService AI consultant readiness', () => {
 			).not.toThrow();
 		}
 	);
+
+	it('rejects a WinWidget policy even when a client enters a WinWidget install domain', () => {
+		const lifecycle = service() as unknown as {
+			assertPublishCandidate(
+				type: WidgetType,
+				widget: WidgetEntity,
+				expectedDraftRevision: number
+			): void;
+		};
+		const ownWidget = {
+			...candidate(
+				'https://winwidget.ru/legal-documentation/consent-processing'
+			),
+			draftInstallDomain: 'www.winwidget.ru.'
+		};
+
+		expect(() =>
+			lifecycle.assertPublishCandidate(
+				WidgetType.AI_CONSULTANT,
+				ownWidget,
+				1
+			)
+		).toThrow(BadRequestException);
+		try {
+			lifecycle.assertPublishCandidate(
+				WidgetType.AI_CONSULTANT,
+				ownWidget,
+				1
+			);
+		} catch (error) {
+			expect(
+				JSON.stringify((error as BadRequestException).getResponse())
+			).toContain('PRIVACY_URL_REQUIRED');
+		}
+	});
 
 	it.each([
 		WidgetType.AI_CONSULTANT,

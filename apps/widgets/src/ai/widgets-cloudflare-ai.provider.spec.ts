@@ -24,7 +24,7 @@ describe('WidgetsCloudflareAiProvider', () => {
 		jest.restoreAllMocks();
 	});
 
-	it('uses the current AI Gateway REST contract without payload logging or cache', async () => {
+	it('uses the current AI Gateway REST contract without logging or cache', async () => {
 		const fetchMock = jest.fn().mockResolvedValue(
 			new Response(
 				JSON.stringify({
@@ -59,6 +59,7 @@ describe('WidgetsCloudflareAiProvider', () => {
 				authorization: 'Bearer secret-token',
 				'cache-control': 'no-store',
 				'cf-aig-gateway-id': 'winwidget-ai',
+				'cf-aig-collect-log': 'false',
 				'cf-aig-collect-log-payload': 'false',
 				'cf-aig-skip-cache': 'true',
 				'cf-aig-max-attempts': '1'

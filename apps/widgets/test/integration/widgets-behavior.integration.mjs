@@ -256,7 +256,8 @@ function widgetCases() {
 			config: {
 				operatorName: 'Alex',
 				instructionsPrompt: 'Товар Behavior стоит 1000 рублей.',
-				inactivityTimeoutMinutes: 10
+				inactivityTimeoutMinutes: 10,
+				privacyUrl: 'https://shop.example.test/privacy'
 			}
 		},
 		{
@@ -1763,6 +1764,7 @@ function createCloudflareServer() {
 				request.headers.authorization !==
 					'Bearer behavior-cloudflare-token' ||
 				request.headers['cf-aig-gateway-id'] !== 'behavior-ai-gateway' ||
+				request.headers['cf-aig-collect-log'] !== 'false' ||
 				request.headers['cf-aig-collect-log-payload'] !== 'false' ||
 				request.headers['cf-aig-skip-cache'] !== 'true' ||
 				body.model !== '@cf/qwen/qwen3-30b-a3b-fp8' ||

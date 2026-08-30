@@ -26,7 +26,10 @@ import {
 	WidgetEntity,
 	WidgetType
 } from './widgets-domain.types';
-import { normalizeWidgetConfig } from './widgets-config-normalizer';
+import {
+	isAllowedAiPrivacyUrl,
+	normalizeWidgetConfig
+} from './widgets-config-normalizer';
 import { WidgetsImageLifecycleService } from './widgets-image-lifecycle.service';
 import { WidgetsReportingService } from './widgets-reporting.service';
 
@@ -504,16 +507,11 @@ export class WidgetsLifecycleService {
 			});
 		}
 		if (type === WidgetType.AI_CONSULTANT) {
-			try {
-				const privacy = new URL(String(config.privacyUrl || ''));
-				if (!['http:', 'https:'].includes(privacy.protocol)) {
-					throw new Error();
-				}
-			} catch {
+			if (!isAllowedAiPrivacyUrl(config.privacyUrl)) {
 				blockers.push({
 					code: 'PRIVACY_URL_REQUIRED',
 					message:
-						'Укажите ссылку на политику обработки персональных данных'
+						'Укажите политику владельца сайта с раскрытием обработки Cloudflare AI'
 				});
 			}
 		}

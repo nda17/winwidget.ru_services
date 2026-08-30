@@ -356,7 +356,9 @@
 	var privacyNotice = document.createElement('div');
 	privacyNotice.className = 'waic-privacy';
 	privacyNotice.appendChild(
-		document.createTextNode('Не указывайте персональные данные. ')
+		document.createTextNode(
+			'Не указывайте персональные данные. Вопрос и контекст диалога обрабатываются Cloudflare Workers AI. '
+		)
 	);
 	var privacyLink = document.createElement('a');
 	privacyLink.target = '_blank';

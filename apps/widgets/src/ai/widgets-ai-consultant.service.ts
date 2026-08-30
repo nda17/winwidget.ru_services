@@ -12,7 +12,10 @@ import {
 import { Buffer } from 'node:buffer';
 import { createHash } from 'node:crypto';
 import { WidgetsAccessService } from '../domain/widgets-access.service';
-import { normalizeWidgetConfig } from '../domain/widgets-config-normalizer';
+import {
+	isAllowedAiPrivacyUrl,
+	normalizeWidgetConfig
+} from '../domain/widgets-config-normalizer';
 import { WidgetsDomainRepository } from '../domain/widgets-domain.repository';
 import {
 	asJsonObject,
@@ -187,6 +190,11 @@ export class WidgetsAiConsultantService {
 		if (!expectedHostname) {
 			throw new ForbiddenException('Домен установки виджета не совпадает');
 		}
+		if (!isAllowedAiPrivacyUrl(asJsonObject(widget.config).privacyUrl)) {
+			throw new ForbiddenException(
+				'Владелец сайта не настроил политику обработки данных AI-консультанта'
+			);
+		}
 		await this.turnstile.validate({
 			token: turnstileToken,
 			ip,
@@ -297,11 +305,19 @@ export class WidgetsAiConsultantService {
 				this.inFlightSessions.delete(sessionKey);
 			}
 		});
+		const expiresAt = now + DEDUPE_TTL_MS;
 		this.dedupe.set(context.input.requestId, {
 			fingerprint,
 			promise: operation,
-			expiresAt: now + DEDUPE_TTL_MS
+			expiresAt
 		});
+		const evictionTimer = setTimeout(() => {
+			const entry = this.dedupe.get(context.input.requestId);
+			if (entry?.expiresAt === expiresAt) {
+				this.dedupe.delete(context.input.requestId);
+			}
+		}, DEDUPE_TTL_MS);
+		evictionTimer.unref();
 		return operation;
 	}
 
@@ -407,8 +423,16 @@ export class WidgetsAiConsultantService {
 		if (!widget) throw new NotFoundException('Виджет не найден');
 		this.assertPublicWidgetState(widget);
 		this.sessionTokens.assertWidget(claims, widget);
+		const config = asJsonObject(
+			normalizeWidgetConfig(WidgetType.AI_CONSULTANT, widget.config)
+		);
+		if (!isAllowedAiPrivacyUrl(config.privacyUrl)) {
+			throw new ForbiddenException(
+				'Владелец сайта не настроил политику обработки данных AI-консультанта'
+			);
+		}
 		await this.quota.aiSnapshot(widget.userId);
-		return this.aiConfig(widget.config);
+		return this.aiConfig(config);
 	}
 
 	private async requirePublicWidget(

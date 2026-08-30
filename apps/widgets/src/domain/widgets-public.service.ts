@@ -19,7 +19,10 @@ import {
 } from '../callback/widgets-callback-otp.service';
 import { WidgetsDomainEventsService } from '../messaging/widgets-domain-events.service';
 import { WidgetsQuotaService } from '../quota/widgets-quota.service';
-import { normalizeWidgetConfig } from './widgets-config-normalizer';
+import {
+	isAllowedAiPrivacyUrl,
+	normalizeWidgetConfig
+} from './widgets-config-normalizer';
 import { WidgetsDomainRepository } from './widgets-domain.repository';
 import { asJsonObject, WidgetType } from './widgets-domain.types';
 import {
@@ -93,6 +96,16 @@ export class WidgetsPublicService {
 			return { isActive: false };
 		}
 
+		const config = asJsonObject(
+			normalizeWidgetConfig(type, widget.config)
+		);
+		if (
+			type === WidgetType.AI_CONSULTANT &&
+			!isAllowedAiPrivacyUrl(config.privacyUrl)
+		) {
+			return { isActive: false };
+		}
+
 		let snapshot;
 		try {
 			snapshot =
@@ -102,9 +115,6 @@ export class WidgetsPublicService {
 		} catch {
 			return { isActive: false };
 		}
-		const config = asJsonObject(
-			normalizeWidgetConfig(type, widget.config)
-		);
 		const limit = snapshot.entitlement.maxLeadsPerPeriod;
 		if (
 			!this.contactCollectionDisabled(type, config) &&

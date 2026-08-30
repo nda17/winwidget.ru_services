@@ -336,7 +336,7 @@ const definitions: WidgetDefinition[] = [
 			greeting:
 				'Здравствуйте! Я Alex, AI-оператор.\nГотов помочь и ответить на ваши вопросы о товарах, услугах и условиях компании.',
 			instructionsPrompt: '',
-			privacyUrl: PRIVACY_URL,
+			privacyUrl: '',
 			inactivityTimeoutMinutes: 10,
 			farewellMessage:
 				'Я не дождался ответа. Если у вас появятся вопросы, напишите снова — я обязательно помогу.',

@@ -298,7 +298,8 @@ describe('WidgetsTypeRegistryService', () => {
 			{
 				...config(WidgetType.AI_CONSULTANT),
 				instructionsPrompt: 'Секретные цены',
-				operatorName: 'Alex'
+				operatorName: 'Alex',
+				privacyUrl: 'https://example.test/privacy'
 			},
 			{
 				publishedVersion: 2,
@@ -310,8 +311,7 @@ describe('WidgetsTypeRegistryService', () => {
 			isActive: true,
 			publishedVersion: 2,
 			operatorName: 'Alex',
-			privacyUrl:
-				'https://winwidget.ru/legal-documentation/consent-processing',
+			privacyUrl: 'https://example.test/privacy',
 			inactivityTimeoutMinutes: 10
 		});
 		expect(response).not.toHaveProperty('instructionsPrompt');

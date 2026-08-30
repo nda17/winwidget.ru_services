@@ -550,6 +550,9 @@ function browserPage(browserCase) {
 				!shadow.querySelector('.waic-privacy').textContent.includes(
 					'Не указывайте персональные данные'
 				) ||
+				!shadow.querySelector('.waic-privacy').textContent.includes(
+					'обрабатываются Cloudflare Workers AI'
+				) ||
 				!/^https?:\/\//.test(privacyLink.getAttribute('href') || '')
 			) {
 				throw new Error('AI consultant privacy notice drifted');

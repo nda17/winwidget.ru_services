@@ -21,7 +21,8 @@ const widget = {
 	installDomain: 'example.test',
 	config: {
 		operatorName: 'Alex',
-		instructionsPrompt: 'Товар стоит 1000 рублей.'
+		instructionsPrompt: 'Товар стоит 1000 рублей.',
+		privacyUrl: 'https://example.test/privacy'
 	},
 	draftConfig: {
 		operatorName: 'Draft Alex',
@@ -143,6 +144,62 @@ describe('WidgetsAiConsultantService', () => {
 				publishedVersion: 1
 			})
 		);
+	});
+
+	it('rejects a client widget that still uses the WinWidget consent URL', async () => {
+		const { service, repository, quota, sessionTokens, turnstile } = setup(
+			{
+				generate: jest.fn()
+			}
+		);
+		repository.findByPublicKey.mockResolvedValue({
+			...widget,
+			config: {
+				...widget.config,
+				privacyUrl:
+					'https://winwidget.ru/legal-documentation/consent-processing'
+			}
+		});
+
+		await expect(
+			service.publicSession(
+				widget.publicKey,
+				'session_abcdef1234567890',
+				'one-time-turnstile-token',
+				'203.0.113.7',
+				'example.test',
+				false
+			)
+		).rejects.toMatchObject({ status: 403 });
+		expect(turnstile.validate).not.toHaveBeenCalled();
+		expect(quota.aiSnapshot).not.toHaveBeenCalled();
+		expect(sessionTokens.issue).not.toHaveBeenCalled();
+	});
+
+	it('rejects an existing public session after its widget loses an owner privacy policy', async () => {
+		const generate = groundedGenerate();
+		const { service, repository, quota, sessionTokens } = setup({
+			generate
+		});
+		repository.findByPublicKey.mockResolvedValue({
+			...widget,
+			config: {
+				...widget.config,
+				privacyUrl:
+					'https://winwidget.ru/legal-documentation/consent-processing'
+			}
+		});
+
+		await expect(
+			service.publicMessage(
+				widget.publicKey,
+				input() as never,
+				'127.0.0.1'
+			)
+		).rejects.toMatchObject({ status: 403 });
+		expect(sessionTokens.assertWidget).toHaveBeenCalled();
+		expect(quota.aiSnapshot).not.toHaveBeenCalled();
+		expect(generate).not.toHaveBeenCalled();
 	});
 
 	it('rejects an exhausted session-bootstrap bucket before repository work', async () => {
@@ -354,6 +411,30 @@ describe('WidgetsAiConsultantService', () => {
 				'127.0.0.1'
 			)
 		).toThrow(ConflictException);
+	});
+
+	it('removes an in-memory dedupe result after its five-minute TTL', async () => {
+		jest.useFakeTimers();
+		try {
+			const { service } = setup({ generate: groundedGenerate() });
+			await service.publicMessage(
+				widget.publicKey,
+				input() as never,
+				'127.0.0.1'
+			);
+			const dedupe = (
+				service as unknown as {
+					dedupe: Map<string, unknown>;
+				}
+			).dedupe;
+			expect(dedupe.size).toBe(1);
+
+			jest.advanceTimersByTime(5 * 60_000);
+
+			expect(dedupe.size).toBe(0);
+		} finally {
+			jest.useRealTimers();
+		}
 	});
 
 	it('validates bounded message DTOs and forbids unknown input fields', async () => {

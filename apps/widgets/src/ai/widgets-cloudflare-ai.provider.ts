@@ -61,6 +61,7 @@ export class WidgetsCloudflareAiProvider implements WidgetsAiProvider {
 					'cache-control': 'no-store',
 					'content-type': 'application/json',
 					'cf-aig-gateway-id': this.gatewayId,
+					'cf-aig-collect-log': 'false',
 					'cf-aig-collect-log-payload': 'false',
 					'cf-aig-skip-cache': 'true',
 					'cf-aig-request-timeout': String(this.timeoutMs),

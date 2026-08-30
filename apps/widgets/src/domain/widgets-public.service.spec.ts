@@ -15,7 +15,10 @@ const publicWidget = (type: WidgetType) => ({
 	publishedVersion: 1,
 	isActive: true,
 	installDomain: 'example.test',
-	config: { dataType: 'NONE' }
+	config: {
+		dataType: 'NONE',
+		privacyUrl: 'https://example.test/privacy'
+	}
 });
 
 describe('WidgetsPublicService parity', () => {
@@ -97,6 +100,78 @@ describe('WidgetsPublicService parity', () => {
 				expect(quota.aiSnapshot).toHaveBeenCalledWith(widget.userId);
 				expect(quota.snapshot).not.toHaveBeenCalled();
 			}
+		}
+	);
+
+	it.each([
+		[
+			'https://winwidget.ru/legal-documentation/consent-processing?source=client',
+			'example.test',
+			false
+		],
+		['https://privacy.winwidget.ru/policy', 'example.test', false],
+		['https://privacy.winwidget.ru./policy', 'example.test', false],
+		[
+			'https://winwidget.ru@privacy.example.test/policy',
+			'example.test',
+			false
+		],
+		[
+			'https://winwidget.ru/legal-documentation/consent-processing',
+			'winwidget.ru',
+			false
+		],
+		['https://example.test/privacy', 'example.test', true]
+	] as const)(
+		'fails closed for an AI privacy policy that does not belong to the site owner: %s',
+		async (privacyUrl, installDomain, expectedActive) => {
+			const widget = {
+				...publicWidget(WidgetType.AI_CONSULTANT),
+				installDomain,
+				config: { privacyUrl }
+			};
+			const quota = {
+				aiSnapshot: jest.fn().mockResolvedValue({
+					entitlement: {
+						plan: EntitlementPlan.EASY,
+						unlimited: true,
+						maxLeadsPerPeriod: null
+					},
+					counter: { leadCount: 0 }
+				})
+			};
+			const publicConfig = jest.fn().mockReturnValue({ isActive: true });
+			const service = new WidgetsPublicService(
+				{ findByPublicKey: jest.fn().mockResolvedValue(widget) } as never,
+				quota as never,
+				{} as never,
+				{} as never,
+				{
+					for: jest.fn().mockReturnValue({
+						publicDuplicateRule: jest.fn().mockReturnValue(null),
+						publicConfig
+					})
+				} as never,
+				{
+					siteKey: () => 'turnstile-site-key',
+					action: () => 'ai-consultant-session'
+				} as never,
+				{} as never
+			);
+
+			const result = await service.config(
+				WidgetType.AI_CONSULTANT,
+				widget.publicKey,
+				installDomain,
+				false,
+				'127.0.0.1'
+			);
+
+			expect(result?.isActive).toBe(expectedActive);
+			expect(quota.aiSnapshot).toHaveBeenCalledTimes(
+				expectedActive ? 1 : 0
+			);
+			expect(publicConfig).toHaveBeenCalledTimes(expectedActive ? 1 : 0);
 		}
 	);
 

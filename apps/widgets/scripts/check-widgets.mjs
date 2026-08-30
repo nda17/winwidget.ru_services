@@ -694,8 +694,8 @@ for (const [source, label] of [
 	],
 	['history: previousHistory', 'bounded in-memory history'],
 	[
-		"document.createTextNode('Не указывайте персональные данные. ')",
-		'personal-data warning'
+		"'Не указывайте персональные данные. Вопрос и контекст диалога обрабатываются Cloudflare Workers AI. '",
+		'personal-data warning and provider disclosure'
 	],
 	[
 		'getSafeExternalUrl(config.privacyUrl, false)',
