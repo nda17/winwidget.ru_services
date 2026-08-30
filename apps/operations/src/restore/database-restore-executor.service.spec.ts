@@ -1,3 +1,4 @@
+import { DatabaseRestoreAclService } from './database-restore-acl.service';
 import { DatabaseRestoreArtifactValidatorService } from './database-restore-artifact-validator.service';
 import { DatabaseRestoreExecutorService } from './database-restore-executor.service';
 import { DatabaseRestoreProcessService } from './database-restore-process.service';
@@ -14,7 +15,12 @@ const target: DatabaseRestoreTargetConfiguration = {
 	adminRole: 'winwidget_reporting_admin',
 	migrationRole: 'winwidget_reporting_migration',
 	runtimeRole: 'winwidget_reporting_runtime',
-	backupRole: 'winwidget_reporting_backup'
+	backupRole: 'winwidget_reporting_backup',
+	acl: {
+		profile: 'standard',
+		routines: ['reject_report_run_snapshot_mutation()'],
+		runtimeRoutines: []
+	}
 };
 const connection: DatabaseRestoreConnection = {
 	host: '127.0.0.1',
@@ -68,20 +74,26 @@ const setup = () => {
 		restoreSchema: jest.fn(async () => {
 			calls.push('restore');
 		}),
-		applyAcl: jest.fn(async () => {
-			calls.push('acl');
-		}),
 		verifyMigrationLedger: jest.fn(async () => {
 			calls.push('ledger');
 			return true;
 		})
 	};
+	const acl = {
+		verify: jest.fn(async () => {
+			calls.push('acl-preflight');
+		}),
+		reconcileAndVerify: jest.fn(async () => {
+			calls.push('acl-reconcile');
+		})
+	};
 	const service = new DatabaseRestoreExecutorService(
 		targets as unknown as DatabaseRestoreTargetRegistryService,
 		artifacts as unknown as DatabaseRestoreArtifactValidatorService,
-		process as unknown as DatabaseRestoreProcessService
+		process as unknown as DatabaseRestoreProcessService,
+		acl as unknown as DatabaseRestoreAclService
 	);
-	return { service, targets, artifacts, process, calls };
+	return { service, targets, artifacts, process, acl, calls };
 };
 
 describe('DatabaseRestoreExecutorService', () => {
@@ -111,6 +123,7 @@ describe('DatabaseRestoreExecutorService', () => {
 			'checksum',
 			'toc',
 			'toc-validation',
+			'acl-preflight',
 			'safety-copy',
 			'safety-toc',
 			'toc-validation',
@@ -119,7 +132,7 @@ describe('DatabaseRestoreExecutorService', () => {
 			'checkpoint:MUTATING',
 			'recreate',
 			'restore',
-			'acl',
+			'acl-reconcile',
 			'ledger',
 			'checkpoint:VERIFIED'
 		]);
@@ -142,6 +155,7 @@ describe('DatabaseRestoreExecutorService', () => {
 		['checksum validation', 'assertChecksum', 'checksum failed'],
 		['TOC listing', 'listDump', 'toc failed'],
 		['TOC validation', 'assertTableOfContents', 'toc invalid'],
+		['ACL preflight', 'aclVerify', 'acl preflight failed'],
 		['safety copy', 'createSafetyCopy', 'safety failed'],
 		['safety TOC listing', 'safetyListDump', 'safety toc failed'],
 		[
@@ -153,7 +167,7 @@ describe('DatabaseRestoreExecutorService', () => {
 	])(
 		'propagates a pre-destructive %s error without the safety wrapper',
 		async (_label, point, message) => {
-			const { service, targets, artifacts, process, calls } = setup();
+			const { service, targets, artifacts, process, acl, calls } = setup();
 			if (point === 'connection')
 				targets.connection.mockRejectedValue(new Error(message));
 			if (point === 'sha256')
@@ -168,6 +182,8 @@ describe('DatabaseRestoreExecutorService', () => {
 				artifacts.assertTableOfContents.mockImplementation(() => {
 					throw new Error(message);
 				});
+			if (point === 'aclVerify')
+				acl.verify.mockRejectedValue(new Error(message));
 			if (point === 'createSafetyCopy')
 				process.createSafetyCopy.mockRejectedValue(new Error(message));
 			if (point === 'safetyListDump')
@@ -193,12 +209,25 @@ describe('DatabaseRestoreExecutorService', () => {
 				'Database restore failed after safety backup'
 			);
 			expect(restoreInput.checkpoint).not.toHaveBeenCalled();
+			if (
+				[
+					'connection',
+					'sha256',
+					'assertChecksum',
+					'listDump',
+					'assertTableOfContents',
+					'aclVerify'
+				].includes(point)
+			) {
+				expect(process.createSafetyCopy).not.toHaveBeenCalled();
+			}
 			expect(process.recreateSchema).not.toHaveBeenCalled();
+			expect(acl.reconcileAndVerify).not.toHaveBeenCalled();
 		}
 	);
 
 	it('does not create a safety copy or run destructive commands after TOC rejection', async () => {
-		const { service, artifacts, process } = setup();
+		const { service, artifacts, process, acl } = setup();
 		artifacts.assertTableOfContents.mockImplementation(() => {
 			throw new Error('toc invalid');
 		});
@@ -207,12 +236,13 @@ describe('DatabaseRestoreExecutorService', () => {
 		expect(process.createSafetyCopy).not.toHaveBeenCalled();
 		expect(process.recreateSchema).not.toHaveBeenCalled();
 		expect(process.restoreSchema).not.toHaveBeenCalled();
-		expect(process.applyAcl).not.toHaveBeenCalled();
+		expect(acl.verify).not.toHaveBeenCalled();
+		expect(acl.reconcileAndVerify).not.toHaveBeenCalled();
 		expect(process.verifyMigrationLedger).not.toHaveBeenCalled();
 	});
 
 	it('does not mutate the target when the MUTATING checkpoint is not durable', async () => {
-		const { service, process } = setup();
+		const { service, process, acl } = setup();
 		const restoreInput = input();
 		restoreInput.checkpoint.mockImplementation(async ({ phase }) => {
 			if (phase === 'MUTATING') {
@@ -225,25 +255,31 @@ describe('DatabaseRestoreExecutorService', () => {
 		);
 		expect(process.recreateSchema).not.toHaveBeenCalled();
 		expect(process.restoreSchema).not.toHaveBeenCalled();
-		expect(process.applyAcl).not.toHaveBeenCalled();
+		expect(acl.reconcileAndVerify).not.toHaveBeenCalled();
 	});
 
 	it.each([
 		['schema recreation', 'recreateSchema', ['recreate']],
 		['dump restore', 'restoreSchema', ['recreate', 'restore']],
-		['ACL application', 'applyAcl', ['recreate', 'restore', 'acl']],
+		[
+			'ACL reconciliation',
+			'reconcileAcl',
+			['recreate', 'restore', 'acl-reconcile']
+		],
 		[
 			'ledger query',
 			'verifyMigrationLedger',
-			['recreate', 'restore', 'acl', 'ledger']
+			['recreate', 'restore', 'acl-reconcile', 'ledger']
 		]
 	])(
 		'wraps a %s failure with the safety SHA and stops the sequence',
 		async (_label, method, destructiveCalls) => {
-			const { service, process, calls } = setup();
-			(
-				process[method as keyof typeof process] as jest.Mock
-			).mockImplementation(async () => {
+			const { service, process, acl, calls } = setup();
+			const failingMethod =
+				method === 'reconcileAcl'
+					? acl.reconcileAndVerify
+					: (process[method as keyof typeof process] as jest.Mock);
+			failingMethod.mockImplementation(async () => {
 				calls.push(destructiveCalls[destructiveCalls.length - 1]);
 				throw new Error('destructive failure');
 			});

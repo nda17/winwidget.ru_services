@@ -11,7 +11,8 @@ const target = (schema: string): DatabaseRestoreTargetConfiguration => ({
 	adminRole: `winwidget_${schema}_admin`,
 	migrationRole: `winwidget_${schema}_migration`,
 	runtimeRole: `winwidget_${schema}_runtime`,
-	backupRole: `winwidget_${schema}_backup`
+	backupRole: `winwidget_${schema}_backup`,
+	acl: { profile: 'standard', routines: [], runtimeRoutines: [] }
 });
 
 const SERVICE_SCHEMAS = [

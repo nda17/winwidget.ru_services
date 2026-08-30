@@ -2,6 +2,7 @@ import { ConfigService } from '@nestjs/config';
 import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DATABASE_RESTORE_ACL_CONTRACTS } from './database-restore-acl.contract';
 import { DATABASE_RESTORE_TARGETS } from './database-restore.contract';
 import { DatabaseRestoreTargetRegistryService } from './database-restore-target-registry.service';
 
@@ -22,7 +23,8 @@ describe('DatabaseRestoreTargetRegistryService', () => {
 				adminRole: 'winwidget_notification_delivery_admin',
 				migrationRole: 'winwidget_notification_delivery_migration',
 				runtimeRole: 'winwidget_notification_delivery_runtime',
-				backupRole: 'winwidget_notification_delivery_backup'
+				backupRole: 'winwidget_notification_delivery_backup',
+				acl: DATABASE_RESTORE_ACL_CONTRACTS['notification-delivery']
 			},
 			...[
 				'campaigns',
@@ -38,7 +40,10 @@ describe('DatabaseRestoreTargetRegistryService', () => {
 				adminRole: `winwidget_${name}_admin`,
 				migrationRole: `winwidget_${name}_migration`,
 				runtimeRole: `winwidget_${name}_runtime`,
-				backupRole: `winwidget_${name}_backup`
+				backupRole: `winwidget_${name}_backup`,
+				acl: DATABASE_RESTORE_ACL_CONTRACTS[
+					name as keyof typeof DATABASE_RESTORE_ACL_CONTRACTS
+				]
 			}))
 		]);
 		expect(registry.all()).toHaveLength(DATABASE_RESTORE_TARGETS.length);

@@ -3,6 +3,10 @@ import { ConfigService } from '@nestjs/config';
 import { constants } from 'node:fs';
 import { open, type FileHandle } from 'node:fs/promises';
 import { isAbsolute } from 'node:path';
+import {
+	DATABASE_RESTORE_ACL_CONTRACTS,
+	DatabaseRestoreAclContract
+} from './database-restore-acl.contract';
 import { DatabaseRestoreTarget } from './database-restore.contract';
 
 export interface DatabaseRestoreTargetConfiguration {
@@ -13,6 +17,7 @@ export interface DatabaseRestoreTargetConfiguration {
 	migrationRole: string;
 	runtimeRole: string;
 	backupRole: string;
+	acl: DatabaseRestoreAclContract;
 }
 
 export interface DatabaseRestoreConnection {
@@ -34,7 +39,8 @@ const TARGETS: Record<
 		adminRole: 'winwidget_notification_delivery_admin',
 		migrationRole: 'winwidget_notification_delivery_migration',
 		runtimeRole: 'winwidget_notification_delivery_runtime',
-		backupRole: 'winwidget_notification_delivery_backup'
+		backupRole: 'winwidget_notification_delivery_backup',
+		acl: DATABASE_RESTORE_ACL_CONTRACTS['notification-delivery']
 	},
 	campaigns: {
 		environmentPrefix: 'CAMPAIGNS',
@@ -43,7 +49,8 @@ const TARGETS: Record<
 		adminRole: 'winwidget_campaigns_admin',
 		migrationRole: 'winwidget_campaigns_migration',
 		runtimeRole: 'winwidget_campaigns_runtime',
-		backupRole: 'winwidget_campaigns_backup'
+		backupRole: 'winwidget_campaigns_backup',
+		acl: DATABASE_RESTORE_ACL_CONTRACTS.campaigns
 	},
 	reporting: {
 		environmentPrefix: 'REPORTING',
@@ -52,7 +59,8 @@ const TARGETS: Record<
 		adminRole: 'winwidget_reporting_admin',
 		migrationRole: 'winwidget_reporting_migration',
 		runtimeRole: 'winwidget_reporting_runtime',
-		backupRole: 'winwidget_reporting_backup'
+		backupRole: 'winwidget_reporting_backup',
+		acl: DATABASE_RESTORE_ACL_CONTRACTS.reporting
 	},
 	widgets: {
 		environmentPrefix: 'WIDGETS',
@@ -61,7 +69,8 @@ const TARGETS: Record<
 		adminRole: 'winwidget_widgets_admin',
 		migrationRole: 'winwidget_widgets_migration',
 		runtimeRole: 'winwidget_widgets_runtime',
-		backupRole: 'winwidget_widgets_backup'
+		backupRole: 'winwidget_widgets_backup',
+		acl: DATABASE_RESTORE_ACL_CONTRACTS.widgets
 	},
 	identity: {
 		environmentPrefix: 'IDENTITY',
@@ -70,7 +79,8 @@ const TARGETS: Record<
 		adminRole: 'winwidget_identity_admin',
 		migrationRole: 'winwidget_identity_migration',
 		runtimeRole: 'winwidget_identity_runtime',
-		backupRole: 'winwidget_identity_backup'
+		backupRole: 'winwidget_identity_backup',
+		acl: DATABASE_RESTORE_ACL_CONTRACTS.identity
 	},
 	platform: {
 		environmentPrefix: 'PLATFORM',
@@ -79,7 +89,8 @@ const TARGETS: Record<
 		adminRole: 'winwidget_platform_admin',
 		migrationRole: 'winwidget_platform_migration',
 		runtimeRole: 'winwidget_platform_runtime',
-		backupRole: 'winwidget_platform_backup'
+		backupRole: 'winwidget_platform_backup',
+		acl: DATABASE_RESTORE_ACL_CONTRACTS.platform
 	},
 	support: {
 		environmentPrefix: 'SUPPORT',
@@ -88,7 +99,8 @@ const TARGETS: Record<
 		adminRole: 'winwidget_support_admin',
 		migrationRole: 'winwidget_support_migration',
 		runtimeRole: 'winwidget_support_runtime',
-		backupRole: 'winwidget_support_backup'
+		backupRole: 'winwidget_support_backup',
+		acl: DATABASE_RESTORE_ACL_CONTRACTS.support
 	}
 };
 

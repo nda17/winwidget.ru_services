@@ -153,8 +153,6 @@ recovery evidence не вынесены из восстанавливаемой 
 
 Осталось:
 
-- После restore fail-closed сверять фактические schema/table/sequence/default
-  ACL grants, а не только наличие `_prisma_migrations`.
 - выполнить exact-SHA Linux/Docker/PostgreSQL 18 rehearsal всех targets,
   включая несовместимый dump, нехватку места, cancel race, restart checkpoint,
   ACL drift и изоляцию чужих БД;
@@ -168,17 +166,16 @@ recovery evidence не вынесены из восстанавливаемой 
   в новую изолированную PostgreSQL с проверкой до switch;
 - закрепить retention restore artifacts и alerts на зависшие job/fence.
 
-### P1 — hardening default ACL PostgreSQL functions
-
-- Проаудировать все девять service-owned БД и определить, где ещё нет
-  fail-closed проверки `pg_default_acl` и `pg_proc.proacl`.
-- Для каждой найденной БД добавить новую immutable migration: отозвать
-  неявный `PUBLIC EXECUTE` и задать default privileges фактическому owner.
-- Использовать точный allowlist routines; неожиданные функции или grants
-  должны останавливать rollout.
-- Проверить ACL на чистой PostgreSQL 18, после migrations и после restore.
-
 ## Платежи и юридические требования
+
+### P1 — Billing default ACL PostgreSQL
+
+Billing исключён из общего ACL-hardening до отдельной проверки платёжного
+контура. Перед закрытием payment review нужно проаудировать `pg_default_acl` и
+`pg_proc.proacl`, зафиксировать точный routine allowlist новой immutable
+migration и доказать fail-closed поведение на чистой PostgreSQL 18, после
+migrations и после restore. Не переносить в Billing изменения других сервисов
+без отдельного платёжного решения.
 
 ### P2 — безопасная ротация ключа платёжных методов
 

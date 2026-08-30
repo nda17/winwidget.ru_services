@@ -21,7 +21,8 @@ const target: DatabaseRestoreTargetConfiguration = {
 	adminRole: 'winwidget_operations_admin',
 	migrationRole: 'winwidget_operations_migration',
 	runtimeRole: 'winwidget_operations_runtime',
-	backupRole: 'winwidget_operations_backup'
+	backupRole: 'winwidget_operations_backup',
+	acl: { profile: 'standard', routines: [], runtimeRoutines: [] }
 };
 const connection: DatabaseRestoreConnection = {
 	host: '127.0.0.1',
@@ -51,7 +52,6 @@ interface ProcessInternals {
 	connectionArguments(value: DatabaseRestoreConnection): string[];
 	environment(password: string | null): NodeJS.ProcessEnv;
 	identifier(value: string): string;
-	aclSql(value: DatabaseRestoreTargetConfiguration): string;
 	syncPath(path: string): Promise<void>;
 	wait(
 		child: ReturnType<typeof spawnMock>,
@@ -160,8 +160,8 @@ describe('DatabaseRestoreProcessService command plans', () => {
 		);
 	});
 
-	it('applies the exact existing ACL plan', async () => {
-		await service.applyAcl(connection, target);
+	it('executes an exact SQL plan through the admin connection', async () => {
+		await service.executeSql(connection, 'SELECT 1;');
 
 		expect(command).toHaveBeenCalledWith(
 			'psql',
@@ -171,15 +171,7 @@ describe('DatabaseRestoreProcessService command plans', () => {
 				'ON_ERROR_STOP=1',
 				...connectionArguments,
 				'--command',
-				[
-					'GRANT USAGE ON SCHEMA "operations" TO "winwidget_operations_runtime", "winwidget_operations_backup";',
-					'GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA "operations" TO "winwidget_operations_runtime";',
-					'GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA "operations" TO "winwidget_operations_runtime";',
-					'GRANT SELECT ON ALL TABLES IN SCHEMA "operations" TO "winwidget_operations_backup";',
-					'ALTER DEFAULT PRIVILEGES FOR ROLE "winwidget_operations_migration" IN SCHEMA "operations" GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO "winwidget_operations_runtime";',
-					'ALTER DEFAULT PRIVILEGES FOR ROLE "winwidget_operations_migration" IN SCHEMA "operations" GRANT USAGE, SELECT, UPDATE ON SEQUENCES TO "winwidget_operations_runtime";',
-					'ALTER DEFAULT PRIVILEGES FOR ROLE "winwidget_operations_migration" IN SCHEMA "operations" GRANT SELECT ON TABLES TO "winwidget_operations_backup";'
-				].join(' ')
+				'SELECT 1;'
 			],
 			connection.password,
 			{ signal: undefined }

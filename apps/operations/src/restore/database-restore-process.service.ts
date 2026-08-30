@@ -128,9 +128,9 @@ export class DatabaseRestoreProcessService {
 		);
 	}
 
-	async applyAcl(
+	async executeSql(
 		connection: DatabaseRestoreConnection,
-		target: DatabaseRestoreTargetConfiguration,
+		sql: string,
 		signal?: AbortSignal
 	): Promise<void> {
 		signal?.throwIfAborted();
@@ -142,7 +142,7 @@ export class DatabaseRestoreProcessService {
 				'ON_ERROR_STOP=1',
 				...this.connectionArguments(connection),
 				'--command',
-				this.aclSql(target)
+				sql
 			],
 			connection.password,
 			{ signal }
@@ -349,22 +349,6 @@ export class DatabaseRestoreProcessService {
 			}
 			if (initialError) requestStop(initialError);
 		});
-	}
-
-	private aclSql(target: DatabaseRestoreTargetConfiguration): string {
-		const schema = this.identifier(target.schema);
-		const runtime = this.identifier(target.runtimeRole);
-		const backup = this.identifier(target.backupRole);
-		const migration = this.identifier(target.migrationRole);
-		return [
-			`GRANT USAGE ON SCHEMA ${schema} TO ${runtime}, ${backup};`,
-			`GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA ${schema} TO ${runtime};`,
-			`GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA ${schema} TO ${runtime};`,
-			`GRANT SELECT ON ALL TABLES IN SCHEMA ${schema} TO ${backup};`,
-			`ALTER DEFAULT PRIVILEGES FOR ROLE ${migration} IN SCHEMA ${schema} GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO ${runtime};`,
-			`ALTER DEFAULT PRIVILEGES FOR ROLE ${migration} IN SCHEMA ${schema} GRANT USAGE, SELECT, UPDATE ON SEQUENCES TO ${runtime};`,
-			`ALTER DEFAULT PRIVILEGES FOR ROLE ${migration} IN SCHEMA ${schema} GRANT SELECT ON TABLES TO ${backup};`
-		].join(' ');
 	}
 
 	private identifier(value: string): string {

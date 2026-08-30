@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { DatabaseRestoreTarget } from './database-restore.contract';
+import { DatabaseRestoreAclService } from './database-restore-acl.service';
 import { DatabaseRestoreArtifactValidatorService } from './database-restore-artifact-validator.service';
 import { DatabaseRestoreProcessService } from './database-restore-process.service';
 import { DatabaseRestoreTargetRegistryService } from './database-restore-target-registry.service';
@@ -18,7 +19,8 @@ export class DatabaseRestoreExecutorService {
 	constructor(
 		private readonly targets: DatabaseRestoreTargetRegistryService,
 		private readonly artifacts: DatabaseRestoreArtifactValidatorService,
-		private readonly process: DatabaseRestoreProcessService
+		private readonly process: DatabaseRestoreProcessService,
+		private readonly acl: DatabaseRestoreAclService
 	) {}
 
 	async restore(input: {
@@ -41,6 +43,7 @@ export class DatabaseRestoreExecutorService {
 			input.signal
 		);
 		this.artifacts.assertTableOfContents(tableOfContents, target);
+		await this.acl.verify(connection, target, input.signal);
 		const safetyPath = `${input.source}.safety`;
 		await this.process.createSafetyCopy(
 			connection,
@@ -74,7 +77,7 @@ export class DatabaseRestoreExecutorService {
 				input.source,
 				input.signal
 			);
-			await this.process.applyAcl(connection, target, input.signal);
+			await this.acl.reconcileAndVerify(connection, target, input.signal);
 			if (
 				!(await this.process.verifyMigrationLedger(
 					connection,

@@ -149,9 +149,21 @@ Safety copy после закрытия pipeline синхронизируетс�
 проходит тот же exact schema/owner TOC invariant. Только после этого фиксируются
 `SAFETY_READY` и `MUTATING`.
 
-Текущий production restore остаётся выключенным также до внедрения exact
-pre/post ACL verification: общий grant не является достаточным доказательством
-прав runtime, backup, migration, `PUBLIC`, ledger и routines.
+До safety copy worker fail-closed сверяет из PostgreSQL catalog точные роли,
+membership, database/schema/object owners, table/column/sequence/routine grants
+и global/schema default ACL. Изолированный bootstrap-admin каждой service-owned
+PostgreSQL обязан быть `LOGIN + SUPERUSER`; migration/runtime/backup роли не
+могут быть superuser, наследовать роли или входить в membership. После restore
+worker в одной транзакции переключается на migration owner, отзывает известные
+grants, восстанавливает точную runtime/backup матрицу, повторяет catalog-проверку
+и только затем выполняет `COMMIT` и фиксирует `VERIFIED`. Для Platform разрешены
+ровно восемь обычных таблиц, нет sequences и blanket runtime default grants;
+runtime получает только явный table/column/function allowlist.
+
+Production restore остаётся выключенным до полного exact-SHA rehearsal
+dump/restore, one-shot permit и signed receipt, утверждённого
+`RECOVERY_REQUIRED` workflow с dual approval, а также retention и alerts для
+restore artifacts/job/fence.
 
 Production-трафик Telegram сохраняет установленный контракт зашифрованного
 прокси: `TELEGRAM_API_BASE_URL=https://tg.winwidget.ru/telegram-api`. Только
