@@ -51,6 +51,12 @@ interface ProcessInternals {
 	environment(password: string | null): NodeJS.ProcessEnv;
 	identifier(value: string): string;
 	aclSql(value: DatabaseRestoreTargetConfiguration): string;
+	wait(
+		child: ReturnType<typeof spawnMock>,
+		password: string | null,
+		output?: Promise<void>,
+		initialError?: Error
+	): Promise<void>;
 }
 
 const childProcess = () => {
@@ -63,6 +69,19 @@ const childProcess = () => {
 	child.stderr = new PassThrough();
 	child.kill = jest.fn();
 	return child;
+};
+
+const observeSettlement = (promise: Promise<unknown>) => {
+	let state: 'pending' | 'resolved' | 'rejected' = 'pending';
+	void promise.then(
+		() => {
+			state = 'resolved';
+		},
+		() => {
+			state = 'rejected';
+		}
+	);
+	return () => state;
 };
 
 describe('DatabaseRestoreProcessService command plans', () => {
@@ -209,6 +228,7 @@ describe('DatabaseRestoreProcessService command plans', () => {
 
 describe('DatabaseRestoreProcessService process boundary', () => {
 	beforeEach(() => spawnMock.mockReset());
+	afterEach(() => jest.useRealTimers());
 
 	it('captures successful stdout and uses the exact minimal command environment', async () => {
 		const child = childProcess();
@@ -294,18 +314,79 @@ describe('DatabaseRestoreProcessService process boundary', () => {
 		}
 	});
 
-	it('rejects a safety dump without stdout using the stable error', async () => {
+	it('waits for output settlement after the child closes successfully', async () => {
+		const directory = await mkdtemp(join(tmpdir(), 'restore-safety-'));
+		const path = join(directory, 'job.dump.safety');
+		const child = childProcess();
+		spawnMock.mockReturnValue(child);
+		const result = new DatabaseRestoreProcessService().createSafetyCopy(
+			connection,
+			'operations',
+			path
+		);
+		const settlement = observeSettlement(result);
+
+		try {
+			child.stdout?.write(Buffer.from('PGDMP-safety'));
+			child.emit('close', 0);
+			await Promise.resolve();
+			expect(settlement()).toBe('pending');
+
+			child.stdout?.end();
+			await expect(result).resolves.toBeUndefined();
+			await expect(readFile(path, 'utf8')).resolves.toBe('PGDMP-safety');
+		} finally {
+			await rm(directory, { recursive: true, force: true });
+		}
+	});
+
+	it('terminates a safety dump after a pipeline error and waits for close', async () => {
+		jest.useFakeTimers();
+		const child = childProcess();
+		const output = Promise.resolve().then(() => {
+			throw new Error('safety pipeline failed');
+		});
+		const result = (
+			new DatabaseRestoreProcessService() as unknown as ProcessInternals
+		).wait(child as never, connection.password, output);
+		const settlement = observeSettlement(result);
+
+		await jest.advanceTimersByTimeAsync(0);
+		expect(child.kill).toHaveBeenCalledTimes(1);
+		expect(child.kill).toHaveBeenNthCalledWith(1, 'SIGTERM');
+		expect(settlement()).toBe('pending');
+
+		await jest.advanceTimersByTimeAsync(10_000);
+		expect(child.kill).toHaveBeenCalledTimes(2);
+		expect(child.kill).toHaveBeenNthCalledWith(2, 'SIGKILL');
+		expect(settlement()).toBe('pending');
+
+		child.emit('close', null, 'SIGKILL');
+		await expect(result).rejects.toThrow('safety pipeline failed');
+	});
+
+	it('terminates a safety dump without stdout and waits for close', async () => {
+		jest.useFakeTimers();
 		const child = childProcess();
 		child.stdout = null;
 		spawnMock.mockReturnValue(child);
+		const result = new DatabaseRestoreProcessService().createSafetyCopy(
+			connection,
+			'operations',
+			'/unused/safety.dump'
+		);
+		const settlement = observeSettlement(result);
 
-		await expect(
-			new DatabaseRestoreProcessService().createSafetyCopy(
-				connection,
-				'operations',
-				'/unused/safety.dump'
-			)
-		).rejects.toThrow('Safety backup stdout is unavailable');
+		expect(child.kill).toHaveBeenCalledWith('SIGTERM');
+		expect(settlement()).toBe('pending');
+		await jest.advanceTimersByTimeAsync(10_000);
+		expect(child.kill).toHaveBeenLastCalledWith('SIGKILL');
+		expect(settlement()).toBe('pending');
+
+		child.emit('close', null, 'SIGKILL');
+		await expect(result).rejects.toThrow(
+			'Safety backup stdout is unavailable'
+		);
 	});
 
 	it('captures stdout and redacts the password from a non-zero command error', async () => {
@@ -323,6 +404,26 @@ describe('DatabaseRestoreProcessService process boundary', () => {
 		await expect(result).rejects.toThrow('failure [REDACTED]');
 	});
 
+	it('keeps the child error ahead of a secondary output failure', async () => {
+		const child = childProcess();
+		let rejectOutput!: (error: Error) => void;
+		const output = new Promise<void>((_resolve, reject) => {
+			rejectOutput = reject;
+		});
+		const result = (
+			new DatabaseRestoreProcessService() as unknown as ProcessInternals
+		).wait(child as never, connection.password, output);
+
+		child.stderr?.write(`failure ${connection.password}`);
+		child.emit('exit', 2);
+		rejectOutput(new Error('secondary pipeline failure'));
+		await Promise.resolve();
+		child.emit('close', 2);
+
+		await expect(result).rejects.toThrow('failure [REDACTED]');
+		expect(child.kill).not.toHaveBeenCalled();
+	});
+
 	it('uses the stable fallback for a non-zero command without stderr', async () => {
 		const child = childProcess();
 		spawnMock.mockReturnValue(child);
@@ -337,19 +438,65 @@ describe('DatabaseRestoreProcessService process boundary', () => {
 		);
 	});
 
-	it('propagates a spawn error', async () => {
+	it('propagates a spawn error only after the child close boundary', async () => {
 		const child = childProcess();
 		spawnMock.mockReturnValue(child);
 		const result = new DatabaseRestoreProcessService().listDump(
 			'/restore/source.dump',
 			connection.password
 		);
+		const settlement = observeSettlement(result);
 		child.emit('error', new Error('spawn failed'));
+		await Promise.resolve();
+		expect(settlement()).toBe('pending');
+		child.emit('close', -1);
 
 		await expect(result).rejects.toThrow('spawn failed');
 	});
 
-	it('keeps the 30 minute timeout and sends SIGTERM', async () => {
+	it('keeps a timed out command pending until close after SIGTERM', async () => {
+		jest.useFakeTimers();
+		const child = childProcess();
+		spawnMock.mockReturnValue(child);
+		const result = new DatabaseRestoreProcessService().listDump(
+			'/restore/source.dump',
+			connection.password
+		);
+		const settlement = observeSettlement(result);
+
+		await jest.advanceTimersByTimeAsync(30 * 60_000);
+		expect(child.kill).toHaveBeenCalledTimes(1);
+		expect(child.kill).toHaveBeenCalledWith('SIGTERM');
+		expect(settlement()).toBe('pending');
+
+		child.emit('close', null, 'SIGTERM');
+		await expect(result).rejects.toThrow(
+			'Database restore command timed out'
+		);
+		expect(child.kill).toHaveBeenCalledTimes(1);
+	});
+
+	it('escalates a timed out command to SIGKILL and still waits for close', async () => {
+		jest.useFakeTimers();
+		const child = childProcess();
+		spawnMock.mockReturnValue(child);
+		const result = new DatabaseRestoreProcessService().listDump(
+			'/restore/source.dump',
+			connection.password
+		);
+		const settlement = observeSettlement(result);
+
+		await jest.advanceTimersByTimeAsync(30 * 60_000 + 10_000);
+		expect(child.kill.mock.calls).toEqual([['SIGTERM'], ['SIGKILL']]);
+		expect(settlement()).toBe('pending');
+
+		child.emit('close', null, 'SIGKILL');
+		await expect(result).rejects.toThrow(
+			'Database restore command timed out'
+		);
+	});
+
+	it('does not escalate after the child closes during the grace period', async () => {
 		jest.useFakeTimers();
 		const child = childProcess();
 		spawnMock.mockReturnValue(child);
@@ -358,11 +505,45 @@ describe('DatabaseRestoreProcessService process boundary', () => {
 			connection.password
 		);
 
-		jest.advanceTimersByTime(30 * 60_000);
+		await jest.advanceTimersByTimeAsync(30 * 60_000 + 9_999);
+		child.emit('close', null, 'SIGTERM');
 		await expect(result).rejects.toThrow(
 			'Database restore command timed out'
 		);
-		expect(child.kill).toHaveBeenCalledWith('SIGTERM');
-		jest.useRealTimers();
+		await jest.advanceTimersByTimeAsync(1);
+		expect(child.kill.mock.calls).toEqual([['SIGTERM']]);
+	});
+
+	it('keeps timeout as the primary error even when the child exits zero', async () => {
+		jest.useFakeTimers();
+		const child = childProcess();
+		spawnMock.mockReturnValue(child);
+		const result = new DatabaseRestoreProcessService().listDump(
+			'/restore/source.dump',
+			connection.password
+		);
+
+		await jest.advanceTimersByTimeAsync(30 * 60_000);
+		child.emit('close', 0);
+
+		await expect(result).rejects.toThrow(
+			'Database restore command timed out'
+		);
+	});
+
+	it('clears termination timers after a normal close', async () => {
+		jest.useFakeTimers();
+		const child = childProcess();
+		spawnMock.mockReturnValue(child);
+		const result = new DatabaseRestoreProcessService().listDump(
+			'/restore/source.dump',
+			connection.password
+		);
+
+		child.emit('close', 0);
+		await expect(result).resolves.toBe('');
+		expect(jest.getTimerCount()).toBe(0);
+		await jest.advanceTimersByTimeAsync(30 * 60_000 + 10_000);
+		expect(child.kill).not.toHaveBeenCalled();
 	});
 });

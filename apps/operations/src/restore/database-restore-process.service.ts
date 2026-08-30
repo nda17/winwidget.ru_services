@@ -8,6 +8,9 @@ import {
 	DatabaseRestoreTargetConfiguration
 } from './database-restore-target-registry.service';
 
+const DATABASE_COMMAND_TIMEOUT_MS = 30 * 60_000;
+const DATABASE_COMMAND_TERMINATION_GRACE_MS = 10_000;
+
 @Injectable()
 export class DatabaseRestoreProcessService {
 	async listDump(path: string, password: string): Promise<string> {
@@ -36,15 +39,16 @@ export class DatabaseRestoreProcessService {
 				stdio: ['ignore', 'pipe', 'pipe']
 			}
 		);
-		if (!child.stdout)
-			throw new Error('Safety backup stdout is unavailable');
-		await Promise.all([
-			pipeline(
-				child.stdout,
-				createWriteStream(path, { flags: 'wx', mode: 0o600 })
-			),
-			this.wait(child, connection.password)
-		]);
+		if (!child.stdout) {
+			const error = new Error('Safety backup stdout is unavailable');
+			await this.wait(child, connection.password, undefined, error);
+			throw error;
+		}
+		const output = pipeline(
+			child.stdout,
+			createWriteStream(path, { flags: 'wx', mode: 0o600 })
+		);
+		await this.wait(child, connection.password, output);
 		await chmod(path, 0o600);
 	}
 
@@ -161,14 +165,47 @@ export class DatabaseRestoreProcessService {
 
 	private wait(
 		child: ReturnType<typeof spawn>,
-		password: string | null
+		password: string | null,
+		output?: Promise<void>,
+		initialError?: Error
 	): Promise<void> {
 		return new Promise((resolve, reject) => {
 			let stderr = '';
-			const timeout = setTimeout(() => {
-				child.kill('SIGTERM');
-				reject(new Error('Database restore command timed out'));
-			}, 30 * 60_000);
+			let closed = false;
+			let exited = false;
+			let stopRequested = false;
+			let primaryError: Error | null = null;
+			let outputError: Error | null = null;
+			let terminationTimeout: NodeJS.Timeout | null = null;
+			const errorValue = (error: unknown) =>
+				error instanceof Error ? error : new Error(String(error));
+			const clearTimers = () => {
+				clearTimeout(timeout);
+				if (terminationTimeout) clearTimeout(terminationTimeout);
+			};
+			const sendSignal = (signal: NodeJS.Signals) => {
+				try {
+					child.kill(signal);
+				} catch (error) {
+					primaryError ??= errorValue(error);
+				}
+			};
+			function requestStop(error: Error) {
+				primaryError ??= error;
+				if (stopRequested || closed) return;
+				stopRequested = true;
+				clearTimeout(timeout);
+				if (!exited) sendSignal('SIGTERM');
+				if (closed || exited) return;
+				terminationTimeout = setTimeout(() => {
+					if (!closed && !exited) sendSignal('SIGKILL');
+				}, DATABASE_COMMAND_TERMINATION_GRACE_MS);
+				terminationTimeout.unref();
+			}
+			const timeout = setTimeout(
+				() => requestStop(new Error('Database restore command timed out')),
+				DATABASE_COMMAND_TIMEOUT_MS
+			);
 			timeout.unref();
 			child.stderr?.on('data', chunk => {
 				stderr = `${stderr}${Buffer.from(chunk).toString('utf8')}`.slice(
@@ -176,21 +213,39 @@ export class DatabaseRestoreProcessService {
 				);
 			});
 			child.once('error', error => {
-				clearTimeout(timeout);
-				reject(error);
+				primaryError ??= error;
+			});
+			child.once('exit', () => {
+				exited = true;
 			});
 			child.once('close', code => {
-				clearTimeout(timeout);
-				if (code === 0) resolve();
-				else {
-					reject(
-						new Error(
+				closed = true;
+				exited = true;
+				clearTimers();
+				void (async () => {
+					if (output) {
+						const [settledOutput] = await Promise.allSettled([output]);
+						if (settledOutput.status === 'rejected') {
+							outputError ??= errorValue(settledOutput.reason);
+						}
+					}
+					if (primaryError) throw primaryError;
+					if (code !== 0) {
+						throw new Error(
 							this.redact(stderr, password).trim() ||
 								`Database restore command exited ${code}`
-						)
-					);
-				}
+						);
+					}
+					if (outputError) throw outputError;
+				})().then(resolve, reject);
 			});
+			if (output) {
+				void output.catch(error => {
+					outputError ??= errorValue(error);
+					if (!closed && !exited) requestStop(outputError);
+				});
+			}
+			if (initialError) requestStop(initialError);
 		});
 	}
 
