@@ -85,6 +85,21 @@ Read-only аудит production API и личного кабинета ЮKassa �
 - Quorum queues вводить только вместе с кластером минимум из трёх RabbitMQ
   узлов или managed broker; тип существующей очереди in-place не менять.
 
+### P1 — восстановить manual retry для Reporting settings failures
+
+`ReportingDeliveryFailuresService` валидирует все failure payload, кроме
+delivery outcome, как source projection. Поэтому terminal failure события
+`operations.notification-routing.changed.v1` сохраняется корректно, но DEV
+manual retry отклоняет его с `409`, хотя Reporting worker и manual-retry Outbox
+поддерживают этот consumer.
+
+- Для `reportingSettings` использовать отдельный
+  `parseOperationsNotificationRoutingChangedEvent`, сохранив проверку
+  `eventType`, `eventId` и canonical payload hash.
+- Добавить unit test retry transaction/Outbox и real RabbitMQ/PostgreSQL
+  integration-сценарий terminal failure -> manual retry -> resolution.
+- Не ослаблять валидацию остальных projection и delivery-outcome contracts.
+
 ### P2 — persistent circuit breaker для сломанных destinations
 
 При общей ошибке credentials новые события могут создавать повторяющиеся
@@ -297,10 +312,10 @@ Identity, Notification Delivery и Platform требуют отдельного 
 
 ### P2 — декомпозировать перегруженные orchestration-классы
 
-Актуальным измерением сложности подтверждены оставшиеся кандидаты: Reporting
-routing/lease/retry и restore validation/executor. Перед каждым рефакторингом
-добавить characterization tests; не менять API/events, Outbox, CAS lease и ack
-semantics. Restore fence/recovery не смешивать с декомпозицией: это отдельный P1
+Оставшийся подтверждённый кандидат — restore validation/executor. Перед
+рефакторингом добавить characterization tests; не менять API/events и порядок
+validation -> safety dump -> destructive restore -> ACL -> migration ledger.
+Restore fence/recovery не смешивать с декомпозицией: это отдельный P1
 production-restore gate.
 
 ### P2 — очистка legacy delivery-данных Notification Delivery

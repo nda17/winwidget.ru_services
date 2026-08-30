@@ -19,6 +19,9 @@ import { IdentityIntrospectionClient } from './internal/identity-introspection.c
 import { OperationsInternalClient } from './internal/operations-internal.client';
 import { ReportingMessagingOverviewController } from './internal/reporting-messaging-overview.controller';
 import { ReportingMessagingOverviewService } from './messaging/reporting-messaging-overview.service';
+import { ReportingConsumerFailureFinalizerService } from './messaging/reporting-consumer-failure-finalizer.service';
+import { ReportingConsumerReceiptService } from './messaging/reporting-consumer-receipt.service';
+import { ReportingConsumerRouterService } from './messaging/reporting-consumer-router.service';
 import { ReportingOutboxPublisherService } from './messaging/reporting-outbox-publisher.service';
 import { ReportingRabbitMqModule } from './messaging/reporting-rabbitmq.module';
 import { ReportingWorkerService } from './messaging/reporting-worker.service';
@@ -67,6 +70,9 @@ import { ConfigModule } from '@nestjs/config';
 		DailySummaryReportService,
 		DailySummaryRunService,
 		DailySummarySchedulerService,
+		ReportingConsumerReceiptService,
+		ReportingConsumerFailureFinalizerService,
+		ReportingConsumerRouterService,
 		ReportingWorkerService,
 		ReportingOutboxPublisherService,
 		ReportingMessagingOverviewService,
