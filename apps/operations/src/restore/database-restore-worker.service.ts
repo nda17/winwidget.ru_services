@@ -62,6 +62,35 @@ export class DatabaseRestoreWorkerService implements OnModuleInit {
 		} catch {
 			return 'reject';
 		}
+		let source: string;
+		try {
+			source = await this.control.resolveSourcePath(event.jobId);
+		} catch (error) {
+			const failedAt = new Date();
+			const failed = await this.prisma.databaseRestoreJob.updateMany({
+				where: {
+					id: event.jobId,
+					target: event.target,
+					status: DatabaseRestoreJobStatus.QUEUED
+				},
+				data: {
+					status: DatabaseRestoreJobStatus.FAILED,
+					lastError: this.safeError(error),
+					startedAt: failedAt,
+					finishedAt: failedAt
+				}
+			});
+			if (failed.count === 1) {
+				await this.recordFailureAlert(
+					event,
+					'DEV database restore не запущен: не удалось подготовить путь к исходному dump'
+				);
+				this.logger.error(
+					`Database restore source path failed jobId=${event.jobId}`
+				);
+			}
+			return 'ack';
+		}
 		const claimed = await this.prisma.databaseRestoreJob.updateMany({
 			where: {
 				id: event.jobId,
@@ -75,7 +104,6 @@ export class DatabaseRestoreWorkerService implements OnModuleInit {
 			}
 		});
 		if (claimed.count !== 1) return 'ack';
-		const source = await this.control.resolveSourcePath(event.jobId);
 		try {
 			const job = await this.prisma.databaseRestoreJob.findUniqueOrThrow({
 				where: { id: event.jobId }
@@ -139,23 +167,35 @@ export class DatabaseRestoreWorkerService implements OnModuleInit {
 					}
 				})
 				.catch(() => undefined);
-			await this.alerts
-				.record({
-					deduplicationKey: `database-restore:${event.target}`,
-					type: 'INTEGRATION_PROBLEM',
-					severity: OperationalAlertSeverity.HIGH,
-					source: 'operations',
-					referenceId: event.jobId,
-					title: `Не восстановлена база ${event.target}`,
-					message:
-						'DEV database restore завершился ошибкой; проверьте job и safety backup'
-				})
-				.catch(() => undefined);
+			await this.recordFailureAlert(
+				event,
+				'DEV database restore завершился ошибкой; проверьте job и safety backup'
+			);
 			this.logger.error(`Database restore failed jobId=${event.jobId}`);
 			return 'ack';
 		} finally {
 			await rm(source, { force: true });
 		}
+	}
+
+	private async recordFailureAlert(
+		event: {
+			jobId: string;
+			target: DatabaseRestoreTarget;
+		},
+		message: string
+	): Promise<void> {
+		await this.alerts
+			.record({
+				deduplicationKey: `database-restore:${event.target}`,
+				type: 'INTEGRATION_PROBLEM',
+				severity: OperationalAlertSeverity.HIGH,
+				source: 'operations',
+				referenceId: event.jobId,
+				title: `Не восстановлена база ${event.target}`,
+				message
+			})
+			.catch(() => undefined);
 	}
 
 	private parseEvent(message: ConsumeMessage) {

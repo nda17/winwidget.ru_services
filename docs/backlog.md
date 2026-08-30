@@ -154,12 +154,13 @@ targets: `billing`, `campaigns`, `identity`, `notification-delivery`,
 - Проверять точную TOC-запись target schema вместо произвольного substring и
   после restore fail-closed сверять фактические schema/table/sequence/default
   ACL grants, а не только наличие `_prisma_migrations`.
-- Перенести `resolveSourcePath` под управляемую failure-транзакцию worker:
-  ошибка после CAS `QUEUED -> PROCESSING` не должна оставлять job навсегда в
-  `PROCESSING` и превращать повторную доставку в ложный duplicate ack.
 - После command timeout дождаться фактического завершения дочернего процесса;
   при необходимости выполнить ограниченный `SIGTERM -> SIGKILL`, прежде чем
   менять restore job/fence state или подтверждать сообщение.
+- При ошибке execution/fetch подтверждать сообщение только после проверенного
+  CAS `PROCESSING -> FAILED`: сейчас ошибка или `count = 0` подавляются, job
+  может остаться в `PROCESSING`, а source удаляется. Нужна recovery-семантика
+  для недоступной Operations DB и будущего `FAILED_FENCED`.
 - выполнить exact-SHA Linux/Docker/PostgreSQL 18 rehearsal всех targets,
   включая несовместимый dump, нехватку места, cancel race, restart checkpoint,
   ACL drift и изоляцию чужих БД;
