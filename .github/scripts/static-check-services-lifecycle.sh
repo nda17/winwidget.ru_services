@@ -418,7 +418,7 @@ exactFiles('deploy', ['docker-compose.prod.yml']);
 
 const servicesWorkflow = readFileSync('.github/workflows/ci.yml', 'utf8');
 const pinnedInfraRevision =
-	'c53d64df6806d27aa2f050d1870909c9ff79e21c';
+	'31d14c07f5cc0902064890d7b391a1fe0da85439';
 for (const evidence of [
 	"cancel-in-progress: ${{ github.ref != 'refs/heads/prod' }}",
 	'operations-control-ledger:',
