@@ -651,9 +651,24 @@ export class DatabaseRestoreAuthorizationService {
 		}
 		const input = this.exactJsonObject(
 			job.input,
-			['chatId', 'messageThreadId', 'schemaVersion', 'target', 'trigger'],
-			'backup job input',
-			['periodStart']
+			job.trigger === 'MANUAL'
+				? [
+						'chatId',
+						'messageThreadId',
+						'requestedByAdminId',
+						'schemaVersion',
+						'target',
+						'trigger'
+					]
+				: [
+						'chatId',
+						'messageThreadId',
+						'periodStart',
+						'schemaVersion',
+						'target',
+						'trigger'
+					],
+			'backup job input'
 		);
 		const result = this.exactJsonObject(
 			job.result,
@@ -699,6 +714,10 @@ export class DatabaseRestoreAuthorizationService {
 			input.schemaVersion !== 1 ||
 			input.target !== evidence.target ||
 			input.trigger !== job.trigger ||
+			(job.trigger === 'MANUAL' &&
+				(typeof input.requestedByAdminId !== 'string' ||
+					!input.requestedByAdminId.trim() ||
+					input.requestedByAdminId.length > 255)) ||
 			(input.periodStart ?? null) !==
 				(job.periodStart?.toISOString() ?? null) ||
 			typeof input.chatId !== 'string' ||

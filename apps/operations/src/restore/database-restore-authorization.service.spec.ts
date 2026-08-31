@@ -73,6 +73,7 @@ const completedBackupJob = () => ({
 	input: {
 		schemaVersion: 1,
 		target: 'reporting',
+		requestedByAdminId: 'dev-one',
 		chatId: '-1001234567890',
 		messageThreadId: 42,
 		trigger: 'MANUAL'
@@ -205,6 +206,58 @@ describe('DatabaseRestoreAuthorizationService', () => {
 		).rejects.toThrow('completed exact backup job');
 		expect(create).not.toHaveBeenCalled();
 	});
+
+	it.each([
+		['missing requester binding', undefined],
+		['blank requester binding', '   ']
+	])(
+		'rejects a completed manual backup with %s',
+		async (_label, value) => {
+			const create = jest.fn();
+			const invalid = completedBackupJob();
+			if (value === undefined) {
+				delete (invalid.input as Partial<typeof invalid.input>)
+					.requestedByAdminId;
+			} else {
+				invalid.input.requestedByAdminId = value;
+			}
+			const transaction = {
+				databaseRestorePermit: { create },
+				scheduledJobRun: {
+					findUnique: jest.fn().mockResolvedValue(invalid)
+				}
+			};
+			const service = new DatabaseRestoreAuthorizationService(
+				config({
+					DATABASE_RESTORE_ENABLED: 'true',
+					APP_REVISION: SERVICES_SHA
+				}),
+				{
+					databaseRestorePermit: {
+						updateMany: jest.fn().mockResolvedValue({ count: 0 })
+					},
+					$transaction: jest.fn(callback => callback(transaction))
+				} as never,
+				{ recordInTransaction: jest.fn() } as never,
+				manifests() as never,
+				undefined,
+				provenance() as never
+			);
+
+			await expect(
+				service.createPermit(
+					{
+						target: 'reporting',
+						sourceSha256: SOURCE_SHA,
+						expectedServicesSha: SERVICES_SHA,
+						backupProvenance: JSON.stringify(PROVENANCE)
+					},
+					context('dev-one')
+				)
+			).rejects.toThrow('backup job');
+			expect(create).not.toHaveBeenCalled();
+		}
+	);
 
 	it.each(['servicesSha', 'imageRevision'] as const)(
 		'rejects signed sidecars whose %s belongs to another services revision',
