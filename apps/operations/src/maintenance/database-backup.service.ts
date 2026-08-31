@@ -3,16 +3,32 @@ import { ConfigService } from '@nestjs/config';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { createReadStream, createWriteStream } from 'node:fs';
-import { chmod, mkdtemp, readdir, rm, stat } from 'node:fs/promises';
+import {
+	chmod,
+	mkdtemp,
+	readdir,
+	rm,
+	stat,
+	writeFile
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { Transform } from 'node:stream';
 import { DatabaseBackupTarget } from '../scheduled-jobs/scheduled-jobs.types';
 import {
+	DATABASE_RESTORE_TARGETS,
+	DatabaseRestoreTarget
+} from '../restore/database-restore.contract';
+import { DatabaseRestoreMigrationManifestService } from '../restore/database-restore-migration-manifest.service';
+import {
 	TelegramDocumentReceipt,
 	TelegramTransportService
 } from '../telegram/telegram-transport.service';
+import {
+	DatabaseBackupProvenanceService,
+	SignedDatabaseBackupProvenance
+} from './database-backup-provenance.service';
 
 const MAX_FILE_SIZE = 49 * 1024 * 1024;
 const URL_KEYS: Record<DatabaseBackupTarget, string> = {
@@ -54,6 +70,8 @@ export interface DatabaseBackupResult {
 	createdAt: string;
 	telegramSent: true;
 	telegramReceipt: TelegramDocumentReceipt;
+	backupProvenance: SignedDatabaseBackupProvenance | null;
+	provenanceTelegramReceipt: TelegramDocumentReceipt | null;
 }
 
 @Injectable()
@@ -62,7 +80,9 @@ export class DatabaseBackupService implements OnModuleInit {
 
 	constructor(
 		private readonly config: ConfigService,
-		private readonly telegram: TelegramTransportService
+		private readonly telegram: TelegramTransportService,
+		private readonly provenance: DatabaseBackupProvenanceService,
+		private readonly manifests: DatabaseRestoreMigrationManifestService
 	) {}
 
 	async onModuleInit(): Promise<void> {
@@ -84,6 +104,12 @@ export class DatabaseBackupService implements OnModuleInit {
 					}
 				})
 		);
+		if (process.env.OPERATIONS_PROCESS_ROLE === 'worker') {
+			await this.provenance.assertSigningKey(
+				this.requiredConfig('DATABASE_BACKUP_PROVENANCE_KEY_ID'),
+				this.requiredConfig('DATABASE_BACKUP_PROVENANCE_PRIVATE_KEY_FILE')
+			);
+		}
 	}
 
 	async createAndSend(
@@ -93,6 +119,7 @@ export class DatabaseBackupService implements OnModuleInit {
 			chatId: string;
 			messageThreadId: number;
 			trigger: 'MANUAL' | 'SCHEDULED';
+			backupJobCreatedAt: string;
 		},
 		signal: AbortSignal
 	): Promise<DatabaseBackupResult> {
@@ -115,6 +142,52 @@ export class DatabaseBackupService implements OnModuleInit {
 			await this.run('pg_restore', ['--list', filePath], null, signal);
 			const file = await stat(filePath);
 			const fileSha256 = await this.sha256(filePath);
+			const restoreTarget = DATABASE_RESTORE_TARGETS.includes(
+				target as DatabaseRestoreTarget
+			)
+				? (target as DatabaseRestoreTarget)
+				: null;
+			let backupProvenance: SignedDatabaseBackupProvenance | null = null;
+			let provenancePath: string | null = null;
+			if (restoreTarget) {
+				const keyId = this.requiredConfig(
+					'DATABASE_BACKUP_PROVENANCE_KEY_ID'
+				);
+				const privateKeyFile = this.requiredConfig(
+					'DATABASE_BACKUP_PROVENANCE_PRIVATE_KEY_FILE'
+				);
+				const revision = this.requiredRevision();
+				const [pgDumpVersion, pgRestoreVersion] = await Promise.all([
+					this.version('pg_dump', signal),
+					this.version('pg_restore', signal)
+				]);
+				backupProvenance = await this.provenance.sign(
+					{
+						backupJobId: jobId,
+						target: restoreTarget,
+						databaseName: database.name,
+						schema: database.schema,
+						fileName,
+						fileSize: file.size,
+						artifactSha256: fileSha256,
+						artifactCreatedAt: new Date().toISOString(),
+						backupJobCreatedAt: input.backupJobCreatedAt,
+						servicesSha: revision,
+						migrationManifestSha: this.manifests.sha256(restoreTarget),
+						imageRevision: revision,
+						pgDumpVersion,
+						pgRestoreVersion
+					},
+					keyId,
+					privateKeyFile
+				);
+				provenancePath = `${filePath}.provenance.json`;
+				await writeFile(
+					provenancePath,
+					`${JSON.stringify(backupProvenance, null, 2)}\n`,
+					{ encoding: 'utf8', flag: 'wx', mode: 0o600 }
+				);
+			}
 			const receipt = await this.telegram.sendDocument(
 				input.chatId,
 				filePath,
@@ -126,6 +199,19 @@ export class DatabaseBackupService implements OnModuleInit {
 				].join('\n'),
 				{ messageThreadId: input.messageThreadId, signal }
 			);
+			const provenanceTelegramReceipt = provenancePath
+				? await this.telegram.sendDocument(
+						input.chatId,
+						provenancePath,
+						[
+							'<b>Подпись backup базы данных WinWidget</b>',
+							`База: <b>${target}</b>`,
+							`Job ID: <code>${jobId}</code>`,
+							`SHA-256: <code>${fileSha256}</code>`
+						].join('\n'),
+						{ messageThreadId: input.messageThreadId, signal }
+					)
+				: null;
 			return {
 				target,
 				databaseName: database.name,
@@ -135,11 +221,49 @@ export class DatabaseBackupService implements OnModuleInit {
 				fileSha256,
 				createdAt: createdAt.toISOString(),
 				telegramSent: true,
-				telegramReceipt: receipt
+				telegramReceipt: receipt,
+				backupProvenance,
+				provenanceTelegramReceipt
 			};
 		} finally {
 			await rm(directory, { recursive: true, force: true });
 		}
+	}
+
+	private requiredConfig(key: string): string {
+		const value = this.config.get<string>(key)?.trim();
+		if (!value || ['change_me', 'XYZXYZXYZ'].includes(value)) {
+			throw new Error(`${key} is not configured`);
+		}
+		return value;
+	}
+
+	private requiredRevision(): string {
+		const revision = this.requiredConfig('APP_REVISION');
+		if (!/^[0-9a-f]{40}$/.test(revision)) {
+			throw new Error('APP_REVISION must be an exact services SHA');
+		}
+		return revision;
+	}
+
+	private async version(
+		command: 'pg_dump' | 'pg_restore',
+		signal: AbortSignal
+	): Promise<string> {
+		const child = spawn(command, ['--version'], {
+			env: this.pgEnvironment(null),
+			stdio: ['ignore', 'pipe', 'pipe']
+		});
+		let output = '';
+		child.stdout?.on('data', chunk => {
+			output = `${output}${Buffer.from(chunk).toString('utf8')}`.slice(
+				-512
+			);
+		});
+		await this.waitForChild(child, null, signal);
+		const version = output.trim();
+		if (!version) throw new Error(`${command} version is unavailable`);
+		return version;
 	}
 
 	private database(target: DatabaseBackupTarget) {

@@ -1,5 +1,8 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
-import { OperationalAlertSeverity } from '@prisma/operations-client';
+import {
+	OperationalAlertSeverity,
+	Prisma
+} from '@prisma/operations-client';
 import type { ConsumeMessage } from 'amqplib';
 import { randomUUID } from 'node:crypto';
 import { OPERATIONS_SCHEDULED_JOB_EVENT_TYPE } from '../messaging/operations-messaging.constants';
@@ -93,7 +96,7 @@ export class MaintenanceWorkerService implements OnModuleInit {
 			const result = await this.backup.createAndSend(
 				claim.job.id,
 				input.target,
-				input,
+				{ ...input, backupJobCreatedAt: claim.job.createdAt },
 				controller.signal
 			);
 			const completed = await this.jobs.complete(
@@ -101,7 +104,15 @@ export class MaintenanceWorkerService implements OnModuleInit {
 				claim.leaseToken,
 				{
 					...result,
-					telegramReceipt: { ...result.telegramReceipt }
+					backupProvenance: result.backupProvenance
+						? (JSON.parse(
+								JSON.stringify(result.backupProvenance)
+							) as Prisma.InputJsonValue)
+						: null,
+					telegramReceipt: { ...result.telegramReceipt },
+					provenanceTelegramReceipt: result.provenanceTelegramReceipt
+						? { ...result.provenanceTelegramReceipt }
+						: null
 				}
 			);
 			if (!completed) return 'requeue';

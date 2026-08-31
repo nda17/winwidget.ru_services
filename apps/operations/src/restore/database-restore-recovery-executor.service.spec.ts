@@ -74,6 +74,18 @@ const setup = () => {
 				evidenceSha256: 'b'.repeat(64)
 			};
 		}),
+		reapply: jest.fn(async () => {
+			calls.push('re-fence');
+			return {
+				roles: [
+					target.runtimeRole,
+					target.migrationRole,
+					target.backupRole
+				] as [string, string, string],
+				verifiedAt: new Date('2026-08-30T18:00:00.000Z'),
+				evidenceSha256: 'b'.repeat(64)
+			};
+		}),
 		verify: jest.fn(async () => calls.push('fence-verify')),
 		release: jest.fn(async () => {
 			calls.push('release');
@@ -211,5 +223,21 @@ describe('DatabaseRestoreRecoveryExecutorService', () => {
 		);
 		expect(process.restoreSchema).toHaveBeenCalledTimes(1);
 		expect(writerFence.release).not.toHaveBeenCalled();
+	});
+
+	it('uses exact-generation reapply for compensation', async () => {
+		const { service, writerFence, connection } = setup();
+		const restoreInput = input(
+			DatabaseRestoreRecoveryActionType.VERIFY_AS_IS
+		);
+
+		await service.reapplyFence('reporting', restoreInput.actionId);
+
+		expect(writerFence.reapply).toHaveBeenCalledWith(
+			connection,
+			target,
+			restoreInput.actionId
+		);
+		expect(writerFence.apply).not.toHaveBeenCalled();
 	});
 });

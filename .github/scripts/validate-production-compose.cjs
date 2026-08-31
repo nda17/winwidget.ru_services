@@ -1324,6 +1324,100 @@ for (const [name, service] of Object.entries(services)) {
 	}
 }
 
+const backupProvenanceEnvironmentKeys = [
+	'DATABASE_BACKUP_PROVENANCE_KEY_ID',
+	'DATABASE_BACKUP_PROVENANCE_PRIVATE_KEY_FILE'
+];
+assert(
+	!rootExample.has('DATABASE_BACKUP_PROVENANCE_KEY_ID') &&
+		!rootExample.has('DATABASE_BACKUP_PROVENANCE_PRIVATE_KEY_HOST_FILE'),
+	'database backup provenance identity must be pinned to the immutable Compose revision'
+);
+assert(
+	operationsWorkerEnvironment.DATABASE_BACKUP_PROVENANCE_KEY_ID ===
+		'operations-backup-ed25519-2026-08-31' &&
+		operationsWorkerEnvironment.DATABASE_BACKUP_PROVENANCE_PRIVATE_KEY_FILE ===
+			'/run/winwidget-operations-secrets/database-backup-provenance-private-key.pem',
+	'operations-worker backup provenance environment drifted'
+);
+for (const [name, service] of Object.entries(services)) {
+	const count = backupProvenanceEnvironmentKeys.filter(key =>
+		Object.hasOwn(service.environment ?? {}, key)
+	).length;
+	assert(
+		name === 'operations-worker'
+			? count === backupProvenanceEnvironmentKeys.length
+			: count === 0,
+		'database backup provenance private-key settings must be scoped only to operations-worker'
+	);
+}
+assert(
+	JSON.stringify(operationsWorker.secrets ?? []) ===
+		JSON.stringify([
+			{
+				source: 'database-backup-provenance-private-key',
+				target: 'database-backup-provenance-private-key-source'
+			}
+		]),
+	'operations-worker backup provenance secret mount drifted'
+);
+assert(
+	config.secrets?.['database-backup-provenance-private-key']?.file ===
+		'/opt/winwidget/deploy/backend/.database-backup-provenance-private-key.pem',
+	'backup provenance private-key host file drifted'
+);
+
+const backupProvenanceTmpfs = (operationsWorker.tmpfs ?? []).map(String);
+assert(
+	operationsWorker.user === '0:0' &&
+		operationsWorker.read_only === true &&
+		JSON.stringify(operationsWorker.security_opt ?? []) ===
+			JSON.stringify(['no-new-privileges:true']) &&
+		JSON.stringify(sorted(operationsWorker.cap_drop ?? [])) ===
+			JSON.stringify(['ALL']) &&
+		JSON.stringify(sorted(operationsWorker.cap_add ?? [])) ===
+			JSON.stringify(['CHOWN', 'SETGID', 'SETUID']),
+	'operations-worker root bootstrap capabilities drifted'
+);
+assert(
+	backupProvenanceTmpfs.some(
+		value =>
+			value.startsWith('/tmp:') &&
+			value.includes('size=64m') &&
+			value.includes('mode=1777') &&
+			value.includes('noexec') &&
+			value.includes('nosuid') &&
+			value.includes('nodev')
+	) &&
+		backupProvenanceTmpfs.some(
+			value =>
+				value.startsWith('/run/winwidget-operations-secrets:') &&
+				value.includes('size=64k') &&
+				value.includes('mode=0700') &&
+				value.includes('uid=0') &&
+				value.includes('gid=0') &&
+				value.includes('noexec') &&
+				value.includes('nosuid') &&
+				value.includes('nodev')
+		),
+	'operations-worker backup provenance tmpfs drifted'
+);
+assert(
+	JSON.stringify((operationsWorker.healthcheck?.test ?? []).slice(0, 4)) ===
+		JSON.stringify(['CMD', 'gosu', 'operations:nodejs', 'node']),
+	'operations-worker healthcheck must drop root before probing readiness'
+);
+for (const name of [
+	'operations-api',
+	'operations-outbox-publisher',
+	'operations-restore-worker'
+]) {
+	assert(
+		requireService(name).user !== '0:0',
+		name + ' must not use the provenance root bootstrap identity'
+	);
+}
+
 const validate_operations_database_urls = () => {
 	for (const target of databaseTargets) {
 		const runtimeValue = environmentOf(target.runtimeService)[
@@ -1724,10 +1818,37 @@ const operationsDockerfile = readFileSync(
 	resolve(process.cwd(), 'apps/operations/Dockerfile'),
 	'utf8'
 );
+const operationsEntrypoint = readFileSync(
+	resolve(process.cwd(), 'apps/operations/docker-entrypoint.sh'),
+	'utf8'
+);
 assert(
 	operationsDockerfile.includes('postgresql-client-18') &&
 		operationsDockerfile.includes('pg_dump --version') &&
-		operationsDockerfile.includes('pg_restore --version'),
+		operationsDockerfile.includes('pg_restore --version') &&
+		operationsDockerfile.includes('gosu nobody true') &&
+		operationsDockerfile.includes(
+			'ENTRYPOINT ["/usr/local/bin/operations-entrypoint.sh"]'
+		) &&
+		operationsEntrypoint.includes(
+			"source_key_file='/run/secrets/database-backup-provenance-private-key-source'"
+		) &&
+		operationsEntrypoint.includes(
+			"runtime_key_file='/run/winwidget-operations-secrets/database-backup-provenance-private-key.pem'"
+		) &&
+		operationsEntrypoint.includes(
+			'install -d -o 0 -g "$operations_gid" -m 0710 "$runtime_key_directory"'
+		) &&
+		operationsEntrypoint.includes(
+			'install -o 0 -g 0 -m 0600 \\'
+		) &&
+		operationsEntrypoint.includes(
+			'chmod 0400 "$runtime_key_temporary"'
+		) &&
+		operationsEntrypoint.includes(
+			'chown "$operations_uid:$operations_gid" "$runtime_key_temporary"'
+		) &&
+		operationsEntrypoint.includes('exec gosu operations:nodejs "$@"'),
 	'Operations image must pin and verify PostgreSQL client 18'
 );
 

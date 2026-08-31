@@ -1022,6 +1022,11 @@ export class DatabaseRestoreRecoveryStateService {
 			receipt.permitApprovedById === receipt.permitRequestedById ||
 			receipt.target !== job.target ||
 			receipt.sourceSha256 !== job.sourceSha256 ||
+			receipt.sourceSize !== job.sourceSize ||
+			receipt.sourceBackupJobId !== job.sourceBackupJobId ||
+			receipt.backupProvenanceEnvelopeSha256 !==
+				job.backupProvenanceEnvelopeSha256 ||
+			receipt.backupProvenanceKeyId !== job.backupProvenanceKeyId ||
 			receipt.safetyBackupSha256 !== job.safetyBackupSha256 ||
 			receipt.expectedServicesSha !== job.expectedServicesSha ||
 			receipt.migrationManifestSha !== job.migrationManifestSha
@@ -1031,7 +1036,7 @@ export class DatabaseRestoreRecoveryStateService {
 			);
 		}
 		const payload = this.receipts.canonicalize({
-			receiptVersion: 4,
+			receiptVersion: 5,
 			jobId: receipt.jobId,
 			permitId: receipt.permitId,
 			permitRequestedById: receipt.permitRequestedById,
@@ -1044,6 +1049,11 @@ export class DatabaseRestoreRecoveryStateService {
 			terminalStatus: receipt.terminalStatus,
 			phase: receipt.phase,
 			sourceSha256: receipt.sourceSha256,
+			sourceSize: receipt.sourceSize.toString(),
+			sourceBackupJobId: receipt.sourceBackupJobId,
+			backupProvenanceEnvelopeSha256:
+				receipt.backupProvenanceEnvelopeSha256,
+			backupProvenanceKeyId: receipt.backupProvenanceKeyId,
 			safetyBackupSha256: receipt.safetyBackupSha256,
 			expectedServicesSha: receipt.expectedServicesSha,
 			migrationManifestSha: receipt.migrationManifestSha,

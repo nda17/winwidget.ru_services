@@ -23,6 +23,7 @@ import { MessagingAdminService } from './messaging-admin/messaging-admin.service
 import { MaintenanceSchedulerService } from './maintenance/maintenance-scheduler.service';
 import { MaintenanceWorkerService } from './maintenance/maintenance-worker.service';
 import { DatabaseBackupService } from './maintenance/database-backup.service';
+import { DatabaseBackupProvenanceService } from './maintenance/database-backup-provenance.service';
 import { OperationalAlertService } from './monitoring/operational-alert.service';
 import { OperationsHeartbeatService } from './monitoring/operations-heartbeat.service';
 import { NotesController } from './notes/notes.controller';
@@ -115,6 +116,7 @@ const ROLE_SCOPED_PROVIDERS =
 		TelegramSettingsService,
 		TelegramTransportService,
 		DatabaseBackupService,
+		DatabaseBackupProvenanceService,
 		DatabaseRestoreTargetRegistryService,
 		DatabaseRestoreArtifactValidatorService,
 		DatabaseRestoreAclService,

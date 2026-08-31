@@ -12,6 +12,39 @@ import { DatabaseRestoreAuthorizationService } from './database-restore-authoriz
 const SERVICES_SHA = 'a'.repeat(40);
 const SOURCE_SHA = 'b'.repeat(64);
 const MANIFEST_SHA = 'c'.repeat(64);
+const SOURCE_SIZE = 1024n;
+const BACKUP_JOB_ID = randomUUID();
+const PROVENANCE_KEY_ID = 'backup-key-1';
+const PROVENANCE_ENVELOPE_SHA = 'd'.repeat(64);
+const PROVENANCE = {
+	envelope: {
+		domain: 'winwidget.operations.database-backup-provenance.v1',
+		schemaVersion: 1,
+		signatureAlgorithm: 'Ed25519',
+		keyId: PROVENANCE_KEY_ID,
+		evidence: {
+			backupJobId: BACKUP_JOB_ID,
+			target: 'reporting',
+			databaseName: 'winwidget_reporting',
+			schema: 'reporting',
+			fileName: 'winwidget-reporting-db-2026-08-31.dump',
+			fileSize: Number(SOURCE_SIZE),
+			artifactSha256: SOURCE_SHA,
+			artifactCreatedAt: '2026-08-31T10:00:00.000Z',
+			backupJobCreatedAt: '2026-08-31T09:59:00.000Z',
+			servicesSha: SERVICES_SHA,
+			migrationManifestSha: MANIFEST_SHA,
+			imageRevision: SERVICES_SHA,
+			pgDumpVersion: 'pg_dump (PostgreSQL) 18.1',
+			pgRestoreVersion: 'pg_restore (PostgreSQL) 18.1'
+		}
+	},
+	envelopeSha256: PROVENANCE_ENVELOPE_SHA,
+	signatureEd25519Base64: 'x'.repeat(88)
+};
+const provenance = (envelope = PROVENANCE.envelope) => ({
+	verify: jest.fn().mockResolvedValue(envelope)
+});
 const config = (values: Record<string, string>) =>
 	({ get: (key: string) => values[key] }) as ConfigService;
 const context = (actorId: string) => ({
@@ -21,6 +54,42 @@ const context = (actorId: string) => ({
 });
 const manifests = () => ({
 	sha256: jest.fn().mockReturnValue(MANIFEST_SHA)
+});
+const telegramReceipt = (messageId: number) => ({
+	messageId,
+	chatId: '-1001234567890',
+	messageThreadId: 42,
+	fileId: `file-${messageId}`,
+	fileUniqueId: `unique-${messageId}`
+});
+const completedBackupJob = () => ({
+	id: BACKUP_JOB_ID,
+	jobType: 'REPORTING_DATABASE_BACKUP',
+	status: 'SUCCEEDED',
+	trigger: 'MANUAL',
+	createdAt: new Date('2026-08-31T09:59:00.000Z'),
+	finishedAt: new Date('2026-08-31T10:01:00.000Z'),
+	periodStart: null,
+	input: {
+		schemaVersion: 1,
+		target: 'reporting',
+		chatId: '-1001234567890',
+		messageThreadId: 42,
+		trigger: 'MANUAL'
+	},
+	result: {
+		target: 'reporting',
+		databaseName: 'winwidget_reporting',
+		schema: 'reporting',
+		fileName: PROVENANCE.envelope.evidence.fileName,
+		fileSize: Number(SOURCE_SIZE),
+		fileSha256: SOURCE_SHA,
+		createdAt: '2026-08-31T09:59:30.000Z',
+		telegramSent: true,
+		telegramReceipt: telegramReceipt(100),
+		backupProvenance: PROVENANCE,
+		provenanceTelegramReceipt: telegramReceipt(101)
+	}
 });
 
 describe('DatabaseRestoreAuthorizationService', () => {
@@ -34,7 +103,12 @@ describe('DatabaseRestoreAuthorizationService', () => {
 			createdAt: new Date(),
 			updatedAt: new Date()
 		}));
-		const transaction = { databaseRestorePermit: { create } };
+		const transaction = {
+			databaseRestorePermit: { create },
+			scheduledJobRun: {
+				findUnique: jest.fn().mockResolvedValue(completedBackupJob())
+			}
+		};
 		const audit = { recordInTransaction: jest.fn().mockResolvedValue({}) };
 		const prisma = {
 			databaseRestorePermit: {
@@ -49,7 +123,9 @@ describe('DatabaseRestoreAuthorizationService', () => {
 			}),
 			prisma as never,
 			audit as never,
-			manifests() as never
+			manifests() as never,
+			undefined,
+			provenance() as never
 		);
 
 		await expect(
@@ -57,7 +133,8 @@ describe('DatabaseRestoreAuthorizationService', () => {
 				{
 					target: 'reporting',
 					sourceSha256: SOURCE_SHA,
-					expectedServicesSha: SERVICES_SHA
+					expectedServicesSha: SERVICES_SHA,
+					backupProvenance: JSON.stringify(PROVENANCE)
 				},
 				context('dev-one')
 			)
@@ -88,6 +165,140 @@ describe('DatabaseRestoreAuthorizationService', () => {
 		);
 	});
 
+	it('rejects signed sidecars whose durable backup job is not SUCCEEDED', async () => {
+		const create = jest.fn();
+		const incomplete = completedBackupJob();
+		incomplete.status = 'PROCESSING';
+		const transaction = {
+			databaseRestorePermit: { create },
+			scheduledJobRun: {
+				findUnique: jest.fn().mockResolvedValue(incomplete)
+			}
+		};
+		const service = new DatabaseRestoreAuthorizationService(
+			config({
+				DATABASE_RESTORE_ENABLED: 'true',
+				APP_REVISION: SERVICES_SHA
+			}),
+			{
+				databaseRestorePermit: {
+					updateMany: jest.fn().mockResolvedValue({ count: 0 })
+				},
+				$transaction: jest.fn(callback => callback(transaction))
+			} as never,
+			{ recordInTransaction: jest.fn() } as never,
+			manifests() as never,
+			undefined,
+			provenance() as never
+		);
+
+		await expect(
+			service.createPermit(
+				{
+					target: 'reporting',
+					sourceSha256: SOURCE_SHA,
+					expectedServicesSha: SERVICES_SHA,
+					backupProvenance: JSON.stringify(PROVENANCE)
+				},
+				context('dev-one')
+			)
+		).rejects.toThrow('completed exact backup job');
+		expect(create).not.toHaveBeenCalled();
+	});
+
+	it.each(['servicesSha', 'imageRevision'] as const)(
+		'rejects signed sidecars whose %s belongs to another services revision',
+		async revisionField => {
+			const create = jest.fn();
+			const transaction = {
+				databaseRestorePermit: { create },
+				scheduledJobRun: {
+					findUnique: jest.fn().mockResolvedValue(completedBackupJob())
+				}
+			};
+			const staleEnvelope = {
+				...PROVENANCE.envelope,
+				evidence: {
+					...PROVENANCE.envelope.evidence,
+					[revisionField]: 'f'.repeat(40)
+				}
+			};
+			const service = new DatabaseRestoreAuthorizationService(
+				config({
+					DATABASE_RESTORE_ENABLED: 'true',
+					APP_REVISION: SERVICES_SHA
+				}),
+				{
+					databaseRestorePermit: {
+						updateMany: jest.fn().mockResolvedValue({ count: 0 })
+					},
+					$transaction: jest.fn(callback => callback(transaction))
+				} as never,
+				{ recordInTransaction: jest.fn() } as never,
+				manifests() as never,
+				undefined,
+				provenance(staleEnvelope) as never
+			);
+
+			await expect(
+				service.createPermit(
+					{
+						target: 'reporting',
+						sourceSha256: SOURCE_SHA,
+						expectedServicesSha: SERVICES_SHA,
+						backupProvenance: JSON.stringify(PROVENANCE)
+					},
+					context('dev-one')
+				)
+			).rejects.toThrow('services revision');
+			expect(create).not.toHaveBeenCalled();
+		}
+	);
+
+	it.each([
+		['missing provenance receipt', null],
+		['reused artifact receipt', telegramReceipt(100)]
+	])('rejects a SUCCEEDED backup with %s', async (_label, receipt) => {
+		const create = jest.fn();
+		const incomplete = completedBackupJob();
+		incomplete.result.provenanceTelegramReceipt = receipt as never;
+		const transaction = {
+			databaseRestorePermit: { create },
+			scheduledJobRun: {
+				findUnique: jest.fn().mockResolvedValue(incomplete)
+			}
+		};
+		const service = new DatabaseRestoreAuthorizationService(
+			config({
+				DATABASE_RESTORE_ENABLED: 'true',
+				APP_REVISION: SERVICES_SHA
+			}),
+			{
+				databaseRestorePermit: {
+					updateMany: jest.fn().mockResolvedValue({ count: 0 })
+				},
+				$transaction: jest.fn(callback => callback(transaction))
+			} as never,
+			{ recordInTransaction: jest.fn() } as never,
+			manifests() as never,
+			undefined,
+			provenance() as never
+		);
+
+		await expect(
+			service.createPermit(
+				{
+					target: 'reporting',
+					sourceSha256: SOURCE_SHA,
+					expectedServicesSha: SERVICES_SHA,
+					backupProvenance: JSON.stringify(PROVENANCE)
+				},
+				context('dev-one')
+			)
+		).rejects.toThrow('result does not match signed provenance');
+		expect(create).not.toHaveBeenCalled();
+	});
+
 	it('reports the database global-active-permit conflict without exposing a target-local contract', async () => {
 		const conflict = Object.assign(new Error('unique'), { code: 'P2002' });
 		const service = new DatabaseRestoreAuthorizationService(
@@ -102,7 +313,9 @@ describe('DatabaseRestoreAuthorizationService', () => {
 				$transaction: jest.fn().mockRejectedValue(conflict)
 			} as never,
 			{} as never,
-			manifests() as never
+			manifests() as never,
+			undefined,
+			provenance() as never
 		);
 
 		await expect(
@@ -110,7 +323,8 @@ describe('DatabaseRestoreAuthorizationService', () => {
 				{
 					target: 'reporting',
 					sourceSha256: SOURCE_SHA,
-					expectedServicesSha: SERVICES_SHA
+					expectedServicesSha: SERVICES_SHA,
+					backupProvenance: JSON.stringify(PROVENANCE)
 				},
 				context('dev-one')
 			)
@@ -126,6 +340,7 @@ describe('DatabaseRestoreAuthorizationService', () => {
 			jobId,
 			target: 'reporting',
 			sourceSha256: SOURCE_SHA,
+			sourceSize: SOURCE_SIZE,
 			expectedServicesSha: SERVICES_SHA,
 			migrationManifestSha: MANIFEST_SHA,
 			requestedById: 'dev-one'
@@ -150,6 +365,7 @@ describe('DatabaseRestoreAuthorizationService', () => {
 			jobId,
 			target: 'reporting' as const,
 			sourceSha256: SOURCE_SHA,
+			sourceSize: SOURCE_SIZE,
 			actorId: 'dev-one'
 		};
 
@@ -183,6 +399,7 @@ describe('DatabaseRestoreAuthorizationService', () => {
 					jobId,
 					target: 'reporting',
 					sourceSha256: SOURCE_SHA,
+					sourceSize: SOURCE_SIZE,
 					expectedServicesSha: SERVICES_SHA,
 					migrationManifestSha: 'd'.repeat(64),
 					requestedById: 'dev-one'
@@ -202,6 +419,7 @@ describe('DatabaseRestoreAuthorizationService', () => {
 				jobId,
 				target: 'reporting',
 				sourceSha256: SOURCE_SHA,
+				sourceSize: SOURCE_SIZE,
 				actorId: 'dev-one'
 			})
 		).rejects.toBeInstanceOf(ConflictException);

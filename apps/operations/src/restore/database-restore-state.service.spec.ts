@@ -13,6 +13,9 @@ const event = (): DatabaseRestoreEventIdentity => ({
 	eventId: randomUUID(),
 	jobId: randomUUID(),
 	target: 'reporting',
+	sourceBackupJobId: randomUUID(),
+	backupProvenanceEnvelopeSha256: 'c'.repeat(64),
+	backupProvenanceKeyId: 'backup-key-1',
 	expectedServicesSha: 'a'.repeat(40),
 	migrationManifestSha: 'b'.repeat(64)
 });
@@ -139,6 +142,10 @@ describe('DatabaseRestoreStateService', () => {
 				id: value.jobId,
 				target: value.target,
 				eventId: value.eventId,
+				sourceBackupJobId: value.sourceBackupJobId,
+				backupProvenanceEnvelopeSha256:
+					value.backupProvenanceEnvelopeSha256,
+				backupProvenanceKeyId: value.backupProvenanceKeyId,
 				expectedServicesSha: value.expectedServicesSha,
 				migrationManifestSha: value.migrationManifestSha,
 				status: DatabaseRestoreJobStatus.QUEUED
@@ -369,6 +376,9 @@ describe('DatabaseRestoreStateService', () => {
 				id: randomUUID(),
 				target: 'reporting',
 				eventId: randomUUID(),
+				sourceBackupJobId: randomUUID(),
+				backupProvenanceEnvelopeSha256: 'c'.repeat(64),
+				backupProvenanceKeyId: 'backup-key-1',
 				expectedServicesSha: 'a'.repeat(40),
 				migrationManifestSha: 'b'.repeat(64),
 				status: DatabaseRestoreJobStatus.PROCESSING,
@@ -454,6 +464,10 @@ describe('DatabaseRestoreStateService', () => {
 					writerFenceEvidenceSha256: 'e'.repeat(64),
 					writerFenceReleaseEvidenceSha256: 'f'.repeat(64),
 					sourceSha256: 'a'.repeat(64),
+					sourceSize: 1024n,
+					sourceBackupJobId: randomUUID(),
+					backupProvenanceEnvelopeSha256: '1'.repeat(64),
+					backupProvenanceKeyId: 'backup-key-1',
 					safetyBackupSha256: 'b'.repeat(64),
 					expectedServicesSha: 'c'.repeat(40),
 					migrationManifestSha: 'd'.repeat(64),

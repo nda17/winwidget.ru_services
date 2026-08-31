@@ -25,13 +25,111 @@ const compensationEvidence = {
 	evidenceSha256: 'f'.repeat(64)
 };
 
+const provenanceEventBinding = () => ({
+	sourceBackupJobId: randomUUID(),
+	backupProvenanceEnvelopeSha256: 'd'.repeat(64),
+	backupProvenanceKeyId: 'backup-key-1'
+});
+
+const claimedJob = (
+	lease: DatabaseRestoreLease,
+	overrides: { sourceSha256?: string; sourceSize?: bigint } = {}
+) => {
+	const sourceSha256 = overrides.sourceSha256 ?? 'c'.repeat(64);
+	const sourceSize = overrides.sourceSize ?? 1024n;
+	const sourceFileName = 'winwidget-reporting-db-2026-08-31.dump';
+	const envelope = {
+		keyId: lease.event.backupProvenanceKeyId,
+		evidence: {
+			target: lease.event.target,
+			backupJobId: lease.event.sourceBackupJobId,
+			artifactSha256: sourceSha256,
+			fileSize: Number(sourceSize),
+			fileName: sourceFileName,
+			migrationManifestSha: lease.event.migrationManifestSha,
+			servicesSha: lease.event.expectedServicesSha,
+			imageRevision: lease.event.expectedServicesSha
+		}
+	};
+	return {
+		id: lease.event.jobId,
+		sourceSha256,
+		sourceSize,
+		sourceFileName,
+		sourceBackupJobId: lease.event.sourceBackupJobId,
+		backupProvenance: JSON.stringify({
+			envelope,
+			envelopeSha256: lease.event.backupProvenanceEnvelopeSha256
+		}),
+		backupProvenanceEnvelopeSha256:
+			lease.event.backupProvenanceEnvelopeSha256,
+		backupProvenanceKeyId: lease.event.backupProvenanceKeyId,
+		migrationManifestSha: lease.event.migrationManifestSha
+	};
+};
+
+const provenanceVerifier = {
+	verify: jest.fn(async (value: { envelope: unknown }) => value.envelope)
+};
+
 describe('DatabaseRestoreWorkerService recovery compensation', () => {
+	it.each(['servicesSha', 'imageRevision'] as const)(
+		'rejects claimed backup provenance whose %s belongs to another services revision',
+		async revisionField => {
+			const lease: DatabaseRestoreLease = {
+				event: {
+					eventId: randomUUID(),
+					jobId: randomUUID(),
+					target: 'reporting',
+					...provenanceEventBinding(),
+					expectedServicesSha: 'a'.repeat(40),
+					migrationManifestSha: 'b'.repeat(64)
+				},
+				leaseToken: randomUUID(),
+				leaseExpiresAt: new Date(Date.now() + 60_000),
+				phase: DatabaseRestoreJobPhase.PREPARING
+			};
+			const job = claimedJob(lease);
+			const signed = JSON.parse(job.backupProvenance) as {
+				envelope: { evidence: Record<string, string | number> };
+			};
+			signed.envelope.evidence[revisionField] = 'f'.repeat(40);
+			job.backupProvenance = JSON.stringify(signed);
+			const service = new DatabaseRestoreWorkerService(
+				{} as never,
+				{} as never,
+				{} as never,
+				{} as never,
+				{} as never,
+				{} as never,
+				{} as never,
+				{} as never,
+				{} as never,
+				{} as never,
+				provenanceVerifier as never
+			);
+			const assertClaimedJobProvenance = (
+				service as unknown as {
+					assertClaimedJobProvenance(
+						value: ReturnType<typeof claimedJob>,
+						event: DatabaseRestoreLease['event']
+					): Promise<void>;
+				}
+			).assertClaimedJobProvenance.bind(service);
+
+			await expect(
+				assertClaimedJobProvenance(job, lease.event)
+			).rejects.toThrow('backup provenance binding is invalid');
+		}
+	);
+
 	it('parks a queued ordinary restore while the worker kill switch is disabled', async () => {
 		const event = {
-			schemaVersion: 2,
+			schemaVersion: 3,
 			eventId: randomUUID(),
 			jobId: randomUUID(),
 			target: 'reporting',
+			...provenanceEventBinding(),
 			expectedServicesSha: 'a'.repeat(40),
 			migrationManifestSha: 'b'.repeat(64)
 		};
@@ -73,10 +171,11 @@ describe('DatabaseRestoreWorkerService recovery compensation', () => {
 
 	it('keeps signed terminal reconciliation available while new restores are disabled', async () => {
 		const event = {
-			schemaVersion: 2,
+			schemaVersion: 3,
 			eventId: randomUUID(),
 			jobId: randomUUID(),
 			target: 'reporting',
+			...provenanceEventBinding(),
 			expectedServicesSha: 'a'.repeat(40),
 			migrationManifestSha: 'b'.repeat(64)
 		};
@@ -340,6 +439,7 @@ describe('DatabaseRestoreWorkerService recovery compensation', () => {
 				eventId: randomUUID(),
 				jobId: randomUUID(),
 				target: 'reporting',
+				...provenanceEventBinding(),
 				expectedServicesSha: 'a'.repeat(40),
 				migrationManifestSha: 'b'.repeat(64)
 			},
@@ -348,10 +448,7 @@ describe('DatabaseRestoreWorkerService recovery compensation', () => {
 			phase: DatabaseRestoreJobPhase.PREPARING
 		};
 		const state = {
-			loadClaimedJob: jest.fn(async () => ({
-				id: lease.event.jobId,
-				sourceSha256: 'c'.repeat(64)
-			})),
+			loadClaimedJob: jest.fn(async () => claimedJob(lease)),
 			renew: jest.fn(async () => true),
 			confirmReleaseAuthorized: jest.fn(async () => null),
 			fail: jest.fn(async (_lease, error: Error) => {
@@ -389,7 +486,8 @@ describe('DatabaseRestoreWorkerService recovery compensation', () => {
 			cleanup as never,
 			{} as never,
 			{} as never,
-			{} as never
+			{} as never,
+			provenanceVerifier as never
 		);
 		const executeClaim = (
 			service as unknown as {
@@ -406,6 +504,233 @@ describe('DatabaseRestoreWorkerService recovery compensation', () => {
 		expect(calls).toEqual(['release-unknown']);
 		expect(executor.reapplyFence).not.toHaveBeenCalled();
 		expect(state.fail).not.toHaveBeenCalled();
+	});
+
+	it('renews the exact ordinary lease immediately before physical re-fencing', async () => {
+		const calls: string[] = [];
+		const lease: DatabaseRestoreLease = {
+			event: {
+				eventId: randomUUID(),
+				jobId: randomUUID(),
+				target: 'reporting',
+				...provenanceEventBinding(),
+				expectedServicesSha: 'a'.repeat(40),
+				migrationManifestSha: 'b'.repeat(64)
+			},
+			leaseToken: randomUUID(),
+			leaseExpiresAt: new Date(Date.now() + 60_000),
+			phase: DatabaseRestoreJobPhase.FENCED
+		};
+		const state = {
+			loadClaimedJob: jest.fn(async () =>
+				claimedJob(lease, { sourceSize: 1024n })
+			),
+			confirmReleaseAuthorized: jest.fn(async () => null),
+			renew: jest.fn(async () => {
+				calls.push('lease-renew');
+				return true;
+			}),
+			fail: jest.fn(async () => {
+				calls.push('fail');
+				return DatabaseRestoreJobStatus.FAILED;
+			})
+		};
+		const executor = {
+			restore: jest.fn(async () => {
+				calls.push('restore-failed');
+				throw new Error('restore mutation failed');
+			}),
+			reapplyFence: jest.fn(async () => {
+				calls.push('re-fence');
+				return compensationEvidence;
+			})
+		};
+		const cleanup = {
+			cleanup: jest.fn(async () => calls.push('cleanup'))
+		};
+		const service = new DatabaseRestoreWorkerService(
+			{ restoreWorkerEnabled: false } as never,
+			{} as never,
+			{
+				sealSourceArtifact: jest.fn(async () => ({
+					stagingPath: '/restore/job.dump',
+					sealedPath: '/restore-sealed/job.dump'
+				}))
+			} as never,
+			state as never,
+			{} as never,
+			executor as never,
+			cleanup as never,
+			{} as never,
+			{} as never,
+			{} as never,
+			provenanceVerifier as never
+		);
+		const executeClaim = (
+			service as unknown as {
+				executeClaim(
+					value: DatabaseRestoreLease,
+					source: string
+				): Promise<string>;
+			}
+		).executeClaim.bind(service);
+
+		await expect(executeClaim(lease, '/restore/job.dump')).resolves.toBe(
+			'ack'
+		);
+		expect(calls).toEqual([
+			'restore-failed',
+			'lease-renew',
+			're-fence',
+			'fail',
+			'cleanup'
+		]);
+		expect(state.renew).toHaveBeenCalledWith(lease);
+		expect(executor.reapplyFence).toHaveBeenCalledWith(
+			'reporting',
+			lease.event.jobId
+		);
+	});
+
+	it('does not physically re-fence an ordinary restore after its exact lease is lost', async () => {
+		const lease: DatabaseRestoreLease = {
+			event: {
+				eventId: randomUUID(),
+				jobId: randomUUID(),
+				target: 'reporting',
+				...provenanceEventBinding(),
+				expectedServicesSha: 'a'.repeat(40),
+				migrationManifestSha: 'b'.repeat(64)
+			},
+			leaseToken: randomUUID(),
+			leaseExpiresAt: new Date(Date.now() + 60_000),
+			phase: DatabaseRestoreJobPhase.FENCED
+		};
+		const reapplyFence = jest.fn();
+		const fail = jest.fn(async (_lease, error: Error) => {
+			expect(error.message).toContain(
+				DATABASE_RESTORE_PHYSICAL_FENCE_UNCONFIRMED
+			);
+			expect(error.message).toContain('exact execution lease was lost');
+			return null;
+		});
+		const state = {
+			loadClaimedJob: jest.fn(async () =>
+				claimedJob(lease, { sourceSize: 1024n })
+			),
+			confirmReleaseAuthorized: jest.fn(async () => null),
+			renew: jest.fn(async () => false),
+			fail
+		};
+		const service = new DatabaseRestoreWorkerService(
+			{ restoreWorkerEnabled: false } as never,
+			{} as never,
+			{
+				sealSourceArtifact: jest.fn(async () => ({
+					stagingPath: '/restore/job.dump',
+					sealedPath: '/restore-sealed/job.dump'
+				}))
+			} as never,
+			state as never,
+			{} as never,
+			{
+				restore: jest.fn(async () => {
+					throw new Error('old worker resumed');
+				}),
+				reapplyFence
+			} as never,
+			{ cleanup: jest.fn() } as never,
+			{} as never,
+			{} as never,
+			{} as never,
+			provenanceVerifier as never
+		);
+		const executeClaim = (
+			service as unknown as {
+				executeClaim(
+					value: DatabaseRestoreLease,
+					source: string
+				): Promise<string>;
+			}
+		).executeClaim.bind(service);
+
+		await expect(executeClaim(lease, '/restore/job.dump')).rejects.toThrow(
+			'Database restore failure checkpoint could not be persisted'
+		);
+		expect(state.renew).toHaveBeenCalledWith(lease);
+		expect(reapplyFence).not.toHaveBeenCalled();
+		expect(fail).toHaveBeenCalledWith(lease, expect.any(Error), null);
+	});
+
+	it('does not physically re-fence a recovery action after its exact lease is lost', async () => {
+		const lease: DatabaseRestoreRecoveryLease = {
+			event: {
+				eventId: randomUUID(),
+				actionId: randomUUID(),
+				jobId: randomUUID(),
+				target: 'reporting',
+				action: DatabaseRestoreRecoveryActionType.VERIFY_AS_IS,
+				receiptPayloadSha: 'a'.repeat(64),
+				expectedServicesSha: 'b'.repeat(40),
+				migrationManifestSha: 'c'.repeat(64)
+			},
+			leaseToken: randomUUID(),
+			leaseExpiresAt: new Date(Date.now() + 60_000),
+			phase: DatabaseRestoreRecoveryActionPhase.FENCED
+		};
+		const reapplyFence = jest.fn();
+		const block = jest.fn(async (_lease, error: Error) => {
+			expect(error.message).toContain(
+				DATABASE_RESTORE_PHYSICAL_FENCE_UNCONFIRMED
+			);
+			return false;
+		});
+		const recoveryState = {
+			loadClaimedAction: jest.fn(async () => ({
+				restoreJob: {
+					sourceSha256: 'd'.repeat(64),
+					safetyBackupSha256: 'e'.repeat(64)
+				}
+			})),
+			confirmReleaseAuthorized: jest.fn(async () => null),
+			renew: jest.fn(async () => false),
+			block
+		};
+		const service = new DatabaseRestoreWorkerService(
+			{ restoreWorkerEnabled: false } as never,
+			{} as never,
+			{
+				resolveSealedSourcePath: jest.fn(
+					async () => '/restore-sealed/job.dump'
+				)
+			} as never,
+			{} as never,
+			{} as never,
+			{} as never,
+			{} as never,
+			{} as never,
+			recoveryState as never,
+			{
+				execute: jest.fn(async () => {
+					throw new Error('old recovery worker resumed');
+				}),
+				reapplyFence
+			} as never
+		);
+		const executeRecoveryClaim = (
+			service as unknown as {
+				executeRecoveryClaim(
+					value: DatabaseRestoreRecoveryLease
+				): Promise<string>;
+			}
+		).executeRecoveryClaim.bind(service);
+
+		await expect(executeRecoveryClaim(lease)).rejects.toThrow(
+			'Database restore recovery failure could not be persisted'
+		);
+		expect(recoveryState.renew).toHaveBeenCalledWith(lease);
+		expect(reapplyFence).not.toHaveBeenCalled();
+		expect(block).toHaveBeenCalledWith(lease, expect.any(Error), null);
 	});
 
 	it('does not reconcile a terminal duplicate while another execution owns the singleton', async () => {
@@ -429,6 +754,7 @@ describe('DatabaseRestoreWorkerService recovery compensation', () => {
 			eventId: randomUUID(),
 			jobId: randomUUID(),
 			target: 'reporting',
+			...provenanceEventBinding(),
 			expectedServicesSha: 'a'.repeat(40),
 			migrationManifestSha: 'b'.repeat(64)
 		};
@@ -447,6 +773,7 @@ describe('DatabaseRestoreWorkerService recovery compensation', () => {
 			eventId: randomUUID(),
 			jobId: randomUUID(),
 			target: 'reporting',
+			...provenanceEventBinding(),
 			expectedServicesSha: 'a'.repeat(40),
 			migrationManifestSha: 'b'.repeat(64)
 		};
@@ -512,6 +839,7 @@ describe('DatabaseRestoreWorkerService recovery compensation', () => {
 			eventId: randomUUID(),
 			jobId: randomUUID(),
 			target: 'reporting',
+			...provenanceEventBinding(),
 			expectedServicesSha: 'a'.repeat(40),
 			migrationManifestSha: 'b'.repeat(64)
 		};

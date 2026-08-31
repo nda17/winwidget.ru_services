@@ -29,6 +29,10 @@ export interface DatabaseRestoreReleaseAuthorizationEvidence {
 	jobId: string;
 	actionId: string | null;
 	target: string;
+	sourceSize: bigint;
+	sourceBackupJobId: string;
+	backupProvenanceEnvelopeSha256: string;
+	backupProvenanceKeyId: string;
 	expectedServicesSha: string;
 	migrationManifestSha: string;
 	payloadSha256: string;
@@ -48,6 +52,10 @@ interface DatabaseRestoreReleaseAuthorizationPayload {
 	recoveryAction: DatabaseRestoreRecoveryActionType | null;
 	initialReceiptPayloadSha256: string | null;
 	sourceSha256: string;
+	sourceSize: bigint;
+	sourceBackupJobId: string;
+	backupProvenanceEnvelopeSha256: string;
+	backupProvenanceKeyId: string;
 	artifactSha256: string | null;
 	expectedServicesSha: string;
 	migrationManifestSha: string;
@@ -93,6 +101,11 @@ export class DatabaseRestoreReleaseAuthorizationService {
 			!/^[0-9a-f]{64}$/.test(job.safetyBackupSha256) ||
 			job.permit.status !== DatabaseRestorePermitStatus.CONSUMED ||
 			job.permit.requestedById !== job.requestedById ||
+			job.permit.sourceSize !== job.sourceSize ||
+			job.permit.sourceBackupJobId !== job.sourceBackupJobId ||
+			job.permit.backupProvenanceEnvelopeSha256 !==
+				job.backupProvenanceEnvelopeSha256 ||
+			job.permit.backupProvenanceKeyId !== job.backupProvenanceKeyId ||
 			!job.permit.approvedById ||
 			!job.permit.approvedAt ||
 			!job.permit.consumedAt
@@ -111,11 +124,15 @@ export class DatabaseRestoreReleaseAuthorizationService {
 		}
 		const approvalEvidenceSha256 = this.receipts.sha256(
 			this.receipts.canonicalize({
-				approvalVersion: 1,
+				approvalVersion: 2,
 				permitId: job.permit.id,
 				jobId: job.id,
 				target: job.target,
 				sourceSha256: job.sourceSha256,
+				sourceSize: job.sourceSize.toString(),
+				sourceBackupJobId: job.sourceBackupJobId,
+				backupProvenanceEnvelopeSha256: job.backupProvenanceEnvelopeSha256,
+				backupProvenanceKeyId: job.backupProvenanceKeyId,
 				expectedServicesSha: job.expectedServicesSha,
 				migrationManifestSha: job.migrationManifestSha,
 				requestedById: job.permit.requestedById,
@@ -138,6 +155,10 @@ export class DatabaseRestoreReleaseAuthorizationService {
 			recoveryAction: null,
 			initialReceiptPayloadSha256: null,
 			sourceSha256: job.sourceSha256,
+			sourceSize: job.sourceSize,
+			sourceBackupJobId: job.sourceBackupJobId,
+			backupProvenanceEnvelopeSha256: job.backupProvenanceEnvelopeSha256,
+			backupProvenanceKeyId: job.backupProvenanceKeyId,
 			artifactSha256: job.safetyBackupSha256,
 			expectedServicesSha: job.expectedServicesSha,
 			migrationManifestSha: job.migrationManifestSha,
@@ -201,12 +222,18 @@ export class DatabaseRestoreReleaseAuthorizationService {
 		}
 		const approvalEvidenceSha256 = this.receipts.sha256(
 			this.receipts.canonicalize({
-				approvalVersion: 1,
+				approvalVersion: 2,
 				actionId: action.id,
 				jobId: action.jobId,
 				eventId: action.eventId,
 				action: action.action,
 				initialReceiptPayloadSha256: action.receiptPayloadSha,
+				sourceSha256: action.restoreJob.sourceSha256,
+				sourceSize: action.restoreJob.sourceSize.toString(),
+				sourceBackupJobId: action.restoreJob.sourceBackupJobId,
+				backupProvenanceEnvelopeSha256:
+					action.restoreJob.backupProvenanceEnvelopeSha256,
+				backupProvenanceKeyId: action.restoreJob.backupProvenanceKeyId,
 				requestedById: action.requestedById,
 				approvedById: action.approvedById,
 				createdAt: action.createdAt.toISOString(),
@@ -226,6 +253,11 @@ export class DatabaseRestoreReleaseAuthorizationService {
 			recoveryAction: action.action,
 			initialReceiptPayloadSha256: action.receiptPayloadSha,
 			sourceSha256: action.restoreJob.sourceSha256,
+			sourceSize: action.restoreJob.sourceSize,
+			sourceBackupJobId: action.restoreJob.sourceBackupJobId,
+			backupProvenanceEnvelopeSha256:
+				action.restoreJob.backupProvenanceEnvelopeSha256,
+			backupProvenanceKeyId: action.restoreJob.backupProvenanceKeyId,
 			artifactSha256: action.artifactSha256,
 			expectedServicesSha: action.restoreJob.expectedServicesSha,
 			migrationManifestSha: action.restoreJob.migrationManifestSha,
@@ -254,6 +286,9 @@ export class DatabaseRestoreReleaseAuthorizationService {
 		jobId: string;
 		eventId: string;
 		target: DatabaseRestoreTarget;
+		sourceBackupJobId: string;
+		backupProvenanceEnvelopeSha256: string;
+		backupProvenanceKeyId: string;
 		expectedServicesSha: string;
 		migrationManifestSha: string;
 	}): Promise<DatabaseRestoreReleaseAuthorizationEvidence | null> {
@@ -282,6 +317,16 @@ export class DatabaseRestoreReleaseAuthorizationService {
 			authorization.target !== input.target ||
 			authorization.target !== job.target ||
 			authorization.sourceSha256 !== job.sourceSha256 ||
+			authorization.sourceSize !== job.sourceSize ||
+			authorization.sourceBackupJobId !== job.sourceBackupJobId ||
+			authorization.sourceBackupJobId !== input.sourceBackupJobId ||
+			authorization.backupProvenanceEnvelopeSha256 !==
+				job.backupProvenanceEnvelopeSha256 ||
+			authorization.backupProvenanceEnvelopeSha256 !==
+				input.backupProvenanceEnvelopeSha256 ||
+			authorization.backupProvenanceKeyId !== job.backupProvenanceKeyId ||
+			authorization.backupProvenanceKeyId !==
+				input.backupProvenanceKeyId ||
 			!authorization.artifactSha256 ||
 			!/^[0-9a-f]{64}$/.test(authorization.artifactSha256) ||
 			authorization.artifactSha256 !== job.safetyBackupSha256 ||
@@ -319,11 +364,15 @@ export class DatabaseRestoreReleaseAuthorizationService {
 		}
 		const approvalEvidenceSha256 = this.receipts.sha256(
 			this.receipts.canonicalize({
-				approvalVersion: 1,
+				approvalVersion: 2,
 				permitId: permit.id,
 				jobId: job.id,
 				target: job.target,
 				sourceSha256: job.sourceSha256,
+				sourceSize: job.sourceSize.toString(),
+				sourceBackupJobId: job.sourceBackupJobId,
+				backupProvenanceEnvelopeSha256: job.backupProvenanceEnvelopeSha256,
+				backupProvenanceKeyId: job.backupProvenanceKeyId,
 				expectedServicesSha: job.expectedServicesSha,
 				migrationManifestSha: job.migrationManifestSha,
 				requestedById: permit.requestedById,
@@ -398,6 +447,11 @@ export class DatabaseRestoreReleaseAuthorizationService {
 			authorization.initialReceiptPayloadSha256 !==
 				job.terminalReceipt?.payloadSha256 ||
 			authorization.sourceSha256 !== job.sourceSha256 ||
+			authorization.sourceSize !== job.sourceSize ||
+			authorization.sourceBackupJobId !== job.sourceBackupJobId ||
+			authorization.backupProvenanceEnvelopeSha256 !==
+				job.backupProvenanceEnvelopeSha256 ||
+			authorization.backupProvenanceKeyId !== job.backupProvenanceKeyId ||
 			authorization.artifactSha256 !== action.artifactSha256 ||
 			authorization.artifactSha256 !== expectedArtifactSha256 ||
 			authorization.expectedServicesSha !== input.expectedServicesSha ||
@@ -427,12 +481,17 @@ export class DatabaseRestoreReleaseAuthorizationService {
 		}
 		const approvalEvidenceSha256 = this.receipts.sha256(
 			this.receipts.canonicalize({
-				approvalVersion: 1,
+				approvalVersion: 2,
 				actionId: action.id,
 				jobId: action.jobId,
 				eventId: action.eventId,
 				action: action.action,
 				initialReceiptPayloadSha256: action.receiptPayloadSha,
+				sourceSha256: job.sourceSha256,
+				sourceSize: job.sourceSize.toString(),
+				sourceBackupJobId: job.sourceBackupJobId,
+				backupProvenanceEnvelopeSha256: job.backupProvenanceEnvelopeSha256,
+				backupProvenanceKeyId: job.backupProvenanceKeyId,
 				requestedById: action.requestedById,
 				approvedById: action.approvedById,
 				createdAt: action.createdAt.toISOString(),
@@ -470,7 +529,7 @@ export class DatabaseRestoreReleaseAuthorizationService {
 		input: DatabaseRestoreReleaseAuthorizationPayload
 	): string {
 		return this.receipts.canonicalize({
-			releaseAuthorizationVersion: 1,
+			releaseAuthorizationVersion: 2,
 			operationType: input.operationType,
 			operationId: input.operationId,
 			jobId: input.jobId,
@@ -481,6 +540,10 @@ export class DatabaseRestoreReleaseAuthorizationService {
 			recoveryAction: input.recoveryAction,
 			initialReceiptPayloadSha256: input.initialReceiptPayloadSha256,
 			sourceSha256: input.sourceSha256,
+			sourceSize: input.sourceSize.toString(),
+			sourceBackupJobId: input.sourceBackupJobId,
+			backupProvenanceEnvelopeSha256: input.backupProvenanceEnvelopeSha256,
+			backupProvenanceKeyId: input.backupProvenanceKeyId,
 			artifactSha256: input.artifactSha256,
 			expectedServicesSha: input.expectedServicesSha,
 			migrationManifestSha: input.migrationManifestSha,
@@ -506,6 +569,10 @@ export class DatabaseRestoreReleaseAuthorizationService {
 		jobId: string;
 		actionId: string | null;
 		target: string;
+		sourceSize: bigint;
+		sourceBackupJobId: string;
+		backupProvenanceEnvelopeSha256: string;
+		backupProvenanceKeyId: string;
 		expectedServicesSha: string;
 		migrationManifestSha: string;
 		payloadSha256: string;
@@ -520,6 +587,10 @@ export class DatabaseRestoreReleaseAuthorizationService {
 			jobId: input.jobId,
 			actionId: input.actionId,
 			target: input.target,
+			sourceSize: input.sourceSize,
+			sourceBackupJobId: input.sourceBackupJobId,
+			backupProvenanceEnvelopeSha256: input.backupProvenanceEnvelopeSha256,
+			backupProvenanceKeyId: input.backupProvenanceKeyId,
 			expectedServicesSha: input.expectedServicesSha,
 			migrationManifestSha: input.migrationManifestSha,
 			payloadSha256: input.payloadSha256,

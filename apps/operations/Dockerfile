@@ -31,9 +31,10 @@ RUN apt-get update \
 		'deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt bookworm-pgdg main' \
 		> /etc/apt/sources.list.d/pgdg.list \
 	&& apt-get update \
-	&& apt-get install -y --no-install-recommends postgresql-client-18 \
+	&& apt-get install -y --no-install-recommends diffutils gosu postgresql-client-18 \
 	&& pg_dump --version | grep -E '^pg_dump \(PostgreSQL\) 18\.' \
 	&& pg_restore --version | grep -E '^pg_restore \(PostgreSQL\) 18\.' \
+	&& gosu nobody true \
 	&& apt-get purge -y --auto-remove curl \
 	&& rm -rf /var/lib/apt/lists/* \
 	&& groupadd --gid 1001 nodejs \
@@ -46,6 +47,8 @@ COPY --from=build --chown=operations:nodejs /app/node_modules ./node_modules
 COPY --from=build --chown=operations:nodejs /app/package.json ./package.json
 COPY --from=build --chown=operations:nodejs /app/prisma ./prisma
 COPY --from=build --chown=operations:nodejs /app/restore-manifests ./restore-manifests
+COPY --chown=root:root --chmod=0755 docker-entrypoint.sh /usr/local/bin/operations-entrypoint.sh
 USER operations
 EXPOSE 5200 5201 5202 5203
+ENTRYPOINT ["/usr/local/bin/operations-entrypoint.sh"]
 CMD ["node", "dist/src/main.js"]

@@ -38,8 +38,46 @@ export class DatabaseRestoreWriterFenceService {
 			[
 				'BEGIN;',
 				...this.targetTransactionGuards(target),
-				this.verifyApplyBoundaryBlock(target, roles),
+				this.verifyApplyBoundaryBlock(target, roles, generationMarker),
 				`ALTER ROLE ${this.identifier(target.adminRole)} SET ${this.identifier('winwidget.restore_generation')} TO ${this.literal(generationMarker)};`,
+				...roles.map(
+					role => `ALTER ROLE ${this.identifier(role)} NOLOGIN;`
+				),
+				'COMMIT;'
+			].join('\n'),
+			signal
+		);
+		await this.process.executeSql(
+			connection,
+			this.terminateSql(target, roles),
+			signal
+		);
+		await this.process.executeSql(
+			connection,
+			this.verifyFencedSql(target, roles, generationMarker),
+			signal
+		);
+		return this.fencedEvidence(roles, generationMarker);
+	}
+
+	async reapply(
+		connection: DatabaseRestoreConnection,
+		target: DatabaseRestoreTargetConfiguration,
+		operationId: string,
+		signal?: AbortSignal
+	): Promise<DatabaseRestoreWriterFenceEvidence> {
+		const roles = this.roles(target);
+		const generationMarker = this.generationMarker(
+			target,
+			roles,
+			operationId
+		);
+		await this.process.executeSql(
+			connection,
+			[
+				'BEGIN;',
+				...this.targetTransactionGuards(target),
+				this.verifyReapplyBoundaryBlock(target, roles, generationMarker),
 				...roles.map(
 					role => `ALTER ROLE ${this.identifier(role)} NOLOGIN;`
 				),
@@ -328,16 +366,58 @@ $database_restore_verify_terminal_release$;`;
 
 	private verifyApplyBoundaryBlock(
 		target: DatabaseRestoreTargetConfiguration,
-		roles: [string, string, string]
+		roles: [string, string, string],
+		generationMarker: string
 	): string {
+		const roleValues = roles.map(role => this.literal(role)).join(', ');
 		return `DO $database_restore_verify_apply_boundary$
+DECLARE
+	role_count INTEGER;
+	login_count INTEGER;
 BEGIN
 	IF current_database() <> ${this.literal(target.database)} THEN
 		RAISE EXCEPTION 'Database restore writer fence connected to an unexpected database';
 	END IF;
 	${this.verifyTrustedControlPlaneBoundary(target, roles)}
+	SELECT count(*), count(*) FILTER (WHERE role_state.rolcanlogin)
+	INTO role_count, login_count
+	FROM pg_roles AS role_state
+	WHERE role_state.rolname IN (${roleValues});
+	IF role_count <> 3 OR login_count NOT IN (0, 3) THEN
+		RAISE EXCEPTION 'Database restore writer apply boundary is mixed or unknown';
+	END IF;
+	IF login_count = 0 THEN
+		${this.verifyGenerationMarker(target, generationMarker)}
+	END IF;
 END
 $database_restore_verify_apply_boundary$;`;
+	}
+
+	private verifyReapplyBoundaryBlock(
+		target: DatabaseRestoreTargetConfiguration,
+		roles: [string, string, string],
+		generationMarker: string
+	): string {
+		const roleValues = roles.map(role => this.literal(role)).join(', ');
+		return `DO $database_restore_verify_reapply_boundary$
+DECLARE
+	role_count INTEGER;
+	login_count INTEGER;
+BEGIN
+	IF current_database() <> ${this.literal(target.database)} THEN
+		RAISE EXCEPTION 'Database restore writer re-fence connected to an unexpected database';
+	END IF;
+	${this.verifyTrustedControlPlaneBoundary(target, roles)}
+	${this.verifyGenerationMarker(target, generationMarker)}
+	SELECT count(*), count(*) FILTER (WHERE role_state.rolcanlogin)
+	INTO role_count, login_count
+	FROM pg_roles AS role_state
+	WHERE role_state.rolname IN (${roleValues});
+	IF role_count <> 3 OR login_count NOT IN (0, 3) THEN
+		RAISE EXCEPTION 'Database restore writer reapply boundary is mixed or unknown';
+	END IF;
+END
+$database_restore_verify_reapply_boundary$;`;
 	}
 
 	private verifyGenerationMarker(

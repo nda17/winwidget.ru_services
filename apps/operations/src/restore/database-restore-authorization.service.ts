@@ -11,16 +11,23 @@ import {
 	DatabaseRestorePermitStatus,
 	DatabaseRestoreRecoveryActionStatus,
 	DatabaseRestoreRecoveryActionType,
-	Prisma
+	Prisma,
+	ScheduledJobRunStatus
 } from '@prisma/operations-client';
 import { randomUUID } from 'node:crypto';
 import { AdminEventLogService } from '../admin-event-log/admin-event-log.service';
+import {
+	DatabaseBackupProvenanceEnvelope,
+	DatabaseBackupProvenanceService,
+	SignedDatabaseBackupProvenance
+} from '../maintenance/database-backup-provenance.service';
 import {
 	OPERATIONS_DATABASE_RESTORE_RECOVERY_EVENT_TYPE,
 	OPERATIONS_DATABASE_RESTORE_ROUTING_KEY
 } from '../messaging/operations-messaging.constants';
 import { OperationsOutboxService } from '../messaging/operations-outbox.service';
 import { OperationsPrismaService } from '../prisma/operations-prisma.service';
+import { databaseBackupJobType } from '../scheduled-jobs/scheduled-jobs.types';
 import {
 	DATABASE_RESTORE_PERMIT_TTL_MS,
 	DATABASE_RESTORE_RECOVERY_ACTION_TTL_MS,
@@ -40,6 +47,12 @@ interface ActorContext {
 	userAgent: string | null;
 }
 
+interface VerifiedBackupProvenance {
+	signed: SignedDatabaseBackupProvenance;
+	envelope: DatabaseBackupProvenanceEnvelope;
+	serialized: string;
+}
+
 @Injectable()
 export class DatabaseRestoreAuthorizationService {
 	constructor(
@@ -47,7 +60,8 @@ export class DatabaseRestoreAuthorizationService {
 		private readonly prisma: OperationsPrismaService,
 		private readonly audit: AdminEventLogService,
 		private readonly manifests: DatabaseRestoreMigrationManifestService,
-		private readonly outbox: OperationsOutboxService = new OperationsOutboxService()
+		private readonly outbox: OperationsOutboxService = new OperationsOutboxService(),
+		private readonly provenance: DatabaseBackupProvenanceService = new DatabaseBackupProvenanceService()
 	) {}
 
 	async getApprovedPermit() {
@@ -67,6 +81,7 @@ export class DatabaseRestoreAuthorizationService {
 			target: string;
 			sourceSha256: string;
 			expectedServicesSha: string;
+			backupProvenance: string;
 		},
 		context: ActorContext
 	) {
@@ -81,15 +96,29 @@ export class DatabaseRestoreAuthorizationService {
 			);
 		}
 		const migrationManifestSha = this.manifests.sha256(target);
+		const provenance = await this.verifyProvenance(
+			input.backupProvenance,
+			target,
+			input.sourceSha256,
+			migrationManifestSha,
+			currentServicesSha
+		);
 		const now = new Date();
 		try {
 			const permit = await this.prisma.$transaction(async transaction => {
+				await this.assertCompletedBackupJob(transaction, provenance);
 				const created = await transaction.databaseRestorePermit.create({
 					data: {
 						id: randomUUID(),
 						jobId: randomUUID(),
 						target,
 						sourceSha256: input.sourceSha256,
+						sourceSize: BigInt(provenance.envelope.evidence.fileSize),
+						sourceBackupJobId: provenance.envelope.evidence.backupJobId,
+						backupProvenance: provenance.serialized,
+						backupProvenanceEnvelopeSha256:
+							provenance.signed.envelopeSha256,
+						backupProvenanceKeyId: provenance.envelope.keyId,
 						expectedServicesSha: currentServicesSha,
 						migrationManifestSha,
 						requestedById: context.actorId,
@@ -109,6 +138,11 @@ export class DatabaseRestoreAuthorizationService {
 						jobId: created.jobId,
 						target,
 						sourceSha256: created.sourceSha256,
+						sourceSize: created.sourceSize.toString(),
+						sourceBackupJobId: created.sourceBackupJobId,
+						backupProvenanceEnvelopeSha256:
+							created.backupProvenanceEnvelopeSha256,
+						backupProvenanceKeyId: created.backupProvenanceKeyId,
 						expectedServicesSha: created.expectedServicesSha,
 						migrationManifestSha: created.migrationManifestSha,
 						expiresAt: created.expiresAt.toISOString()
@@ -193,6 +227,7 @@ export class DatabaseRestoreAuthorizationService {
 			jobId: string;
 			target: DatabaseRestoreTarget;
 			sourceSha256: string;
+			sourceSize: bigint;
 			actorId: string;
 		}
 	) {
@@ -208,6 +243,7 @@ export class DatabaseRestoreAuthorizationService {
 			!permit ||
 			permit.target !== input.target ||
 			permit.sourceSha256 !== input.sourceSha256 ||
+			permit.sourceSize !== input.sourceSize ||
 			permit.expectedServicesSha !== currentServicesSha ||
 			permit.migrationManifestSha !== currentMigrationManifestSha ||
 			permit.requestedById !== input.actorId
@@ -222,6 +258,7 @@ export class DatabaseRestoreAuthorizationService {
 				jobId: input.jobId,
 				target: input.target,
 				sourceSha256: input.sourceSha256,
+				sourceSize: input.sourceSize,
 				expectedServicesSha: currentServicesSha,
 				migrationManifestSha: currentMigrationManifestSha,
 				requestedById: input.actorId,
@@ -486,6 +523,10 @@ export class DatabaseRestoreAuthorizationService {
 		jobId: string;
 		target: string;
 		sourceSha256: string;
+		sourceSize: bigint;
+		sourceBackupJobId: string;
+		backupProvenanceEnvelopeSha256: string;
+		backupProvenanceKeyId: string;
 		expectedServicesSha: string;
 		migrationManifestSha: string;
 		status: DatabaseRestorePermitStatus;
@@ -500,6 +541,11 @@ export class DatabaseRestoreAuthorizationService {
 			jobId: permit.jobId,
 			target: permit.target,
 			sourceSha256: permit.sourceSha256,
+			sourceSize: Number(permit.sourceSize),
+			sourceBackupJobId: permit.sourceBackupJobId,
+			backupProvenanceEnvelopeSha256:
+				permit.backupProvenanceEnvelopeSha256,
+			backupProvenanceKeyId: permit.backupProvenanceKeyId,
 			expectedServicesSha: permit.expectedServicesSha,
 			migrationManifestSha: permit.migrationManifestSha,
 			status: permit.status,
@@ -509,6 +555,239 @@ export class DatabaseRestoreAuthorizationService {
 			consumedAt: permit.consumedAt?.toISOString() ?? null,
 			closedAt: permit.closedAt?.toISOString() ?? null
 		};
+	}
+
+	async verifyStoredProvenance(input: {
+		backupProvenance: string;
+		target: DatabaseRestoreTarget;
+		sourceSha256: string;
+		sourceSize: bigint;
+		sourceFileName: string;
+		migrationManifestSha: string;
+		expectedServicesSha: string;
+		sourceBackupJobId: string;
+		backupProvenanceEnvelopeSha256: string;
+		backupProvenanceKeyId: string;
+	}): Promise<DatabaseBackupProvenanceEnvelope> {
+		const verified = await this.verifyProvenance(
+			input.backupProvenance,
+			input.target,
+			input.sourceSha256,
+			input.migrationManifestSha,
+			input.expectedServicesSha
+		);
+		const evidence = verified.envelope.evidence;
+		if (
+			BigInt(evidence.fileSize) !== input.sourceSize ||
+			evidence.fileName !== input.sourceFileName ||
+			evidence.backupJobId !== input.sourceBackupJobId ||
+			verified.signed.envelopeSha256 !==
+				input.backupProvenanceEnvelopeSha256 ||
+			verified.envelope.keyId !== input.backupProvenanceKeyId
+		) {
+			throw new ConflictException(
+				'Backup provenance does not match the exact restore artifact'
+			);
+		}
+		return verified.envelope;
+	}
+
+	private async verifyProvenance(
+		raw: string,
+		target: DatabaseRestoreTarget,
+		sourceSha256: string,
+		migrationManifestSha: string,
+		expectedServicesSha: string
+	): Promise<VerifiedBackupProvenance> {
+		let value: unknown;
+		try {
+			value = JSON.parse(raw) as unknown;
+		} catch {
+			throw new BadRequestException('Backup provenance JSON is invalid');
+		}
+		let envelope: DatabaseBackupProvenanceEnvelope;
+		try {
+			envelope = await this.provenance.verify(value);
+		} catch (error) {
+			throw new BadRequestException(
+				error instanceof Error
+					? error.message
+					: 'Backup provenance is invalid'
+			);
+		}
+		if (
+			envelope.evidence.target !== target ||
+			envelope.evidence.artifactSha256 !== sourceSha256 ||
+			envelope.evidence.migrationManifestSha !== migrationManifestSha ||
+			envelope.evidence.servicesSha !== expectedServicesSha ||
+			envelope.evidence.imageRevision !== expectedServicesSha
+		) {
+			throw new ConflictException(
+				'Backup provenance does not match target, source SHA-256, migration manifest or services revision'
+			);
+		}
+		const signed = value as SignedDatabaseBackupProvenance;
+		return { signed, envelope, serialized: JSON.stringify(signed) };
+	}
+
+	private async assertCompletedBackupJob(
+		transaction: Prisma.TransactionClient,
+		verified: VerifiedBackupProvenance
+	): Promise<void> {
+		const evidence = verified.envelope.evidence;
+		const job = await transaction.scheduledJobRun.findUnique({
+			where: { id: evidence.backupJobId }
+		});
+		if (
+			!job ||
+			job.status !== ScheduledJobRunStatus.SUCCEEDED ||
+			job.jobType !== databaseBackupJobType(evidence.target) ||
+			!job.finishedAt ||
+			job.createdAt.toISOString() !== evidence.backupJobCreatedAt
+		) {
+			throw new ConflictException(
+				'Backup provenance does not reference a completed exact backup job'
+			);
+		}
+		const input = this.exactJsonObject(
+			job.input,
+			['chatId', 'messageThreadId', 'schemaVersion', 'target', 'trigger'],
+			'backup job input',
+			['periodStart']
+		);
+		const result = this.exactJsonObject(
+			job.result,
+			[
+				'backupProvenance',
+				'createdAt',
+				'databaseName',
+				'fileName',
+				'fileSha256',
+				'fileSize',
+				'provenanceTelegramReceipt',
+				'schema',
+				'target',
+				'telegramReceipt',
+				'telegramSent'
+			],
+			'backup job result'
+		);
+		let storedEnvelope: DatabaseBackupProvenanceEnvelope;
+		try {
+			storedEnvelope = await this.provenance.verify(
+				result.backupProvenance
+			);
+		} catch {
+			throw new ConflictException(
+				'Completed backup job contains invalid provenance evidence'
+			);
+		}
+		const storedSigned =
+			result.backupProvenance as SignedDatabaseBackupProvenance;
+		const artifactTelegramReceipt = result.telegramReceipt as Record<
+			string,
+			unknown
+		>;
+		const provenanceTelegramReceipt =
+			result.provenanceTelegramReceipt as Record<string, unknown>;
+		const artifactCreatedAt = Date.parse(evidence.artifactCreatedAt);
+		const resultCreatedAt =
+			typeof result.createdAt === 'string'
+				? Date.parse(result.createdAt)
+				: Number.NaN;
+		if (
+			input.schemaVersion !== 1 ||
+			input.target !== evidence.target ||
+			input.trigger !== job.trigger ||
+			(input.periodStart ?? null) !==
+				(job.periodStart?.toISOString() ?? null) ||
+			typeof input.chatId !== 'string' ||
+			!input.chatId ||
+			!Number.isInteger(input.messageThreadId) ||
+			Number(input.messageThreadId) < 1 ||
+			result.target !== evidence.target ||
+			result.databaseName !== evidence.databaseName ||
+			result.schema !== evidence.schema ||
+			result.fileName !== evidence.fileName ||
+			result.fileSize !== evidence.fileSize ||
+			result.fileSha256 !== evidence.artifactSha256 ||
+			result.telegramSent !== true ||
+			!Number.isFinite(resultCreatedAt) ||
+			resultCreatedAt > artifactCreatedAt ||
+			job.finishedAt.getTime() < artifactCreatedAt ||
+			storedEnvelope.keyId !== verified.envelope.keyId ||
+			storedSigned.envelopeSha256 !== verified.signed.envelopeSha256 ||
+			storedSigned.signatureEd25519Base64 !==
+				verified.signed.signatureEd25519Base64 ||
+			!this.validTelegramReceipt(
+				result.telegramReceipt,
+				input.chatId,
+				Number(input.messageThreadId)
+			) ||
+			!this.validTelegramReceipt(
+				result.provenanceTelegramReceipt,
+				input.chatId,
+				Number(input.messageThreadId)
+			) ||
+			artifactTelegramReceipt.messageId ===
+				provenanceTelegramReceipt.messageId ||
+			artifactTelegramReceipt.fileId ===
+				provenanceTelegramReceipt.fileId ||
+			artifactTelegramReceipt.fileUniqueId ===
+				provenanceTelegramReceipt.fileUniqueId
+		) {
+			throw new ConflictException(
+				'Completed backup job result does not match signed provenance'
+			);
+		}
+	}
+
+	private exactJsonObject(
+		value: unknown,
+		expectedKeys: string[],
+		label: string,
+		optionalKeys: string[] = []
+	): Record<string, unknown> {
+		if (!value || typeof value !== 'object' || Array.isArray(value)) {
+			throw new ConflictException(`${label} is invalid`);
+		}
+		const actual = Object.keys(value).sort();
+		const allowed = new Set([...expectedKeys, ...optionalKeys]);
+		if (
+			expectedKeys.some(key => !Object.hasOwn(value, key)) ||
+			actual.some(key => !allowed.has(key))
+		) {
+			throw new ConflictException(`${label} contract is invalid`);
+		}
+		return value as Record<string, unknown>;
+	}
+
+	private validTelegramReceipt(
+		value: unknown,
+		chatId: string,
+		messageThreadId: number
+	): boolean {
+		if (!value || typeof value !== 'object' || Array.isArray(value))
+			return false;
+		const record = value as Record<string, unknown>;
+		if (
+			Object.keys(record).sort().join(',') !==
+			'chatId,fileId,fileUniqueId,messageId,messageThreadId'
+		) {
+			return false;
+		}
+		return (
+			Number.isInteger(record.messageId) &&
+			Number(record.messageId) > 0 &&
+			record.chatId === chatId &&
+			record.messageThreadId === messageThreadId &&
+			typeof record.fileId === 'string' &&
+			record.fileId.length > 0 &&
+			record.fileId.length <= 512 &&
+			typeof record.fileUniqueId === 'string' &&
+			record.fileUniqueId.length > 0 &&
+			record.fileUniqueId.length <= 512
+		);
 	}
 
 	private serializeRecoveryAction(action: {

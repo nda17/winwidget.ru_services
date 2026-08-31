@@ -173,7 +173,8 @@ describe('Database restore permit request contract', () => {
 				{
 					target: 'reporting',
 					sourceSha256: 'a'.repeat(64),
-					expectedServicesSha: 'b'.repeat(40)
+					expectedServicesSha: 'b'.repeat(40),
+					backupProvenance: '{}'
 				},
 				metadata
 			)
@@ -181,7 +182,8 @@ describe('Database restore permit request contract', () => {
 			expect.objectContaining({
 				target: 'reporting',
 				sourceSha256: 'a'.repeat(64),
-				expectedServicesSha: 'b'.repeat(40)
+				expectedServicesSha: 'b'.repeat(40),
+				backupProvenance: '{}'
 			})
 		);
 	});
@@ -193,6 +195,7 @@ describe('Database restore permit request contract', () => {
 					target: 'reporting',
 					sourceSha256: 'a'.repeat(64),
 					expectedServicesSha: 'b'.repeat(40),
+					backupProvenance: '{}',
 					migrationManifestSha: 'c'.repeat(64)
 				},
 				metadata

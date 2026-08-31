@@ -158,7 +158,7 @@ export class DatabaseRestoreRecoveryExecutorService {
 	): Promise<DatabaseRestoreWriterFenceEvidence> {
 		const target = this.targets.get(targetName);
 		const connection = await this.targets.connection(target);
-		return this.writerFence.apply(connection, target, operationId);
+		return this.writerFence.reapply(connection, target, operationId);
 	}
 
 	async reconcileResolved(

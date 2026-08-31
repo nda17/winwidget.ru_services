@@ -20,6 +20,7 @@ import {
 	OperationsConsumeDecision,
 	OperationsRabbitMqService
 } from '../messaging/operations-rabbitmq.service';
+import { DatabaseBackupProvenanceService } from '../maintenance/database-backup-provenance.service';
 import { OperationsRuntimeService } from '../runtime/operations-runtime.service';
 import { DatabaseRestoreCleanupService } from './database-restore-cleanup.service';
 import {
@@ -49,6 +50,7 @@ import { DATABASE_RESTORE_RELEASE_AUTHORIZATION_COMMIT_UNKNOWN } from './databas
 
 const UUID_PATTERN =
 	/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const PROVENANCE_KEY_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,79}$/;
 const RESTORE_LEASE_MS = 60_000;
 const RESTORE_LEASE_RENEW_MS = 20_000;
 const RESTORE_SETTLEMENT_WAIT_MS = RESTORE_LEASE_MS + 5_000;
@@ -75,7 +77,8 @@ export class DatabaseRestoreWorkerService
 		private readonly cleanup: DatabaseRestoreCleanupService,
 		private readonly manifests: DatabaseRestoreMigrationManifestService,
 		private readonly recoveryState: DatabaseRestoreRecoveryStateService,
-		private readonly recoveryExecutor: DatabaseRestoreRecoveryExecutorService
+		private readonly recoveryExecutor: DatabaseRestoreRecoveryExecutorService,
+		private readonly provenance: DatabaseBackupProvenanceService = new DatabaseBackupProvenanceService()
 	) {}
 
 	async onModuleInit(): Promise<void> {
@@ -317,6 +320,7 @@ export class DatabaseRestoreWorkerService
 			const compensation = await this.compensateWriterFence(
 				error,
 				lease.phase,
+				() => this.recoveryState.renew(lease),
 				() =>
 					this.recoveryExecutor.reapplyFence(
 						lease.event.target,
@@ -392,6 +396,8 @@ export class DatabaseRestoreWorkerService
 		try {
 			const job = await this.state.loadClaimedJob(lease);
 			controller.signal.throwIfAborted();
+			await this.assertClaimedJobProvenance(job, lease.event);
+			controller.signal.throwIfAborted();
 			const sealed = await this.control.sealSourceArtifact(
 				job.id,
 				job.sourceSha256,
@@ -440,6 +446,7 @@ export class DatabaseRestoreWorkerService
 					const compensation = await this.compensateWriterFence(
 						error,
 						lease.phase,
+						() => this.state.renew(lease),
 						() =>
 							this.executor.reapplyFence(
 								lease.event.target,
@@ -609,6 +616,7 @@ export class DatabaseRestoreWorkerService
 	private async compensateWriterFence(
 		error: unknown,
 		phase: DatabaseRestoreJobPhase | DatabaseRestoreRecoveryActionPhase,
+		renewLease: () => Promise<boolean>,
 		reapply: () => Promise<DatabaseRestoreWriterFenceEvidence>,
 		fenceFromPreparing: boolean
 	): Promise<{
@@ -619,6 +627,11 @@ export class DatabaseRestoreWorkerService
 			return { error, evidence: null };
 		}
 		try {
+			if (!(await renewLease())) {
+				throw new Error(
+					'exact execution lease was lost before writer fence reapply'
+				);
+			}
 			return { error, evidence: await reapply() };
 		} catch (fenceError) {
 			return {
@@ -924,8 +937,8 @@ export class DatabaseRestoreWorkerService
 		const record = value as Record<string, unknown>;
 		if (
 			Object.keys(record).sort().join(',') !==
-				'eventId,expectedServicesSha,jobId,migrationManifestSha,schemaVersion,target' ||
-			record.schemaVersion !== 2 ||
+				'backupProvenanceEnvelopeSha256,backupProvenanceKeyId,eventId,expectedServicesSha,jobId,migrationManifestSha,schemaVersion,sourceBackupJobId,target' ||
+			record.schemaVersion !== 3 ||
 			typeof record.eventId !== 'string' ||
 			!UUID_PATTERN.test(record.eventId) ||
 			typeof record.jobId !== 'string' ||
@@ -934,6 +947,14 @@ export class DatabaseRestoreWorkerService
 			!DATABASE_RESTORE_TARGETS.includes(
 				record.target as DatabaseRestoreTarget
 			) ||
+			typeof record.sourceBackupJobId !== 'string' ||
+			!UUID_PATTERN.test(record.sourceBackupJobId) ||
+			typeof record.backupProvenanceEnvelopeSha256 !== 'string' ||
+			!DATABASE_RESTORE_SHA256_PATTERN.test(
+				record.backupProvenanceEnvelopeSha256
+			) ||
+			typeof record.backupProvenanceKeyId !== 'string' ||
+			!PROVENANCE_KEY_ID_PATTERN.test(record.backupProvenanceKeyId) ||
 			typeof record.expectedServicesSha !== 'string' ||
 			!DATABASE_RESTORE_SERVICES_SHA_PATTERN.test(
 				record.expectedServicesSha
@@ -948,9 +969,59 @@ export class DatabaseRestoreWorkerService
 			eventId: record.eventId,
 			jobId: record.jobId,
 			target: record.target as DatabaseRestoreTarget,
+			sourceBackupJobId: record.sourceBackupJobId,
+			backupProvenanceEnvelopeSha256:
+				record.backupProvenanceEnvelopeSha256,
+			backupProvenanceKeyId: record.backupProvenanceKeyId,
 			expectedServicesSha: record.expectedServicesSha,
 			migrationManifestSha: record.migrationManifestSha
 		};
+	}
+
+	private async assertClaimedJobProvenance(
+		job: {
+			sourceSha256: string;
+			sourceSize: bigint;
+			sourceFileName: string;
+			sourceBackupJobId: string;
+			backupProvenance: string;
+			backupProvenanceEnvelopeSha256: string;
+			backupProvenanceKeyId: string;
+			migrationManifestSha: string;
+		},
+		event: DatabaseRestoreEventIdentity
+	): Promise<void> {
+		let value: unknown;
+		try {
+			value = JSON.parse(job.backupProvenance) as unknown;
+		} catch {
+			throw new Error(
+				'Database restore backup provenance JSON is invalid'
+			);
+		}
+		const envelope = await this.provenance.verify(value);
+		const signed = value as { envelopeSha256?: unknown };
+		const evidence = envelope.evidence;
+		if (
+			evidence.target !== event.target ||
+			evidence.backupJobId !== event.sourceBackupJobId ||
+			evidence.backupJobId !== job.sourceBackupJobId ||
+			evidence.artifactSha256 !== job.sourceSha256 ||
+			BigInt(evidence.fileSize) !== job.sourceSize ||
+			evidence.fileName !== job.sourceFileName ||
+			evidence.migrationManifestSha !== event.migrationManifestSha ||
+			evidence.migrationManifestSha !== job.migrationManifestSha ||
+			evidence.servicesSha !== event.expectedServicesSha ||
+			evidence.imageRevision !== event.expectedServicesSha ||
+			signed.envelopeSha256 !== event.backupProvenanceEnvelopeSha256 ||
+			signed.envelopeSha256 !== job.backupProvenanceEnvelopeSha256 ||
+			envelope.keyId !== event.backupProvenanceKeyId ||
+			envelope.keyId !== job.backupProvenanceKeyId
+		) {
+			throw new Error(
+				'Database restore backup provenance binding is invalid'
+			);
+		}
 	}
 
 	private assertCurrentRuntimeBinding(

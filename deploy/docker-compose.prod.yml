@@ -1484,6 +1484,16 @@ services:
 
   operations-worker:
     image: ${OPERATIONS_IMAGE:?OPERATIONS_IMAGE is required}
+    user: '0:0'
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
     labels:
       com.winwidget.owner: operations
       com.winwidget.purpose: worker
@@ -1506,11 +1516,17 @@ services:
       PLATFORM_BACKUP_URL: ${PLATFORM_BACKUP_URL:?PLATFORM_BACKUP_URL is required}
       SUPPORT_BACKUP_URL: ${SUPPORT_BACKUP_URL:?SUPPORT_BACKUP_URL is required}
       OPERATIONS_BACKUP_URL: ${OPERATIONS_BACKUP_URL:?OPERATIONS_BACKUP_URL is required}
+      DATABASE_BACKUP_PROVENANCE_KEY_ID: operations-backup-ed25519-2026-08-31
+      DATABASE_BACKUP_PROVENANCE_PRIVATE_KEY_FILE: /run/winwidget-operations-secrets/database-backup-provenance-private-key.pem
     network_mode: host
     extra_hosts:
       - 'tg.winwidget.ru:${TELEGRAM_API_PROXY_IP:?TELEGRAM_API_PROXY_IP is required}'
     tmpfs:
-      - /tmp:size=64m,mode=1777
+      - /tmp:size=64m,mode=1777,noexec,nosuid,nodev
+      - /run/winwidget-operations-secrets:size=64k,mode=0700,uid=0,gid=0,noexec,nosuid,nodev
+    secrets:
+      - source: database-backup-provenance-private-key
+        target: database-backup-provenance-private-key-source
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -1519,6 +1535,8 @@ services:
       test:
         [
           'CMD',
+          'gosu',
+          'operations:nodejs',
           'node',
           '-e',
           "fetch('http://127.0.0.1:'+(process.env.OPERATIONS_WORKER_PORT||5201)+'/health/ready').then(response=>{if(!response.ok)process.exit(1)}).catch(()=>process.exit(1))"
@@ -1956,6 +1974,8 @@ networks:
       com.winwidget.purpose: postgres-network
 
 secrets:
+  database-backup-provenance-private-key:
+    file: /opt/winwidget/deploy/backend/.database-backup-provenance-private-key.pem
   reporting-postgres-admin-password:
     file: ${REPORTING_POSTGRES_ADMIN_PASSWORD_FILE:?REPORTING_POSTGRES_ADMIN_PASSWORD_FILE is required}
   campaigns-postgres-admin-password:

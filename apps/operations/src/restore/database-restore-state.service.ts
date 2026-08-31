@@ -31,6 +31,9 @@ export interface DatabaseRestoreEventIdentity {
 	eventId: string;
 	jobId: string;
 	target: DatabaseRestoreTarget;
+	sourceBackupJobId: string;
+	backupProvenanceEnvelopeSha256: string;
+	backupProvenanceKeyId: string;
 	expectedServicesSha: string;
 	migrationManifestSha: string;
 }
@@ -73,6 +76,9 @@ export interface ExpirableRestoreJob {
 	id: string;
 	target: string;
 	eventId: string;
+	sourceBackupJobId: string;
+	backupProvenanceEnvelopeSha256: string;
+	backupProvenanceKeyId: string;
 	expectedServicesSha: string;
 	migrationManifestSha: string;
 	status: DatabaseRestoreJobStatus;
@@ -124,6 +130,10 @@ export class DatabaseRestoreStateService {
 						id: event.jobId,
 						target: event.target,
 						eventId: event.eventId,
+						sourceBackupJobId: event.sourceBackupJobId,
+						backupProvenanceEnvelopeSha256:
+							event.backupProvenanceEnvelopeSha256,
+						backupProvenanceKeyId: event.backupProvenanceKeyId,
 						expectedServicesSha: event.expectedServicesSha,
 						migrationManifestSha: event.migrationManifestSha,
 						status: DatabaseRestoreJobStatus.QUEUED
@@ -246,18 +256,38 @@ export class DatabaseRestoreStateService {
 		id: string;
 		sourceSha256: string;
 		sourceSize: bigint;
+		sourceFileName: string;
+		sourceBackupJobId: string;
+		backupProvenance: string;
+		backupProvenanceEnvelopeSha256: string;
+		backupProvenanceKeyId: string;
+		migrationManifestSha: string;
 	}> {
 		return this.prisma.databaseRestoreJob.findFirstOrThrow({
 			where: {
 				id: lease.event.jobId,
 				target: lease.event.target,
 				eventId: lease.event.eventId,
+				sourceBackupJobId: lease.event.sourceBackupJobId,
+				backupProvenanceEnvelopeSha256:
+					lease.event.backupProvenanceEnvelopeSha256,
+				backupProvenanceKeyId: lease.event.backupProvenanceKeyId,
 				expectedServicesSha: lease.event.expectedServicesSha,
 				migrationManifestSha: lease.event.migrationManifestSha,
 				status: DatabaseRestoreJobStatus.PROCESSING,
 				leaseToken: lease.leaseToken
 			},
-			select: { id: true, sourceSha256: true, sourceSize: true }
+			select: {
+				id: true,
+				sourceSha256: true,
+				sourceSize: true,
+				sourceFileName: true,
+				sourceBackupJobId: true,
+				backupProvenance: true,
+				backupProvenanceEnvelopeSha256: true,
+				backupProvenanceKeyId: true,
+				migrationManifestSha: true
+			}
 		});
 	}
 
@@ -617,6 +647,10 @@ export class DatabaseRestoreStateService {
 			!receipt ||
 			job.target !== event.target ||
 			job.eventId !== event.eventId ||
+			job.sourceBackupJobId !== event.sourceBackupJobId ||
+			job.backupProvenanceEnvelopeSha256 !==
+				event.backupProvenanceEnvelopeSha256 ||
+			job.backupProvenanceKeyId !== event.backupProvenanceKeyId ||
 			job.expectedServicesSha !== event.expectedServicesSha ||
 			job.migrationManifestSha !== event.migrationManifestSha ||
 			job.status !== DatabaseRestoreJobStatus.SUCCEEDED ||
@@ -629,6 +663,11 @@ export class DatabaseRestoreStateService {
 			receipt.phase !== job.phase ||
 			receipt.target !== job.target ||
 			receipt.sourceSha256 !== job.sourceSha256 ||
+			receipt.sourceSize !== job.sourceSize ||
+			receipt.sourceBackupJobId !== job.sourceBackupJobId ||
+			receipt.backupProvenanceEnvelopeSha256 !==
+				job.backupProvenanceEnvelopeSha256 ||
+			receipt.backupProvenanceKeyId !== job.backupProvenanceKeyId ||
 			receipt.safetyBackupSha256 !== job.safetyBackupSha256 ||
 			receipt.expectedServicesSha !== job.expectedServicesSha ||
 			receipt.migrationManifestSha !== job.migrationManifestSha ||
@@ -664,7 +703,7 @@ export class DatabaseRestoreStateService {
 			return false;
 		}
 		const payload = this.receipts.canonicalize({
-			receiptVersion: 4,
+			receiptVersion: 5,
 			jobId: receipt.jobId,
 			permitId: receipt.permitId,
 			permitRequestedById: receipt.permitRequestedById,
@@ -677,6 +716,11 @@ export class DatabaseRestoreStateService {
 			terminalStatus: receipt.terminalStatus,
 			phase: receipt.phase,
 			sourceSha256: receipt.sourceSha256,
+			sourceSize: receipt.sourceSize.toString(),
+			sourceBackupJobId: receipt.sourceBackupJobId,
+			backupProvenanceEnvelopeSha256:
+				receipt.backupProvenanceEnvelopeSha256,
+			backupProvenanceKeyId: receipt.backupProvenanceKeyId,
 			safetyBackupSha256: receipt.safetyBackupSha256,
 			expectedServicesSha: receipt.expectedServicesSha,
 			migrationManifestSha: receipt.migrationManifestSha,
@@ -815,6 +859,10 @@ export class DatabaseRestoreStateService {
 					id: event.jobId,
 					target: event.target,
 					eventId: event.eventId,
+					sourceBackupJobId: event.sourceBackupJobId,
+					backupProvenanceEnvelopeSha256:
+						event.backupProvenanceEnvelopeSha256,
+					backupProvenanceKeyId: event.backupProvenanceKeyId,
 					expectedServicesSha: event.expectedServicesSha,
 					migrationManifestSha: event.migrationManifestSha,
 					status: DatabaseRestoreJobStatus.QUEUED
@@ -857,6 +905,10 @@ export class DatabaseRestoreStateService {
 					id: event.jobId,
 					target: event.target,
 					eventId: event.eventId,
+					sourceBackupJobId: event.sourceBackupJobId,
+					backupProvenanceEnvelopeSha256:
+						event.backupProvenanceEnvelopeSha256,
+					backupProvenanceKeyId: event.backupProvenanceKeyId,
 					expectedServicesSha: event.expectedServicesSha,
 					migrationManifestSha: event.migrationManifestSha,
 					status: DatabaseRestoreJobStatus.QUEUED
@@ -897,6 +949,9 @@ export class DatabaseRestoreStateService {
 				id: true,
 				target: true,
 				eventId: true,
+				sourceBackupJobId: true,
+				backupProvenanceEnvelopeSha256: true,
+				backupProvenanceKeyId: true,
 				expectedServicesSha: true,
 				migrationManifestSha: true,
 				status: true,
@@ -909,6 +964,10 @@ export class DatabaseRestoreStateService {
 		if (
 			job.target !== event.target ||
 			job.eventId !== event.eventId ||
+			job.sourceBackupJobId !== event.sourceBackupJobId ||
+			job.backupProvenanceEnvelopeSha256 !==
+				event.backupProvenanceEnvelopeSha256 ||
+			job.backupProvenanceKeyId !== event.backupProvenanceKeyId ||
 			job.expectedServicesSha !== event.expectedServicesSha ||
 			job.migrationManifestSha !== event.migrationManifestSha
 		) {
@@ -942,6 +1001,9 @@ export class DatabaseRestoreStateService {
 				id: true,
 				target: true,
 				eventId: true,
+				sourceBackupJobId: true,
+				backupProvenanceEnvelopeSha256: true,
+				backupProvenanceKeyId: true,
 				expectedServicesSha: true,
 				migrationManifestSha: true,
 				status: true,
@@ -964,6 +1026,9 @@ export class DatabaseRestoreStateService {
 				id: true,
 				target: true,
 				eventId: true,
+				sourceBackupJobId: true,
+				backupProvenanceEnvelopeSha256: true,
+				backupProvenanceKeyId: true,
 				expectedServicesSha: true,
 				migrationManifestSha: true,
 				status: true,
@@ -1150,6 +1215,9 @@ export class DatabaseRestoreStateService {
 			!job.finishedAt ||
 			!job.expectedServicesSha ||
 			!job.migrationManifestSha ||
+			!job.sourceBackupJobId ||
+			!job.backupProvenanceEnvelopeSha256 ||
+			!job.backupProvenanceKeyId ||
 			job.permit.status !== DatabaseRestorePermitStatus.CONSUMED ||
 			job.permit.id !== job.permitId ||
 			job.permit.jobId !== job.id ||
@@ -1172,7 +1240,7 @@ export class DatabaseRestoreStateService {
 			? this.receipts.sha256(job.lastError)
 			: null;
 		const payload = this.receipts.canonicalize({
-			receiptVersion: 4,
+			receiptVersion: 5,
 			jobId: job.id,
 			permitId: job.permit.id,
 			permitRequestedById: job.permit.requestedById,
@@ -1185,6 +1253,10 @@ export class DatabaseRestoreStateService {
 			terminalStatus: job.status,
 			phase: job.phase,
 			sourceSha256: job.sourceSha256,
+			sourceSize: job.sourceSize.toString(),
+			sourceBackupJobId: job.sourceBackupJobId,
+			backupProvenanceEnvelopeSha256: job.backupProvenanceEnvelopeSha256,
+			backupProvenanceKeyId: job.backupProvenanceKeyId,
 			safetyBackupSha256: job.safetyBackupSha256,
 			expectedServicesSha: job.expectedServicesSha,
 			migrationManifestSha: job.migrationManifestSha,
@@ -1239,6 +1311,10 @@ export class DatabaseRestoreStateService {
 				terminalStatus: job.status,
 				phase: job.phase,
 				sourceSha256: job.sourceSha256,
+				sourceSize: job.sourceSize,
+				sourceBackupJobId: job.sourceBackupJobId,
+				backupProvenanceEnvelopeSha256: job.backupProvenanceEnvelopeSha256,
+				backupProvenanceKeyId: job.backupProvenanceKeyId,
 				safetyBackupSha256: job.safetyBackupSha256,
 				expectedServicesSha: job.expectedServicesSha,
 				migrationManifestSha: job.migrationManifestSha,

@@ -30,7 +30,7 @@
 | `OPERATIONS_PROCESS_ROLE` | Порт по умолчанию | Ответственность                                                |
 | ------------------------- | ----------------: | -------------------------------------------------------------- |
 | `api`                     |              5200 | Публичные/admin/внутренние HTTP-контракты и постановка restore |
-| `worker`                  |              5201 | Consumers аудита, scheduler и read-only backup баз данных      |
+| `worker`                  |              5201 | Consumers, scheduler, backup и Ed25519 provenance sidecar      |
 | `outbox-publisher`        |              5202 | Публикация transactional Outbox с confirms/mandatory returns   |
 | `restore-worker`          |              5203 | Только привилегированное выполнение восстановления баз данных  |
 
@@ -121,6 +121,33 @@ Operations исключён, потому что его self-restore удали�
 recovery evidence из той же схемы. Restore-worker не получает admin secrets
 этих двух БД.
 
+Для каждой из семи restore-целей `maintenance-worker` после `pg_dump`,
+`pg_restore --list` и вычисления SHA-256 создаёт detached JSON sidecar
+`<dump>.provenance.json` и отправляет его вторым Telegram-документом. Sidecar
+содержит envelope версии 1, SHA-256 его canonical JSON и detached Ed25519
+signature с domain `winwidget.operations.database-backup-provenance.v1`.
+Evidence точно связывает
+backup job ID, target, database/schema, исходное имя и размер файла, SHA-256,
+время создания job и artifact, services/image revision, migration manifest и
+версии `pg_dump`/`pg_restore`. Для Billing и Operations sidecar не создаётся:
+они остаются backup-only targets и не могут быть источником этого restore
+workflow.
+
+Private PKCS8 PEM key и его active key ID получает только
+`operations-worker` через read-only Docker secret. При старте worker проверяет,
+что производный public key совпадает с key ID в tracked multi-key keyring
+`restore-manifests/database-backup-provenance-public-keys.json`. API и
+`restore-worker` имеют только этот public keyring внутри immutable image; они
+не получают private key, backup URL или signing environment.
+
+Docker Compose запускает только bootstrap entrypoint `operations-worker` с
+UID 0 и минимальными capabilities `CHOWN`, `SETGID`, `SETUID`. Entrypoint
+проверяет source secret как root-owned regular non-symlink `0600`, копирует его
+в отдельный `tmpfs` через проверенный temporary-файл, атомарно устанавливает
+runtime-копию `1001:1001`/`0400` и делает `exec gosu operations:nodejs`.
+Приложение и health-check работают без root и не сохраняют capabilities;
+остальные Operations roles никогда не получают root bootstrap или private key.
+
 API монтирует с read-write-доступом только закрытый staging-каталог
 `DATABASE_RESTORE_STAGING_DIR`. `restore-worker` монтирует staging для exact
 claim/delete и отдельно worker-only `DATABASE_RESTORE_SEALED_DIR`; API и
@@ -134,15 +161,11 @@ staging через `O_NOFOLLOW|O_NONBLOCK`, проверяет regular-file и e
 одновременно пересчитывает approved SHA-256, выполняет file `fsync`, atomic
 rename и parent-directory `fsync`. Все TOC/ledger проверки и `pg_restore`
 используют только sealed path, поэтому замена staging pathname после claim не
-меняет исполняемые байты. Production-постановка restore выключена и не должна
-включаться до exact-SHA rehearsal, approved recovery procedure и отдельного
-enable-gate происхождения backup: либо maintenance-worker подписывает
-исчерпывающую service-owned backup evidence Ed25519-ключом, недоступным
-restore-worker/API, либо `pg_restore` подключается через выделенный
-least-privileged restore principal. Подключение bootstrap-admin с последующим
-`--role` не изолирует произвольный код из custom archive и не является
-достаточным основанием для включения. `DATABASE_RESTORE_ENABLED`
-остаётся master kill switch и передаётся одновременно API и restore-worker:
+меняет исполняемые байты. Provenance trust gate реализован и не превращает
+custom archive в sandbox: bootstrap-admin остаётся явно доверенной границей,
+поэтому включение всё ещё требует exact-SHA production rehearsal и принятого
+recovery runbook. `DATABASE_RESTORE_ENABLED` остаётся master kill switch и
+передаётся одновременно API и restore-worker:
 при `false` API отклоняет новые upload, а worker не claim-ит уже поставленные
 `QUEUED` normal restore events и отправляет их через retry queue с bounded
 TTL/backoff без лимита попыток. Signed terminal
@@ -151,10 +174,14 @@ reconciliation и recovery actions остаются доступны, чтобы
 первый DEV создаёт десятиминутный one-shot permit через
 `POST /dev-tools/database-restores/permits`, а второй DEV подтверждает его через
 `POST /dev-tools/database-restores/permits/:permitId/approve`. Permit заранее
-привязан к target, SHA-256 source dump, точному 40-символьному services SHA,
-SHA-256 утверждённого migration manifest и серверному job ID. Upload обязан
-передать этот job ID как `requestId`; permit атомарно переходит из `APPROVED` в
-`CONSUMED` в одной транзакции с job и Outbox и больше не может использоваться.
+привязан к target, SHA-256 и размеру source dump, исходному backup job ID,
+canonical provenance envelope SHA-256 и key ID, точному 40-символьному
+services SHA, SHA-256 утверждённого migration manifest и серверному job ID.
+При создании permit API проверяет Ed25519 sidecar и server-trusted manifest; при
+upload повторно проверяет сохранённый sidecar, точное имя, размер и SHA-256
+файла. Upload обязан передать server job ID как `requestId`; permit атомарно
+переходит из `APPROVED` в `CONSUMED` в одной транзакции с job и Outbox и больше
+не может использоваться.
 Истёкшие permits закрываются автоматически, consumed permit закрывается в
 terminal-транзакции job.
 Во всей системе одновременно может существовать только один глобальный
@@ -171,10 +198,12 @@ fail-closed. Клиент передаёт `expectedServicesSha` при созд
 Outbox publication не считается подтверждённой при постановке. Job API
 возвращает фактические `publicationStatus` (`PENDING`, `PROCESSING` или
 `PUBLISHED`) и `publicationConfirmed=true` только для `PUBLISHED`. Event payload
-версии 2 повторяет expected services SHA и migration manifest SHA; worker
-отклоняет сообщение до доступа к source dump, если его текущий `APP_REVISION`
-не совпадает или target manifest устарел, а claim дополнительно сверяет оба
-hash с job. До safety backup и mutation worker read-only извлекает из custom
+версии 3 повторяет source backup job ID, provenance envelope SHA-256/key ID,
+expected services SHA и migration manifest SHA. Worker отклоняет сообщение до
+доступа к source dump, если его текущий `APP_REVISION` не совпадает, provenance
+binding расходится или target manifest устарел; после exact claim он заново
+проверяет Ed25519 signature и все сохранённые artifact/job bindings до seal.
+До safety backup и mutation worker read-only извлекает из custom
 dump `_prisma_migrations` и требует точного набора успешных migration names и
 Prisma SHA-256 checksums из trusted manifest. После restore тот же exact
 контракт проверяется SQL-запросом к восстановленной ledger; неоднозначный,
@@ -183,7 +212,8 @@ Prisma SHA-256 checksums из trusted manifest. После restore тот же e
 Каждый `SUCCEEDED`, `FAILED`, `RECOVERY_REQUIRED` или `CANCELLED` переход в той
 же PostgreSQL-транзакции закрывает permit и создаёт один terminal receipt.
 Receipt содержит только hashes и operational identifiers, включая immutable
-permit ID, requested/approved actor IDs и server timestamps dual approval, и
+permit ID, requested/approved actor IDs и server timestamps dual approval, а
+также source size, backup job ID, provenance envelope SHA-256/key ID. Receipt
 подписывается HMAC SHA-256 отдельным ключом
 `DATABASE_RESTORE_RECEIPT_HMAC_KEY_BASE64` с key ID из
 `DATABASE_RESTORE_RECEIPT_HMAC_KEY_ID`; ключ не записывается в БД и не должен
@@ -293,12 +323,17 @@ operation ID, атомарно переводит runtime, migration и backup �
 prepared transactions и постороннего admin connection. ACL reconciliation в
 режиме `FENCED` не возвращает `LOGIN`. Роли открываются только после повторной
 exact manifest, ACL и fence verification, immutable signed release
-authorization и durable `UNFENCING` checkpoint. Release и terminal
-reconciliation под тем же advisory lock требуют exact operation marker,
-поэтому возобновившийся старый процесс не может открыть роли поверх fence
-следующего job/action. До создания signed release authorization любая ошибка
-после `FENCING` вызывает повторную попытку физического fence. После его
-создания workflow, включая restart/redelivery, может только идемпотентно
+authorization и durable `UNFENCING` checkpoint. Initial apply допускает только
+ровно три `LOGIN` либо уже закрытые три `NOLOGIN` роли той же generation;
+смешанное состояние отклоняется. Release и terminal reconciliation под тем же
+advisory lock требуют exact operation marker, поэтому возобновившийся старый
+процесс не может открыть роли поверх fence следующего job/action. До создания
+signed release authorization любая ошибка после `FENCING` допускает
+compensation reapply только после немедленного exact CAS renew текущего
+execution lease. Reapply требует marker той же operation, никогда не
+перезаписывает чужую generation и при потерянном lease вообще не выполняет
+физическую команду. После создания authorization workflow, включая
+restart/redelivery, может только идемпотентно
 завершить разрешённый release и подписанный terminal receipt: возвращаться к
 destructive mutation или compensation fence запрещено. Если pre-authorization
 fence не подтверждён, job/action сохраняет маркер
@@ -307,18 +342,27 @@ fence не подтверждён, job/action сохраняет маркер
 проверяет exact NOLOGIN roles, отсутствие writer/prepared/admin sessions,
 единственность LOGIN SUPERUSER и отсутствие protected-role membership.
 
-Production restore остаётся выключенным до полного exact-SHA rehearsal
-dump/restore, закрытия enable-gate trusted backup provenance или
-least-privileged restore principal, синхронизации отдельного HMAC secret между
-API и restore-worker, проверки dual-approval/recovery receipt и отдельного
-операционного решения о включении master kill switch. Для ротации receipt key требуется сохранить
+Production restore остаётся выключенным до полного exact-SHA rehearsal свежей
+подписанной пары dump/sidecar, проверки dual-approval, terminal/recovery
+receipts, retention/alert evidence и отдельного операционного решения о
+включении master kill switch. Реализация Ed25519 provenance не включает флаг
+автоматически. Для ротации receipt key требуется сохранить
 проверяемость receipts со старым key ID; до реализации keyring ключ нельзя
 удалять или заменять без утверждённой процедуры. Первичное provisioning одного
 случайного ключа не является rotation, но active key запрещено менять, пока
 есть `PROCESSING` или неразрешённые `RECOVERY_REQUIRED`; будущая rotation
-требует previous-key verification/keyring. Migration нового forward-only контракта
-останавливается, если в Operations уже есть legacy restore jobs: переносить их
-в новый trust contract молча запрещено.
+требует previous-key verification/keyring.
+
+Ротация backup provenance выполняется только в порядке verify-before-sign:
+сначала новый SPKI и key ID добавляются в tracked keyring и эта ревизия
+развёртывается во всех verifier roles, затем меняются private key secret и
+active key ID только у maintenance-worker. Старый public key сохраняется как
+минимум до истечения retention всех пригодных backup и закрытия всех
+permit/job/recovery evidence с этим key ID. Удаление public key раньше делает
+соответствующие sidecar недоверенными fail-closed; private key никогда не
+переносится в API/restore-worker. Forward-only migration provenance
+останавливается при наличии любых legacy restore jobs, permits или terminal
+receipts: unsigned evidence не переносится и не получает совместимость молча.
 
 Production-трафик Telegram сохраняет установленный контракт зашифрованного
 прокси: `TELEGRAM_API_BASE_URL=https://tg.winwidget.ru/telegram-api`. Только

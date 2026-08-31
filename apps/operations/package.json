@@ -13,6 +13,7 @@
 		"start": "node dist/src/main.js",
 		"lint": "eslint \"src/**/*.ts\" --max-warnings=0",
 		"test": "jest --runInBand",
+		"test:integration:restore-control-ledger": "node test/integration/database-restore-control-ledger-postgres18.integration.mjs",
 		"test:integration:restore-rehearsal": "node test/integration/database-restore-postgres18.rehearsal.mjs",
 		"typecheck": "tsc -p tsconfig.json --noEmit",
 		"prisma:generate": "prisma generate --schema prisma/schema.prisma",

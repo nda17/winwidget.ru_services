@@ -168,17 +168,37 @@ export class DatabaseRestoreService {
 						jobId,
 						target,
 						sourceSha256: sha256,
+						sourceSize: BigInt(file.size),
 						actorId: input.actorId
 					}
 				);
+				const sourceFileName = this.safeFileName(file.originalname);
+				await this.authorization.verifyStoredProvenance({
+					backupProvenance: permit.backupProvenance,
+					target,
+					sourceSha256: sha256,
+					sourceSize: BigInt(file.size),
+					sourceFileName,
+					migrationManifestSha: permit.migrationManifestSha,
+					expectedServicesSha: permit.expectedServicesSha,
+					sourceBackupJobId: permit.sourceBackupJobId,
+					backupProvenanceEnvelopeSha256:
+						permit.backupProvenanceEnvelopeSha256,
+					backupProvenanceKeyId: permit.backupProvenanceKeyId
+				});
 				const created = await transaction.databaseRestoreJob.create({
 					data: {
 						id: jobId,
 						target,
 						eventId,
-						sourceFileName: this.safeFileName(file.originalname),
+						sourceFileName,
 						sourceSha256: sha256,
 						sourceSize: BigInt(file.size),
+						sourceBackupJobId: permit.sourceBackupJobId,
+						backupProvenance: permit.backupProvenance,
+						backupProvenanceEnvelopeSha256:
+							permit.backupProvenanceEnvelopeSha256,
+						backupProvenanceKeyId: permit.backupProvenanceKeyId,
 						requestedById: input.actorId,
 						idempotencyKey,
 						permitId: permit.id,
@@ -194,10 +214,14 @@ export class DatabaseRestoreService {
 					aggregateId: jobId,
 					routingKey: OPERATIONS_DATABASE_RESTORE_ROUTING_KEY,
 					payload: {
-						schemaVersion: 2,
+						schemaVersion: 3,
 						eventId,
 						jobId,
 						target,
+						sourceBackupJobId: permit.sourceBackupJobId,
+						backupProvenanceEnvelopeSha256:
+							permit.backupProvenanceEnvelopeSha256,
+						backupProvenanceKeyId: permit.backupProvenanceKeyId,
 						expectedServicesSha: permit.expectedServicesSha,
 						migrationManifestSha: permit.migrationManifestSha
 					}
@@ -213,7 +237,11 @@ export class DatabaseRestoreService {
 					metadata: {
 						target,
 						fileSize: file.size,
-						sha256
+						sha256,
+						sourceBackupJobId: permit.sourceBackupJobId,
+						backupProvenanceEnvelopeSha256:
+							permit.backupProvenanceEnvelopeSha256,
+						backupProvenanceKeyId: permit.backupProvenanceKeyId
 					},
 					ip: input.ip,
 					userAgent: input.userAgent
@@ -667,6 +695,9 @@ export class DatabaseRestoreService {
 			sourceFileName: string;
 			sourceSha256: string;
 			sourceSize: bigint;
+			sourceBackupJobId: string;
+			backupProvenanceEnvelopeSha256: string;
+			backupProvenanceKeyId: string;
 			result: Prisma.JsonValue | null;
 			lastError: string | null;
 			startedAt: Date | null;
@@ -688,6 +719,10 @@ export class DatabaseRestoreService {
 				permitConsumedAt: Date;
 				phase: string | null;
 				sourceSha256: string;
+				sourceSize: bigint;
+				sourceBackupJobId: string;
+				backupProvenanceEnvelopeSha256: string;
+				backupProvenanceKeyId: string;
 				safetyBackupSha256: string | null;
 				expectedServicesSha: string;
 				migrationManifestSha: string;
@@ -750,6 +785,9 @@ export class DatabaseRestoreService {
 			originalFileName: job.sourceFileName,
 			fileSize: Number(job.sourceSize),
 			sha256: job.sourceSha256,
+			sourceBackupJobId: job.sourceBackupJobId,
+			backupProvenanceEnvelopeSha256: job.backupProvenanceEnvelopeSha256,
+			backupProvenanceKeyId: job.backupProvenanceKeyId,
 			requestedAt: job.createdAt.toISOString(),
 			startedAt: job.startedAt?.toISOString() ?? null,
 			finishedAt: job.finishedAt?.toISOString() ?? null,
@@ -784,6 +822,12 @@ export class DatabaseRestoreService {
 							job.terminalReceipt.permitConsumedAt.toISOString(),
 						phase: job.terminalReceipt.phase,
 						sourceSha256: job.terminalReceipt.sourceSha256,
+						sourceSize: Number(job.terminalReceipt.sourceSize),
+						sourceBackupJobId: job.terminalReceipt.sourceBackupJobId,
+						backupProvenanceEnvelopeSha256:
+							job.terminalReceipt.backupProvenanceEnvelopeSha256,
+						backupProvenanceKeyId:
+							job.terminalReceipt.backupProvenanceKeyId,
 						safetyBackupSha256: job.terminalReceipt.safetyBackupSha256,
 						expectedServicesSha: job.terminalReceipt.expectedServicesSha,
 						migrationManifestSha: job.terminalReceipt.migrationManifestSha,

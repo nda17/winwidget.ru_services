@@ -1,0 +1,10 @@
+{
+	"schemaVersion": 1,
+	"domain": "winwidget.operations.database-backup-provenance.v1",
+	"keys": [
+		{
+			"keyId": "operations-backup-ed25519-2026-08-31",
+			"publicKeySpkiDerBase64": "MCowBQYDK2VwAyEAL4ssfzvjxmjGbJTNtm94tNisOm0AjaW07r4IhkvVEGc="
+		}
+	]
+}

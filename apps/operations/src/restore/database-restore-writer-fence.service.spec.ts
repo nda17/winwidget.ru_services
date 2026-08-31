@@ -26,7 +26,7 @@ const operationId = '11111111-1111-4111-8111-111111111111';
 const generationMarker = 'a'.repeat(64);
 
 describe('DatabaseRestoreWriterFenceService', () => {
-	it('keeps same-operation takeover idempotent and changes the marker for a new operation', async () => {
+	it('keeps the same operation marker stable and rejects mixed initial boundaries before replacing it', async () => {
 		const executeSql = jest.fn().mockResolvedValue(undefined);
 		const service = new DatabaseRestoreWriterFenceService({
 			executeSql
@@ -34,25 +34,55 @@ describe('DatabaseRestoreWriterFenceService', () => {
 
 		const first = await service.apply(connection, target, operationId);
 		const takeover = await service.apply(connection, target, operationId);
-		const next = await service.apply(
-			connection,
-			target,
-			'22222222-2222-4222-8222-222222222222'
-		);
 
 		expect(takeover.evidenceSha256).toBe(first.evidenceSha256);
-		expect(next.evidenceSha256).not.toBe(first.evidenceSha256);
-		const staleReleaseSql = await (async () => {
-			executeSql.mockClear();
-			await service.release(connection, target, first.evidenceSha256);
-			return executeSql.mock.calls[0][1] as string;
-		})();
-		expect(staleReleaseSql).toContain(
+		const takeoverSql = executeSql.mock.calls[3][1] as string;
+		expect(takeoverSql).toContain(
+			'Database restore writer apply boundary is mixed or unknown'
+		);
+		expect(takeoverSql).toContain('login_count NOT IN (0, 3)');
+		expect(takeoverSql).toContain('IF login_count = 0 THEN');
+		expect(takeoverSql).toContain(
 			`winwidget.restore_generation=${first.evidenceSha256}`
 		);
-		expect(staleReleaseSql).not.toContain(
-			`winwidget.restore_generation=${next.evidenceSha256}`
+		expect(takeoverSql).toContain(
+			`ALTER ROLE "${target.adminRole}" SET "winwidget.restore_generation" TO '${first.evidenceSha256}';`
 		);
+	});
+
+	it('reapplies only the exact generation without overwriting a newer marker', async () => {
+		const executeSql = jest.fn().mockResolvedValue(undefined);
+		const service = new DatabaseRestoreWriterFenceService({
+			executeSql
+		} as unknown as DatabaseRestoreProcessService);
+
+		const evidence = await service.reapply(
+			connection,
+			target,
+			operationId
+		);
+
+		expect(executeSql).toHaveBeenCalledTimes(3);
+		const reapplySql = executeSql.mock.calls[0][1] as string;
+		expect(reapplySql).toContain('pg_advisory_xact_lock');
+		expect(reapplySql).toContain(
+			`winwidget.restore_generation=${evidence.evidenceSha256}`
+		);
+		expect(reapplySql).toContain(
+			'Database restore writer fence generation marker drifted'
+		);
+		expect(reapplySql).toContain(
+			'Database restore writer reapply boundary is mixed or unknown'
+		);
+		expect(reapplySql).toContain('login_count NOT IN (0, 3)');
+		expect(reapplySql).not.toContain('SET "winwidget.restore_generation"');
+		for (const role of [
+			target.runtimeRole,
+			target.migrationRole,
+			target.backupRole
+		]) {
+			expect(reapplySql).toContain(`ALTER ROLE "${role}" NOLOGIN;`);
+		}
 	});
 
 	it('sets the exact three target roles NOLOGIN before draining and proving zero writers', async () => {

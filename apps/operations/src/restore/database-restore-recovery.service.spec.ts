@@ -9,6 +9,9 @@ const processingJob = (leaseExpiresAt: Date) => ({
 	id: randomUUID(),
 	target: 'reporting',
 	eventId: randomUUID(),
+	sourceBackupJobId: randomUUID(),
+	backupProvenanceEnvelopeSha256: 'c'.repeat(64),
+	backupProvenanceKeyId: 'backup-key-1',
 	expectedServicesSha: 'a'.repeat(40),
 	migrationManifestSha: 'b'.repeat(64),
 	status: DatabaseRestoreJobStatus.PROCESSING,
@@ -52,6 +55,9 @@ describe('DatabaseRestoreRecoveryService', () => {
 				eventId: randomUUID(),
 				jobId: randomUUID(),
 				target: 'reporting',
+				sourceBackupJobId: randomUUID(),
+				backupProvenanceEnvelopeSha256: 'c'.repeat(64),
+				backupProvenanceKeyId: 'backup-key-1',
 				expectedServicesSha: 'a'.repeat(40),
 				migrationManifestSha: 'b'.repeat(64)
 			},
@@ -84,6 +90,10 @@ describe('DatabaseRestoreRecoveryService', () => {
 					eventId: randomUUID(),
 					jobId: job.id,
 					target: 'reporting',
+					sourceBackupJobId: job.sourceBackupJobId,
+					backupProvenanceEnvelopeSha256:
+						job.backupProvenanceEnvelopeSha256,
+					backupProvenanceKeyId: job.backupProvenanceKeyId,
 					expectedServicesSha: 'a'.repeat(40),
 					migrationManifestSha: 'b'.repeat(64)
 				},

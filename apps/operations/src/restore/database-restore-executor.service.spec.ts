@@ -131,6 +131,18 @@ const setup = () => {
 				evidenceSha256: 'e'.repeat(64)
 			};
 		}),
+		reapply: jest.fn(async () => {
+			calls.push('fence-reapply');
+			return {
+				roles: [
+					target.runtimeRole,
+					target.migrationRole,
+					target.backupRole
+				],
+				verifiedAt: new Date(),
+				evidenceSha256: 'e'.repeat(64)
+			};
+		}),
 		verify: jest.fn(async () => {
 			calls.push('fence-verify');
 			return {
@@ -536,5 +548,18 @@ describe('DatabaseRestoreExecutorService', () => {
 		);
 		expect(writerFence.release).toHaveBeenCalledTimes(1);
 		expect(writerFence.apply).toHaveBeenCalledTimes(1);
+	});
+
+	it('uses exact-generation reapply for compensation', async () => {
+		const { service, writerFence } = setup();
+
+		await service.reapplyFence('reporting', input().jobId);
+
+		expect(writerFence.reapply).toHaveBeenCalledWith(
+			connection,
+			target,
+			input().jobId
+		);
+		expect(writerFence.apply).not.toHaveBeenCalled();
 	});
 });

@@ -145,7 +145,10 @@ backups. Это не даёт PITR и ограничено размером фа
 
 Operations принимает и аудитирует DEV-only restore request, а изолированный
 `database-restore-worker` выполняет manifest/SHA/TOC/migration/ACL проверки,
-safety dump и restore. В active registry входят семь service-owned targets:
+safety dump и restore. `maintenance-worker` уже выпускает detached Ed25519
+provenance sidecar, а API и restore-worker проверяют его по встроенному
+multi-key public keyring и exact artifact/job bindings. В active registry
+входят семь service-owned targets:
 `campaigns`, `identity`, `notification-delivery`, `platform`, `reporting`,
 `support` и `widgets`. Billing остаётся только backup target до отдельного
 платёжного review. Operations остаётся только backup target, пока job/lease и
@@ -153,19 +156,18 @@ recovery evidence не вынесены из восстанавливаемой 
 
 Осталось:
 
-- до включения production restore закрыть trust gate custom archive одним из
-  двух способов: предпочтительно подписывать в `maintenance-worker`
-  исчерпывающую service-owned backup evidence отдельным Ed25519 private key и
-  проверять её встроенным public key в API/restore-worker, либо выполнять
-  `pg_restore` через dedicated least-privileged restore principal;
-  bootstrap-admin connection с `--role` не считать sandbox, private signing
-  key не передавать API/restore-worker, а binding обязан включать target,
-  database/schema, artifact SHA-256, manifest/services SHA, backup job/time и
-  tool/image revision;
-- проверить one-shot permit, signed receipt и обязательное закрытие API после
-  success, timeout и отмены workflow;
-- отрепетировать реализованные `RECOVERY_REQUIRED` recovery-actions с
-  проверкой terminal/lock/fence evidence и dual approval;
+- на exact production SHA создать свежую подписанную пару dump/sidecar и
+  провести контролируемый restore rehearsal для каждой из семи целей с
+  проверкой artifact provenance, writer fence, migration/ACL evidence и
+  terminal outcome; до завершения rehearsal сохранять
+  `DATABASE_RESTORE_ENABLED=false`;
+- отдельно отрепетировать `RECOVERY_REQUIRED` действия `VERIFY_AS_IS`,
+  `ROLL_BACK_SAFETY` и `ROLL_FORWARD_SOURCE`, включая dual approval,
+  terminal/recovery receipts и restart/redelivery;
+- провести первую rehearsal ротации Ed25519 keyring по documented
+  verify-before-sign procedure и доказать, что старые sidecar остаются
+  проверяемыми в течение retention пригодных backup и незакрытых
+  restore/recovery evidence;
 - если потребуется вернуть Operations self-restore, вынести control ledger,
   lease, incidents и recovery evidence в отдельную невосстанавливаемую границу;
 - решить, остаётся ли in-place restore приемлемым, либо перейти к восстановлению
@@ -206,32 +208,6 @@ cleanup fail-closed не удаляет no-DB `.dump` автоматически
 sweep может удалять dump только по terminal/abandoned intent после повторной DB
 проверки. Покрыть blocked transaction дольше retention, ambiguous commit,
 restart и bounded batch без starvation.
-
-### P2 — усилить DB-инварианты control ledger восстановления
-
-Application CAS и signed receipts сейчас fail-closed проверяют допустимые
-переходы, но PostgreSQL constraints ещё не выражают полную матрицу
-`status ↔ phase ↔ release authorization ↔ terminal receipt`. До разрешения
-production restore добавить exact CHECK/immutable triggers для terminal job и
-recovery-action, сделать `recovery_resolved_at` монотонным и запретить cleanup
-для строк без подтверждённой terminal shape. Отдельный CI gate должен поднять
-чистую Operations PostgreSQL 18, применить все Prisma migrations и выполнить
-negative SQL matrix для cross-binding, unknown target, mutable terminal state и
-release-authorization/receipt constraints; service-target restore rehearsal не
-считать заменой этому control-ledger gate.
-
-### P2 — lease-bound compensation для writer fence
-
-До release authorization compensation намеренно fail-closed повторно закрывает
-writer roles. Старый worker после потери lease теоретически может возобновить
-такой `apply`, перезаписать target generation marker уже новой operation и
-создать availability-инцидент, хотя открыть writers без авторизации он не
-может. Перед каждым compensation добавить финальный exact-lease CAS guard,
-прочитать текущий target marker под advisory lock и запретить overwrite/terminate,
-если marker принадлежит другой operation; сохранить HIGH alert с физическим
-состоянием вместо ложного утверждения о закрытом fence. Покрыть двух-worker
-fault matrix: старый process остановлен до apply, новая generation fenced,
-старый process продолжен и не меняет marker, роли или сессии новой generation.
 
 ## Платежи и юридические требования
 

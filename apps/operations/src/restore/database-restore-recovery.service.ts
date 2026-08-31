@@ -112,6 +112,10 @@ export class DatabaseRestoreRecoveryService {
 			eventId: reserved.eventId,
 			jobId: reserved.id,
 			target: targetName,
+			sourceBackupJobId: reserved.sourceBackupJobId,
+			backupProvenanceEnvelopeSha256:
+				reserved.backupProvenanceEnvelopeSha256,
+			backupProvenanceKeyId: reserved.backupProvenanceKeyId,
 			expectedServicesSha: reserved.expectedServicesSha,
 			migrationManifestSha: reserved.migrationManifestSha
 		};

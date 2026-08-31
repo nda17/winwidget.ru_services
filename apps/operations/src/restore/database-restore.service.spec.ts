@@ -25,6 +25,8 @@ import { DatabaseRestoreWorkerService } from './database-restore-worker.service'
 
 const SERVICES_SHA = 'a'.repeat(40);
 const MIGRATION_MANIFEST_SHA = 'b'.repeat(64);
+const BACKUP_PROVENANCE_ENVELOPE_SHA = 'c'.repeat(64);
+const BACKUP_PROVENANCE_KEY_ID = 'backup-key-1';
 const ORIGINAL_APP_REVISION = process.env.APP_REVISION;
 
 beforeAll(() => {
@@ -40,10 +42,13 @@ const message = (overrides: Record<string, unknown> = {}) => {
 	const eventId = randomUUID();
 	const jobId = randomUUID();
 	const payload = {
-		schemaVersion: 2,
+		schemaVersion: 3,
 		eventId,
 		jobId,
 		target: 'reporting',
+		sourceBackupJobId: randomUUID(),
+		backupProvenanceEnvelopeSha256: BACKUP_PROVENANCE_ENVELOPE_SHA,
+		backupProvenanceKeyId: BACKUP_PROVENANCE_KEY_ID,
 		expectedServicesSha: SERVICES_SHA,
 		migrationManifestSha: MIGRATION_MANIFEST_SHA,
 		...overrides
@@ -74,6 +79,7 @@ const worker = (dependencies: {
 	manifests?: unknown;
 	recoveryState?: unknown;
 	recoveryExecutor?: unknown;
+	provenance?: unknown;
 }) =>
 	new DatabaseRestoreWorkerService(
 		(dependencies.runtime ?? {}) as never,
@@ -92,11 +98,78 @@ const worker = (dependencies: {
 			})),
 			...((dependencies.control ?? {}) as Record<string, unknown>)
 		} as never,
-		{
-			confirmReleaseAuthorized: jest.fn().mockResolvedValue(null),
-			confirmSucceeded: jest.fn().mockResolvedValue(false),
-			...((dependencies.state ?? {}) as Record<string, unknown>)
-		} as never,
+		(() => {
+			const supplied = (dependencies.state ?? {}) as Record<
+				string,
+				unknown
+			>;
+			const originalClaim = supplied.claim as
+				| ((event: Record<string, unknown>) => Promise<any>)
+				| undefined;
+			const originalLoad = supplied.loadClaimedJob as
+				| ((lease: any) => Promise<Record<string, unknown>>)
+				| undefined;
+			return {
+				confirmReleaseAuthorized: jest.fn().mockResolvedValue(null),
+				confirmSucceeded: jest.fn().mockResolvedValue(false),
+				...supplied,
+				...(originalClaim
+					? {
+							claim: async (event: Record<string, unknown>) => {
+								const result = await originalClaim(event);
+								if (result?.state === 'claimed') {
+									result.lease.event = { ...result.lease.event, ...event };
+								}
+								return result;
+							}
+						}
+					: {}),
+				...(originalLoad
+					? {
+							loadClaimedJob: async (lease: any) => {
+								const loaded = await originalLoad(lease);
+								const sourceSha256 =
+									(loaded.sourceSha256 as string | undefined) ??
+									'd'.repeat(64);
+								const sourceSize =
+									(loaded.sourceSize as bigint | undefined) ?? 6n;
+								const sourceFileName =
+									(loaded.sourceFileName as string | undefined) ??
+									'winwidget-reporting-db-2026-08-31.dump';
+								const envelope = {
+									keyId: lease.event.backupProvenanceKeyId,
+									evidence: {
+										target: lease.event.target,
+										backupJobId: lease.event.sourceBackupJobId,
+										artifactSha256: sourceSha256,
+										fileSize: Number(sourceSize),
+										fileName: sourceFileName,
+										migrationManifestSha: lease.event.migrationManifestSha,
+										servicesSha: lease.event.expectedServicesSha,
+										imageRevision: lease.event.expectedServicesSha
+									}
+								};
+								return {
+									...loaded,
+									sourceSha256,
+									sourceSize,
+									sourceFileName,
+									sourceBackupJobId: lease.event.sourceBackupJobId,
+									backupProvenance: JSON.stringify({
+										envelope,
+										envelopeSha256:
+											lease.event.backupProvenanceEnvelopeSha256
+									}),
+									backupProvenanceEnvelopeSha256:
+										lease.event.backupProvenanceEnvelopeSha256,
+									backupProvenanceKeyId: lease.event.backupProvenanceKeyId,
+									migrationManifestSha: lease.event.migrationManifestSha
+								};
+							}
+						}
+					: {})
+			};
+		})() as never,
 		(dependencies.recovery ?? {}) as never,
 		(dependencies.executor ?? {}) as never,
 		(dependencies.cleanup ?? {}) as never,
@@ -104,7 +177,10 @@ const worker = (dependencies: {
 		(dependencies.recoveryState ?? {
 			recoverExpired: jest.fn(async () => 0)
 		}) as never,
-		(dependencies.recoveryExecutor ?? {}) as never
+		(dependencies.recoveryExecutor ?? {}) as never,
+		(dependencies.provenance ?? {
+			verify: jest.fn(async (value: any) => value.envelope)
+		}) as never
 	);
 
 describe('DatabaseRestoreService contract', () => {
@@ -406,8 +482,13 @@ describe('DatabaseRestoreService contract', () => {
 		const audit = { recordInTransaction: jest.fn().mockResolvedValue({}) };
 		const authorization = {
 			closeExpiredPermits: jest.fn().mockResolvedValue(undefined),
+			verifyStoredProvenance: jest.fn().mockResolvedValue({}),
 			consumePermit: jest.fn().mockResolvedValue({
 				id: randomUUID(),
+				sourceBackupJobId: randomUUID(),
+				backupProvenance: '{}',
+				backupProvenanceEnvelopeSha256: BACKUP_PROVENANCE_ENVELOPE_SHA,
+				backupProvenanceKeyId: BACKUP_PROVENANCE_KEY_ID,
 				expectedServicesSha: 'a'.repeat(40),
 				migrationManifestSha: 'b'.repeat(64)
 			})
@@ -697,8 +778,13 @@ describe('DatabaseRestoreService contract', () => {
 		};
 		const authorization = {
 			closeExpiredPermits: jest.fn().mockResolvedValue(undefined),
+			verifyStoredProvenance: jest.fn().mockResolvedValue({}),
 			consumePermit: jest.fn().mockResolvedValue({
 				id: randomUUID(),
+				sourceBackupJobId: randomUUID(),
+				backupProvenance: '{}',
+				backupProvenanceEnvelopeSha256: BACKUP_PROVENANCE_ENVELOPE_SHA,
+				backupProvenanceKeyId: BACKUP_PROVENANCE_KEY_ID,
 				expectedServicesSha: SERVICES_SHA,
 				migrationManifestSha: MIGRATION_MANIFEST_SHA
 			})

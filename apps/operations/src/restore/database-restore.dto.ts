@@ -32,6 +32,10 @@ export class CreateDatabaseRestorePermitDto {
 
 	@Matches(DATABASE_RESTORE_SERVICES_SHA_PATTERN)
 	expectedServicesSha!: string;
+
+	@IsString()
+	@MaxLength(16384)
+	backupProvenance!: string;
 }
 
 export class CreateDatabaseRestoreRecoveryActionDto {

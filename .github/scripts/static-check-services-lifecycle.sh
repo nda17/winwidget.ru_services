@@ -4,6 +4,7 @@ set -euo pipefail
 
 bash -n .github/scripts/validate-production-compose.sh
 node --check .github/scripts/validate-production-compose.cjs
+node --check apps/operations/test/integration/database-restore-control-ledger-postgres18.integration.mjs
 node --check apps/operations/test/integration/database-restore-postgres18.rehearsal.mjs
 
 env \
@@ -203,8 +204,18 @@ for (const app of apps) {
 const operationsPackage = JSON.parse(
 	readFileSync('apps/operations/package.json', 'utf8')
 );
+const operationsControlLedgerGate =
+	'apps/operations/test/integration/database-restore-control-ledger-postgres18.integration.mjs';
 const operationsRestoreRehearsal =
 	'apps/operations/test/integration/database-restore-postgres18.rehearsal.mjs';
+if (
+	!existsSync(operationsControlLedgerGate) ||
+	!lstatSync(operationsControlLedgerGate).isFile() ||
+	operationsPackage.scripts?.['test:integration:restore-control-ledger'] !==
+		'node test/integration/database-restore-control-ledger-postgres18.integration.mjs'
+) {
+	throw new Error('Operations PostgreSQL 18 control-ledger gate is missing');
+}
 if (
 	!existsSync(operationsRestoreRehearsal) ||
 	!lstatSync(operationsRestoreRehearsal).isFile() ||
@@ -407,9 +418,13 @@ exactFiles('deploy', ['docker-compose.prod.yml']);
 
 const servicesWorkflow = readFileSync('.github/workflows/ci.yml', 'utf8');
 const pinnedInfraRevision =
-	'856990e6a43de1308c5df276ecfb7682adc7d0bf';
+	'c53d64df6806d27aa2f050d1870909c9ff79e21c';
 for (const evidence of [
 	"cancel-in-progress: ${{ github.ref != 'refs/heads/prod' }}",
+	'operations-control-ledger:',
+	'--label winwidget.operations-control-ledger=true',
+	'      - name: Run control-ledger negative SQL matrix\n        env:\n          OPERATIONS_CONTROL_LEDGER_POSTGRES_CONTAINER_ID: ${{ job.services.postgres.id }}',
+	'pnpm --dir apps/operations run test:integration:restore-control-ledger',
 	'operations-restore-rehearsal:',
 	'--label winwidget.operations-restore-rehearsal=true',
 	'      - name: Run isolated restore rehearsal\n        env:\n          OPERATIONS_RESTORE_REHEARSAL_POSTGRES_CONTAINER_ID: ${{ job.services.postgres.id }}',
@@ -417,6 +432,7 @@ for (const evidence of [
 	'deploy-production:',
 	'needs:',
 	'- lifecycle-contract',
+	'- operations-control-ledger',
 	'- operations-restore-rehearsal',
 	'- production-image',
 	'- service',
