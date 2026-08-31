@@ -997,30 +997,42 @@ const assertWritersFenced = async (target, writerFenceService) => {
 	}
 };
 
-const assertStaleGenerationCannotRelease = async (
+const assertForeignGenerationCannotTakeOverAndStaleCannotRelease = async (
 	target,
 	writerFenceService
 ) => {
-	const staleMarker = fenceMarkers.get(target.name);
-	assert.match(staleMarker, SHA256);
+	const currentMarker = fenceMarkers.get(target.name);
+	assert.match(currentMarker, SHA256);
 	const sameOperationTakeover = await applyWriterFence(
 		target,
 		writerFenceService,
 		1
 	);
-	assert.equal(sameOperationTakeover.evidenceSha256, staleMarker);
+	assert.equal(sameOperationTakeover.evidenceSha256, currentMarker);
+	await expectReject(
+		() => applyWriterFence(target, writerFenceService, 2),
+		/generation marker drifted/i,
+		`Foreign writer-fence generation takeover ${target.name}`
+	);
+	assert.equal(fenceMarkers.get(target.name), currentMarker);
+	await assertWritersFenced(target, writerFenceService);
+	await writerFenceService.release(
+		targetConnection(target),
+		target,
+		currentMarker
+	);
 	const replacement = await applyWriterFence(
 		target,
 		writerFenceService,
 		2
 	);
-	assert.notEqual(replacement.evidenceSha256, staleMarker);
+	assert.notEqual(replacement.evidenceSha256, currentMarker);
 	await expectReject(
 		() =>
 			writerFenceService.release(
 				targetConnection(target),
 				target,
-				staleMarker
+				currentMarker
 			),
 		/generation marker drifted/i,
 		`Stale writer-fence generation release ${target.name}`
@@ -1251,7 +1263,10 @@ try {
 
 		await restartPostgres();
 		await assertWritersFenced(target, writerFenceService);
-		await assertStaleGenerationCannotRelease(target, writerFenceService);
+		await assertForeignGenerationCannotTakeOverAndStaleCannotRelease(
+			target,
+			writerFenceService
+		);
 		await restoreWhileFenced(
 			target,
 			processService,
