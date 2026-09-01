@@ -54,6 +54,27 @@ describe('Platform content validation', () => {
 		);
 	});
 
+	it('drops the SVG SMIL URL-list payload from GHSA-g8qq-57p8-ggw5', () => {
+		const sanitized = sanitizeLegalHtml(
+			'<svg><a><animate attributeName="href" values="#safe;javascript:alert(1)" dur=".01s" fill="freeze"></animate>' +
+				'<set attributeName="xlink:href" from="#safe" to="javascript:alert(2)"></set>' +
+				'<text y="30">safe</text></a></svg>'
+		);
+
+		expect(sanitized).toBe('<a>safe</a>');
+	});
+
+	it.each(['textarea', 'xmp'])(
+		'drops the %s raw-text payload from GHSA-jxwj-j7wr-gfrw',
+		tag => {
+			expect(
+				sanitizeLegalHtml(
+					`<${tag}></${tag}/><img src=x onerror="alert(document.domain)">`
+				)
+			).toBe('');
+		}
+	);
+
 	it('preserves the explicit legal TipTap tag allowlist', () => {
 		expect(
 			sanitizeLegalHtml(

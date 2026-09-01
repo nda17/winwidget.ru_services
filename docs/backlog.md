@@ -315,12 +315,43 @@ replicas.
 
 ## Инженерная эксплуатация
 
+### P1 — убрать временное ограничение Platform sanitizer audit
+
+С 02.09.2026 `npm audit` для `sanitize-html@2.17.5` публикует conditional
+moderate finding `GHSA-g8qq-57p8-ggw5`; upstream также опубликовал
+`GHSA-jxwj-j7wr-gfrw`, который пока не индексируется текущим audit-ответом.
+Полностью исправленная `2.17.7` требует Node.js `>=22.12.0`, тогда как
+production Platform закреплён на Node.js `20.20.2`. Текущий Platform contract
+не разрешает SVG/SMIL и `textarea`/`xmp` tags или wildcard attributes,
+применяет scheme policy только к `href`, а regression tests удаляют оба
+опубликованных exploit payload.
+
+Временный production audit constraint разрешает только прямой exact path
+`. > sanitize-html@2.17.5` для этих двух advisory IDs; остальные versions,
+paths и findings по-прежнему запрещены. Fail-closed проверка запрещает symlinks
+в `apps/platform/src`, фиксирует SHA-256 manifest всех production TypeScript
+sources Platform, а через AST — единственный default import, package subpaths,
+dynamic module literals, все ссылки и два прямых call sites. Отдельно
+проверяются SHA-256 точной literal-конфигурации и обоих regression tests, затем
+обязательно запускаются и успешно выполняются все три GHSA test cases. Boundary
+выполняется безусловно, пока закреплена `2.17.5`, даже если registry временно
+вернул ноль findings; сам audit также требует ожидаемый exit status, пустой
+muted-list и точное совпадение severity metadata/advisories.
+
+- В отдельной ветке перевести build/runtime/CI Platform на поддерживаемый
+  Node.js 22 LTS с immutable image digest либо дождаться совместимого
+  backport-релиза `sanitize-html`.
+- Обновить `sanitize-html` минимум до `2.17.7`, выполнить frozen install,
+  audit от low, unit/integration и production image gates, затем удалить exact
+  audit constraint. Regression test сохранить.
+- Не совмещать этот runtime-переход с Billing review или restore rehearsal.
+
 ### P2 — dependency review Billing после проверки платёжного контура
 
-API Gateway и восемь неплатёжных приложений переведены на NestJS 11 / Express 5
-и имеют нулевой production audit от low до critical. Billing намеренно не
-включён в общий major-переход и остаётся на NestJS 10 / Express 4 до отдельной
-проверки платёжного контура владельцем продукта.
+API Gateway и восемь неплатёжных приложений переведены на NestJS 11 / Express 5. Все, кроме описанного выше exact Platform constraint, имеют нулевой
+production audit от low до critical. Billing намеренно не включён в общий
+major-переход и остаётся на NestJS 10 / Express 4 до отдельной проверки
+платёжного контура владельцем продукта.
 
 - Не переносить общие overrides или major-версии в Billing без отдельного
   payment review.
