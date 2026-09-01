@@ -43,7 +43,7 @@ function target(overrides: Record<string, unknown> = {}) {
 
 function setup(current = target()) {
 	const tx = {
-		$queryRaw: jest.fn().mockResolvedValue([]),
+		$executeRaw: jest.fn().mockResolvedValue(0),
 		avatarMediaObject: {
 			updateMany: jest.fn().mockResolvedValue({ count: 1 })
 		},
@@ -124,6 +124,11 @@ describe('AvatarService', () => {
 			where: { id: USER_ID },
 			data: { avatarPath: NEW_URL }
 		});
+		expect(value.tx.$executeRaw).toHaveBeenCalledTimes(1);
+		const lockSql = value.tx.$executeRaw.mock.calls[0]?.[0];
+		expect(lockSql.strings.join('?')).toContain(
+			'SELECT pg_advisory_xact_lock'
+		);
 		expect(value.events.emitUserChanged).toHaveBeenCalled();
 		expect(value.cleanup.deleteNow).toHaveBeenCalledWith(OLD_ID);
 	});

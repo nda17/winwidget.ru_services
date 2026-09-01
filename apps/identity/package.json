@@ -13,6 +13,7 @@
 		"start": "node dist/src/main.js",
 		"lint": "eslint \"src/**/*.ts\" --max-warnings=0",
 		"test": "jest --runInBand",
+		"test:integration": "pnpm run build && node test/integration/identity-events-postgres18.integration.mjs",
 		"typecheck": "tsc -p tsconfig.json --noEmit",
 		"prisma:generate": "prisma generate --schema prisma/schema.prisma",
 		"prisma:validate": "prisma validate --schema prisma/schema.prisma",

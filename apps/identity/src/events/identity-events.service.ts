@@ -63,7 +63,7 @@ export class IdentityEventsService {
 		userId: string,
 		correlationId?: string
 	): Promise<void> {
-		await transaction.$queryRaw(
+		await transaction.$executeRaw(
 			Prisma.sql`SELECT pg_advisory_xact_lock(hashtextextended(${`identity.user:${userId}`}, 0))`
 		);
 		const user = await transaction.user.findUnique({

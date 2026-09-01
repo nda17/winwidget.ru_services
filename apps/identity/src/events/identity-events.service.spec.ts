@@ -10,9 +10,9 @@ const CREATED_AT = new Date('2026-08-14T10:00:00.000Z');
 
 describe('Identity event parity', () => {
 	it('locks the aggregate before reading state and emits exact legacy payloads', async () => {
+		const execute = jest.fn().mockResolvedValue(0);
 		const query = jest
 			.fn()
-			.mockResolvedValueOnce([])
 			.mockResolvedValueOnce([{ lastValue: 101n }])
 			.mockResolvedValueOnce([{ version: 7n, sourceSequence: 101n }])
 			.mockResolvedValueOnce([{ lastValue: 202n }])
@@ -45,6 +45,7 @@ describe('Identity event parity', () => {
 		});
 		const create = jest.fn();
 		const transaction = {
+			$executeRaw: execute,
 			$queryRaw: query,
 			user: { findUnique },
 			outboxEvent: { create }
@@ -54,8 +55,13 @@ describe('Identity event parity', () => {
 			USER_ID,
 			'correlation-id'
 		);
-		expect(query.mock.invocationCallOrder[0]).toBeLessThan(
+		expect(execute).toHaveBeenCalledTimes(1);
+		expect(execute.mock.invocationCallOrder[0]).toBeLessThan(
 			findUnique.mock.invocationCallOrder[0]!
+		);
+		const lockSql = execute.mock.calls[0]?.[0];
+		expect(lockSql.strings.join('?')).toContain(
+			'SELECT pg_advisory_xact_lock'
 		);
 		expect(create).toHaveBeenCalledTimes(2);
 

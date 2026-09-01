@@ -310,8 +310,8 @@ export class AvatarService {
 	private lockUser(
 		transaction: Prisma.TransactionClient,
 		userId: string
-	): Promise<unknown> {
-		return transaction.$queryRaw(
+	): Promise<number> {
+		return transaction.$executeRaw(
 			Prisma.sql`SELECT pg_advisory_xact_lock(hashtextextended(${`identity.user:${userId}`}, 0))`
 		);
 	}
