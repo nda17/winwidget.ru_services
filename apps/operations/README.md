@@ -342,6 +342,28 @@ fence не подтверждён, job/action сохраняет маркер
 проверяет exact NOLOGIN roles, отсутствие writer/prepared/admin sessions,
 единственность LOGIN SUPERUSER и отсутствие protected-role membership.
 
+Для проверки свежих production backup без подключения к production-БД образ
+Operations содержит внутренний CLI `pnpm rehearsal:restore-artifacts`. Он не
+является альтернативным restore API и запускается только контроллером
+`winwidget.ru_infra/scripts/run-isolated-restore-rehearsal.sh` в отдельном
+PostgreSQL 18 с `--network none`. Runner требует ровно семь пар
+dump/sidecar, UID/GID `1001:1001`, read-only mode `0400`, точный
+`APP_REVISION`, встроенный public keyring и literal
+`DATABASE_RESTORE_ENABLED=false`; наличие production target env приводит к
+отказу. До первого restore копия каждого dump повторно проходит SHA-256,
+TOC и migration-ledger проверки. Затем для каждой цели выполняются normal
+executor и все три recovery executor с exact checkpoint sequence,
+ACL/ledger/writer-fence verification. Временные роли, БД, пароли и рабочие
+копии удаляются до выдачи `SUCCEEDED`; ошибка очистки делает весь запуск
+неуспешным.
+
+Этот isolated executor-level прогон доказывает пригодность подписанных
+артефактов и destructive PostgreSQL-механики, но намеренно не доказывает
+dual approval, permit → transactional Outbox → worker CAS/lease, signed
+terminal/recovery receipts, restart/redelivery, retention и alerts. Эти
+control-plane gates остаются отдельной production rehearsal и не позволяют
+автоматически включить master kill switch.
+
 Production restore остаётся выключенным до полного exact-SHA rehearsal свежей
 подписанной пары dump/sidecar, проверки dual-approval, terminal/recovery
 receipts, retention/alert evidence и отдельного операционного решения о
