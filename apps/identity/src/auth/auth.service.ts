@@ -1,5 +1,6 @@
 import {
 	BadRequestException,
+	ConflictException,
 	Injectable,
 	NotFoundException,
 	UnauthorizedException
@@ -31,6 +32,7 @@ import { OwnerClientsService } from '../integrations/owner-clients.service';
 import { IdentityPrismaService } from '../prisma/identity-prisma.service';
 import { VerificationTransportService } from '../transports/verification-transport.service';
 import { UsersService } from '../users/users.service';
+import { WorkspaceProvisioningService } from '../workspaces/workspace-provisioning.service';
 import { AccessJwtService } from './access-jwt.service';
 import {
 	AuthDto,
@@ -52,6 +54,17 @@ type IdentityUser = NonNullable<
 	Awaited<ReturnType<UsersService['findById']>>
 >;
 
+export const REFRESH_ROTATION_GRACE_MS = 5_000;
+
+export class RefreshRotationInProgressException extends ConflictException {
+	constructor() {
+		super({
+			code: 'refresh_rotation_in_progress',
+			message: 'Refresh rotation is in progress'
+		});
+	}
+}
+
 @Injectable()
 export class AuthService {
 	constructor(
@@ -61,7 +74,8 @@ export class AuthService {
 		private readonly refreshTokens: RefreshTokenService,
 		private readonly events: IdentityEventsService,
 		private readonly transport: VerificationTransportService,
-		private readonly owners: OwnerClientsService
+		private readonly owners: OwnerClientsService,
+		private readonly workspaces: WorkspaceProvisioningService
 	) {}
 
 	async login(dto: AuthDto, request?: Request) {
@@ -203,6 +217,10 @@ export class AuthService {
 				},
 				include: USER_INCLUDE
 			});
+			await this.workspaces.provisionPersonalWorkspace(
+				transaction,
+				created.id
+			);
 			await this.captureReferral(transaction, dto.referrerId, created.id);
 			await this.events.emitUserChanged(transaction, created.id);
 			return created;
@@ -294,6 +312,10 @@ export class AuthService {
 				},
 				include: USER_INCLUDE
 			});
+			await this.workspaces.provisionPersonalWorkspace(
+				transaction,
+				created.id
+			);
 			await this.captureReferral(transaction, dto.referrerId, created.id);
 			await this.events.emitUserChanged(transaction, created.id);
 			return created;
@@ -313,39 +335,77 @@ export class AuthService {
 	async refresh(token: string) {
 		const parsed = this.refreshTokens.parse(token);
 		if (!parsed) throw new UnauthorizedException('Invalid refresh token');
+		const now = new Date();
+		const tokenHashInput = this.refreshTokens.hashInput(token);
 		const session = await this.prisma.userSession.findUnique({
 			where: { id: parsed.sessionId },
 			include: { user: { include: USER_INCLUDE } }
 		});
-		if (
-			!session ||
-			session.revokedAt ||
-			session.expiresAt <= new Date() ||
-			!(await compare(
-				this.refreshTokens.hashInput(token),
-				session.refreshTokenHash
-			))
-		) {
+		if (!session || session.revokedAt || session.expiresAt <= now) {
+			throw new UnauthorizedException('Invalid refresh token');
+		}
+		const matchesCurrent = await compare(
+			tokenHashInput,
+			session.refreshTokenHash
+		);
+		if (!matchesCurrent) {
+			const matchesPrevious = session.previousRefreshTokenHash
+				? await compare(tokenHashInput, session.previousRefreshTokenHash)
+				: false;
+			if (matchesPrevious) {
+				if (
+					this.withinRefreshRotationGrace(session.refreshRotatedAt, now)
+				) {
+					throw new RefreshRotationInProgressException();
+				}
+				await this.revokeSessionUnsafe(session.id);
+			}
 			throw new UnauthorizedException('Invalid refresh token');
 		}
 		this.ensureActive(session.user);
 		const rotated = this.refreshTokens.create(session.id);
+		const rotatedHash = await hash(
+			this.refreshTokens.hashInput(rotated),
+			PASSWORD_SALT_ROUNDS
+		);
+		const rotationAt = new Date();
 		const changed = await this.prisma.userSession.updateMany({
 			where: {
 				id: session.id,
 				refreshTokenHash: session.refreshTokenHash,
 				revokedAt: null,
-				expiresAt: { gt: new Date() }
+				expiresAt: { gt: rotationAt }
 			},
 			data: {
-				refreshTokenHash: await hash(
-					this.refreshTokens.hashInput(rotated),
-					PASSWORD_SALT_ROUNDS
-				),
-				lastUsedAt: new Date()
+				refreshTokenHash: rotatedHash,
+				previousRefreshTokenHash: session.refreshTokenHash,
+				refreshRotatedAt: rotationAt,
+				lastUsedAt: rotationAt
 			}
 		});
 		if (changed.count !== 1) {
+			const latest = await this.prisma.userSession.findUnique({
+				where: { id: session.id },
+				select: {
+					previousRefreshTokenHash: true,
+					refreshRotatedAt: true,
+					expiresAt: true,
+					revokedAt: true
+				}
+			});
+			if (
+				latest &&
+				!latest.revokedAt &&
+				latest.expiresAt > new Date() &&
+				latest.previousRefreshTokenHash &&
+				(await compare(tokenHashInput, latest.previousRefreshTokenHash)) &&
+				this.withinRefreshRotationGrace(
+					latest.refreshRotatedAt,
+					new Date()
+				)
+			) {
+				throw new RefreshRotationInProgressException();
+			}
 			await this.revokeSessionUnsafe(session.id);
 			throw new UnauthorizedException('Invalid refresh token');
 		}
@@ -710,6 +770,15 @@ export class AuthService {
 			where: { id: sessionId, revokedAt: null },
 			data: { revokedAt: new Date() }
 		});
+	}
+
+	private withinRefreshRotationGrace(
+		rotatedAt: Date | null,
+		now: Date
+	): boolean {
+		if (!rotatedAt) return false;
+		const elapsed = now.getTime() - rotatedAt.getTime();
+		return elapsed >= 0 && elapsed <= REFRESH_ROTATION_GRACE_MS;
 	}
 
 	private strongPassword(): string {

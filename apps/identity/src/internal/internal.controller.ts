@@ -77,6 +77,13 @@ export class IdentityInternalController {
 		return this.internal.introspect(authorization);
 	}
 
+	@Post('crm-access/auth-context')
+	@HttpCode(200)
+	@InternalServices('crm-access')
+	crmAccessAuthContext(@Headers('authorization') authorization?: string) {
+		return this.internal.crmAccessAuthContext(authorization);
+	}
+
 	@Post('widgets/owners/resolve')
 	@HttpCode(200)
 	@InternalServices('widgets')

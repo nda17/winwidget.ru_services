@@ -81,14 +81,24 @@ function createService(
 		emitBillingRequest: jest.fn(),
 		emitAudit: jest.fn()
 	};
+	const workspaces = { provisionPersonalWorkspace: jest.fn() };
 	const service = new TelegramService(
 		{ get: (key: string) => configValues[key] } as ConfigService,
 		prisma as any,
 		events as any,
 		settings as any,
-		auth as any
+		auth as any,
+		workspaces as any
 	);
-	return { service, prisma, tx, auth, settings, events };
+	return {
+		service,
+		prisma,
+		tx,
+		auth,
+		settings,
+		events,
+		workspaces
+	};
 }
 
 describe('Identity Telegram API routing', () => {
@@ -182,6 +192,23 @@ describe('Telegram Auth confirmation contract', () => {
 		expect(value.tx.verificationChallenge.delete).toHaveBeenCalledWith({
 			where: { id: 'challenge' }
 		});
+	});
+
+	it('provisions a personal workspace in the new Telegram user transaction', async () => {
+		const value = createService(challenge({ telegramChatId: 'chat-id' }));
+		value.tx.authIdentity.findUnique.mockResolvedValue(null);
+		value.tx.user.create.mockResolvedValue({
+			id: 'new-user',
+			createdAt: NOW
+		});
+		value.auth.startSession.mockResolvedValue({ accessToken: 'access' });
+
+		await expect(
+			value.service.completeLogin('request-id', undefined, {} as Request)
+		).resolves.toEqual({ confirmed: true, accessToken: 'access' });
+		expect(
+			value.workspaces.provisionPersonalWorkspace
+		).toHaveBeenCalledWith(value.tx, 'new-user');
 	});
 
 	it('commits a failed code attempt before returning the 401 error', async () => {

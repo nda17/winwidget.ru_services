@@ -9,6 +9,10 @@ const app = process.argv[2];
 const apps = new Set([
 	'api-gateway',
 	'campaigns',
+	'crm-access',
+	'crm-customers',
+	'crm-intake',
+	'crm-sales',
 	'identity',
 	'notification-delivery',
 	'operations',

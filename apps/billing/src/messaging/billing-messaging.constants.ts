@@ -23,6 +23,7 @@ export const BILLING_EVENT_TYPES = {
 	subscriptionChanged: 'billing.subscription.changed.v1',
 	affiliateChanged: 'billing.affiliate.changed.v1',
 	settingsChanged: 'billing.settings.changed.v1',
+	crmEntitlementChanged: 'billing.crm-entitlement.changed.v1',
 	adminAudit: 'admin.audit.event.v1'
 } as const;
 

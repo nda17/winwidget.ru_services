@@ -12,6 +12,7 @@ import {
 	IsUUID,
 	Max,
 	MaxLength,
+	Matches,
 	Min,
 	MinLength,
 	ValidateNested
@@ -212,6 +213,24 @@ export class EnsureTrialCommandDto {
 
 	@IsDateString()
 	registeredAt!: string;
+}
+
+export class ActivateCrmTrialCommandDto {
+	@IsInt()
+	@Equals(1)
+	schemaVersion!: number;
+
+	@IsUUID('4')
+	commandId!: string;
+
+	@IsUUID('4')
+	workspaceId!: string;
+
+	@IsString()
+	@MinLength(1)
+	@MaxLength(256)
+	@Matches(/^[A-Za-z0-9_-]+$/)
+	activatedByUserId!: string;
 }
 
 export class BillingSettingsPatchDto {

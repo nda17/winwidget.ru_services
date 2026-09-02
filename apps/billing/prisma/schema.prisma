@@ -31,23 +31,23 @@ model BillingSourceSequence {
 }
 
 model IdentityContactProjection {
-  userId            String    @id @map("user_id")
-  name              String?
-  email             String?
-  phone             String?
-  status            String
-  roles             String[]  @default([])
-  telegramChatId    String?   @map("telegram_chat_id")
-  telegramChannelActive Boolean @default(false) @map("telegram_channel_active")
-  deletedAt         DateTime? @map("deleted_at")
-  tombstone         Boolean   @default(false)
-  projectionVersion BigInt    @default(0) @map("projection_version")
-  sourceSequence    BigInt    @default(0) @map("source_sequence")
-  lastEventId       String?   @map("last_event_id")
-  sourceCreatedAt   DateTime? @map("source_created_at")
-  sourceUpdatedAt   DateTime? @map("source_updated_at")
-  createdAt         DateTime  @default(now()) @map("created_at")
-  updatedAt         DateTime  @updatedAt @map("updated_at")
+  userId                String    @id @map("user_id")
+  name                  String?
+  email                 String?
+  phone                 String?
+  status                String
+  roles                 String[]  @default([])
+  telegramChatId        String?   @map("telegram_chat_id")
+  telegramChannelActive Boolean   @default(false) @map("telegram_channel_active")
+  deletedAt             DateTime? @map("deleted_at")
+  tombstone             Boolean   @default(false)
+  projectionVersion     BigInt    @default(0) @map("projection_version")
+  sourceSequence        BigInt    @default(0) @map("source_sequence")
+  lastEventId           String?   @map("last_event_id")
+  sourceCreatedAt       DateTime? @map("source_created_at")
+  sourceUpdatedAt       DateTime? @map("source_updated_at")
+  createdAt             DateTime  @default(now()) @map("created_at")
+  updatedAt             DateTime  @updatedAt @map("updated_at")
 
   @@index([status])
   @@map("identity_contact_projections")
@@ -71,89 +71,89 @@ model NotificationRoutingProjection {
 }
 
 model BillingOfferProjection {
-  id                String   @id @default("offer")
-  content           String?  @db.Text
+  id                String    @id @default("offer")
+  content           String?   @db.Text
   sha256            String?
-  consentVersion    String?  @map("consent_version")
-  consentText       String?  @map("consent_text") @db.Text
+  consentVersion    String?   @map("consent_version")
+  consentText       String?   @map("consent_text") @db.Text
   sourceUpdatedAt   DateTime? @map("source_updated_at")
-  projectionVersion BigInt   @default(0) @map("projection_version")
-  sourceSequence    BigInt   @default(0) @map("source_sequence")
-  tombstone         Boolean  @default(false)
-  lastEventId       String?  @map("last_event_id")
-  createdAt         DateTime @default(now()) @map("created_at")
-  updatedAt         DateTime @updatedAt @map("updated_at")
+  projectionVersion BigInt    @default(0) @map("projection_version")
+  sourceSequence    BigInt    @default(0) @map("source_sequence")
+  tombstone         Boolean   @default(false)
+  lastEventId       String?   @map("last_event_id")
+  createdAt         DateTime  @default(now()) @map("created_at")
+  updatedAt         DateTime  @updatedAt @map("updated_at")
 
   @@map("offer_projections")
   @@schema("billing")
 }
 
 model BillingSettings {
-  id                       String   @id @default("singleton")
-  paymentEnabled           Boolean  @default(false) @map("payment_enabled")
-  autoRenewalSignupEnabled Boolean  @default(false) @map("auto_renewal_signup_enabled")
-  autoRenewalChargesEnabled Boolean @default(false) @map("auto_renewal_charges_enabled")
-  autoRenewalChargesEnabledAt DateTime @default(now()) @map("auto_renewal_charges_enabled_at")
-  affiliateProgramEnabled  Boolean  @default(false) @map("affiliate_program_enabled")
-  affiliateCashbackPercent Int      @default(10) @map("affiliate_cashback_percent")
-  consentVersion           String   @default("v1") @map("consent_version")
-  consentText              String   @default("") @map("consent_text")
-  offerSectionHash         String   @default("") @map("offer_section_hash")
-  offerSnapshot            String   @default("") @map("offer_snapshot") @db.Text
-  offerUpdatedAt           DateTime? @map("offer_updated_at")
-  paymentNotificationDestination Json? @map("payment_notification_destination")
-  aggregateVersion         BigInt   @default(0) @map("aggregate_version")
-  sourceSequence           BigInt   @default(0) @map("source_sequence")
-  createdAt                DateTime @default(now()) @map("created_at")
-  updatedAt                DateTime @updatedAt @map("updated_at")
+  id                             String    @id @default("singleton")
+  paymentEnabled                 Boolean   @default(false) @map("payment_enabled")
+  autoRenewalSignupEnabled       Boolean   @default(false) @map("auto_renewal_signup_enabled")
+  autoRenewalChargesEnabled      Boolean   @default(false) @map("auto_renewal_charges_enabled")
+  autoRenewalChargesEnabledAt    DateTime  @default(now()) @map("auto_renewal_charges_enabled_at")
+  affiliateProgramEnabled        Boolean   @default(false) @map("affiliate_program_enabled")
+  affiliateCashbackPercent       Int       @default(10) @map("affiliate_cashback_percent")
+  consentVersion                 String    @default("v1") @map("consent_version")
+  consentText                    String    @default("") @map("consent_text")
+  offerSectionHash               String    @default("") @map("offer_section_hash")
+  offerSnapshot                  String    @default("") @map("offer_snapshot") @db.Text
+  offerUpdatedAt                 DateTime? @map("offer_updated_at")
+  paymentNotificationDestination Json?     @map("payment_notification_destination")
+  aggregateVersion               BigInt    @default(0) @map("aggregate_version")
+  sourceSequence                 BigInt    @default(0) @map("source_sequence")
+  createdAt                      DateTime  @default(now()) @map("created_at")
+  updatedAt                      DateTime  @updatedAt @map("updated_at")
 
   @@map("settings")
   @@schema("billing")
 }
 
 model Payment {
-  id                      String             @id @default(cuid())
-  userId                  String             @map("user_id")
-  yookassaId              String?            @unique @map("yookassa_id")
-  providerIdempotencyKey  String?            @unique @map("provider_idempotency_key")
-  recurringCycleKey       String?            @unique @map("recurring_cycle_key")
-  recurringAttempt        Int                @default(0) @map("recurring_attempt")
-  kind                    PaymentKind        @default(ONE_TIME)
+  id                      String              @id @default(cuid())
+  userId                  String              @map("user_id")
+  yookassaId              String?             @unique @map("yookassa_id")
+  providerIdempotencyKey  String?             @unique @map("provider_idempotency_key")
+  recurringCycleKey       String?             @unique @map("recurring_cycle_key")
+  recurringAttempt        Int                 @default(0) @map("recurring_attempt")
+  kind                    PaymentKind         @default(ONE_TIME)
   amount                  String
-  currency                String             @default("RUB")
-  confirmationUrl         String?            @map("confirmation_url")
-  status                  PaymentStatus      @default(PENDING)
-  providerStatus          String?            @map("provider_status")
+  currency                String              @default("RUB")
+  confirmationUrl         String?             @map("confirmation_url")
+  status                  PaymentStatus       @default(PENDING)
+  providerStatus          String?             @map("provider_status")
   plan                    Plan?
-  billingPeriod           BillingPeriod?     @map("billing_period")
-  autoRenew               Boolean            @default(false) @map("auto_renew")
-  consentVersion          String?            @map("consent_version")
-  consentText             String?            @map("consent_text") @db.Text
-  consentedAt             DateTime?          @map("consented_at")
-  consentIp               String?            @map("consent_ip")
-  consentUserAgent        String?            @map("consent_user_agent")
-  offerSnapshot           String?            @map("offer_snapshot") @db.Text
-  offerSha256             String?            @map("offer_sha256")
-  offerUpdatedAt          DateTime?          @map("offer_updated_at")
-  customerEmail           String?            @map("customer_email")
-  customerPhone           String?            @map("customer_phone")
-  paymentMethodCiphertext String?            @map("payment_method_ciphertext") @db.Text
-  providerCreatedAt       DateTime?          @map("provider_created_at")
-  checkoutExpiresAt       DateTime           @map("checkout_expires_at")
-  providerExpiresAt       DateTime?          @map("provider_expires_at")
-  lastProviderCheckedAt   DateTime?          @map("last_provider_checked_at")
-  succeededAt             DateTime?          @map("succeeded_at")
-  cancelledAt             DateTime?          @map("cancelled_at")
-  cancellationReason      String?            @map("cancellation_reason")
-  receiptSyncEligible     Boolean            @default(true) @map("receipt_sync_eligible")
-  providerSnapshot        Json?              @map("provider_snapshot")
-  aggregateVersion        BigInt             @default(0) @map("aggregate_version")
-  sourceSequence          BigInt             @default(0) @map("source_sequence")
+  billingPeriod           BillingPeriod?      @map("billing_period")
+  autoRenew               Boolean             @default(false) @map("auto_renew")
+  consentVersion          String?             @map("consent_version")
+  consentText             String?             @map("consent_text") @db.Text
+  consentedAt             DateTime?           @map("consented_at")
+  consentIp               String?             @map("consent_ip")
+  consentUserAgent        String?             @map("consent_user_agent")
+  offerSnapshot           String?             @map("offer_snapshot") @db.Text
+  offerSha256             String?             @map("offer_sha256")
+  offerUpdatedAt          DateTime?           @map("offer_updated_at")
+  customerEmail           String?             @map("customer_email")
+  customerPhone           String?             @map("customer_phone")
+  paymentMethodCiphertext String?             @map("payment_method_ciphertext") @db.Text
+  providerCreatedAt       DateTime?           @map("provider_created_at")
+  checkoutExpiresAt       DateTime            @map("checkout_expires_at")
+  providerExpiresAt       DateTime?           @map("provider_expires_at")
+  lastProviderCheckedAt   DateTime?           @map("last_provider_checked_at")
+  succeededAt             DateTime?           @map("succeeded_at")
+  cancelledAt             DateTime?           @map("cancelled_at")
+  cancellationReason      String?             @map("cancellation_reason")
+  receiptSyncEligible     Boolean             @default(true) @map("receipt_sync_eligible")
+  providerSnapshot        Json?               @map("provider_snapshot")
+  aggregateVersion        BigInt              @default(0) @map("aggregate_version")
+  sourceSequence          BigInt              @default(0) @map("source_sequence")
   affiliateReferral       AffiliateReferral?
   receipts                PaymentReceipt[]
   providerOperations      ProviderOperation[]
-  createdAt               DateTime           @default(now()) @map("created_at")
-  updatedAt               DateTime           @updatedAt @map("updated_at")
+  createdAt               DateTime            @default(now()) @map("created_at")
+  updatedAt               DateTime            @updatedAt @map("updated_at")
 
   @@index([userId, createdAt])
   @@index([status, checkoutExpiresAt])
@@ -163,20 +163,20 @@ model Payment {
 }
 
 model PaymentReceipt {
-  id                   String   @id @default(cuid())
-  paymentId            String   @map("payment_id")
-  providerReceiptId    String   @unique @map("provider_receipt_id")
+  id                   String    @id @default(cuid())
+  paymentId            String    @map("payment_id")
+  providerReceiptId    String    @unique @map("provider_receipt_id")
   status               String
   type                 String?
-  fiscalDocumentNumber String?  @map("fiscal_document_number")
-  fiscalStorageNumber  String?  @map("fiscal_storage_number")
-  fiscalAttribute      String?  @map("fiscal_attribute")
+  fiscalDocumentNumber String?   @map("fiscal_document_number")
+  fiscalStorageNumber  String?   @map("fiscal_storage_number")
+  fiscalAttribute      String?   @map("fiscal_attribute")
   registeredAt         DateTime? @map("registered_at")
-  publicUrl            String?  @map("public_url") @db.Text
+  publicUrl            String?   @map("public_url") @db.Text
   raw                  Json?
-  payment              Payment  @relation(fields: [paymentId], references: [id], onDelete: Cascade)
-  createdAt            DateTime @default(now()) @map("created_at")
-  updatedAt            DateTime @updatedAt @map("updated_at")
+  payment              Payment   @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+  createdAt            DateTime  @default(now()) @map("created_at")
+  updatedAt            DateTime  @updatedAt @map("updated_at")
 
   @@index([paymentId, registeredAt])
   @@map("payment_receipts")
@@ -184,21 +184,21 @@ model PaymentReceipt {
 }
 
 model Subscription {
-  id                 String             @id @default(cuid())
-  userId             String             @unique @map("user_id")
-  plan               Plan               @default(TRIAL)
-  billingPeriod      BillingPeriod?     @map("billing_period")
-  status             SubscriptionStatus @default(ACTIVE)
-  startsAt           DateTime           @default(now()) @map("starts_at")
-  expiresAt          DateTime?          @map("expires_at")
-  leadsThisPeriod    Int                @default(0) @map("leads_this_period")
-  periodResetsAt     DateTime?          @map("period_resets_at")
-  aggregateVersion   BigInt             @default(0) @map("aggregate_version")
-  sourceSequence     BigInt             @default(0) @map("source_sequence")
-  history            SubscriptionHistory[]
-  reminders          SubscriptionExpiryReminder[]
-  createdAt          DateTime           @default(now()) @map("created_at")
-  updatedAt          DateTime           @updatedAt @map("updated_at")
+  id               String                       @id @default(cuid())
+  userId           String                       @unique @map("user_id")
+  plan             Plan                         @default(TRIAL)
+  billingPeriod    BillingPeriod?               @map("billing_period")
+  status           SubscriptionStatus           @default(ACTIVE)
+  startsAt         DateTime                     @default(now()) @map("starts_at")
+  expiresAt        DateTime?                    @map("expires_at")
+  leadsThisPeriod  Int                          @default(0) @map("leads_this_period")
+  periodResetsAt   DateTime?                    @map("period_resets_at")
+  aggregateVersion BigInt                       @default(0) @map("aggregate_version")
+  sourceSequence   BigInt                       @default(0) @map("source_sequence")
+  history          SubscriptionHistory[]
+  reminders        SubscriptionExpiryReminder[]
+  createdAt        DateTime                     @default(now()) @map("created_at")
+  updatedAt        DateTime                     @updatedAt @map("updated_at")
 
   @@index([status, expiresAt])
   @@map("subscriptions")
@@ -339,22 +339,22 @@ model TariffPrice {
 }
 
 model AffiliateReferral {
-  id                 String                  @id @default(cuid())
-  referrerId         String                  @map("referrer_id")
-  referredUserId     String                  @unique @map("referred_user_id")
-  firstPaymentId     String?                 @unique @map("first_payment_id")
-  status             AffiliateReferralStatus @default(REGISTERED)
-  paymentAmount      Int?                    @map("payment_amount")
-  cashbackPercent    Int?                    @map("cashback_percent")
-  cashbackAmount     Int?                    @map("cashback_amount")
-  availableAt        DateTime?               @map("available_at")
-  cancelledAt        DateTime?               @map("cancelled_at")
-  paidAt             DateTime?               @map("paid_at")
-  aggregateVersion   BigInt                  @default(0) @map("aggregate_version")
-  sourceSequence     BigInt                  @default(0) @map("source_sequence")
-  payment            Payment?                @relation(fields: [firstPaymentId], references: [id], onDelete: SetNull)
-  createdAt          DateTime                @default(now()) @map("created_at")
-  updatedAt          DateTime                @updatedAt @map("updated_at")
+  id               String                  @id @default(cuid())
+  referrerId       String                  @map("referrer_id")
+  referredUserId   String                  @unique @map("referred_user_id")
+  firstPaymentId   String?                 @unique @map("first_payment_id")
+  status           AffiliateReferralStatus @default(REGISTERED)
+  paymentAmount    Int?                    @map("payment_amount")
+  cashbackPercent  Int?                    @map("cashback_percent")
+  cashbackAmount   Int?                    @map("cashback_amount")
+  availableAt      DateTime?               @map("available_at")
+  cancelledAt      DateTime?               @map("cancelled_at")
+  paidAt           DateTime?               @map("paid_at")
+  aggregateVersion BigInt                  @default(0) @map("aggregate_version")
+  sourceSequence   BigInt                  @default(0) @map("source_sequence")
+  payment          Payment?                @relation(fields: [firstPaymentId], references: [id], onDelete: SetNull)
+  createdAt        DateTime                @default(now()) @map("created_at")
+  updatedAt        DateTime                @updatedAt @map("updated_at")
 
   @@index([referrerId])
   @@index([status])
@@ -364,23 +364,23 @@ model AffiliateReferral {
 }
 
 model ProviderOperation {
-  id                 String                  @id @default(cuid())
-  paymentId          String?                 @map("payment_id")
-  providerPaymentId  String?                 @map("provider_payment_id")
-  idempotencyKey     String                  @unique @map("idempotency_key")
-  kind               ProviderOperationKind
-  status             ProviderOperationStatus @default(PENDING)
-  payload            Json
-  attempt            Int                     @default(0)
-  availableAt        DateTime                @default(now()) @map("available_at")
-  leaseToken         String?                 @map("lease_token")
-  leaseUntil         DateTime?               @map("lease_until")
-  lastErrorCode      String?                 @map("last_error_code")
-  lastErrorSafe      String?                 @map("last_error_safe")
-  response           Json?
-  payment            Payment?                @relation(fields: [paymentId], references: [id], onDelete: Restrict)
-  createdAt          DateTime                @default(now()) @map("created_at")
-  updatedAt          DateTime                @updatedAt @map("updated_at")
+  id                String                  @id @default(cuid())
+  paymentId         String?                 @map("payment_id")
+  providerPaymentId String?                 @map("provider_payment_id")
+  idempotencyKey    String                  @unique @map("idempotency_key")
+  kind              ProviderOperationKind
+  status            ProviderOperationStatus @default(PENDING)
+  payload           Json
+  attempt           Int                     @default(0)
+  availableAt       DateTime                @default(now()) @map("available_at")
+  leaseToken        String?                 @map("lease_token")
+  leaseUntil        DateTime?               @map("lease_until")
+  lastErrorCode     String?                 @map("last_error_code")
+  lastErrorSafe     String?                 @map("last_error_safe")
+  response          Json?
+  payment           Payment?                @relation(fields: [paymentId], references: [id], onDelete: Restrict)
+  createdAt         DateTime                @default(now()) @map("created_at")
+  updatedAt         DateTime                @updatedAt @map("updated_at")
 
   @@index([status, availableAt])
   @@index([providerPaymentId])
@@ -416,6 +416,27 @@ model BillingCommandReceipt {
 
   @@index([commandType, createdAt])
   @@map("command_receipts")
+  @@schema("billing")
+}
+
+model CrmEntitlement {
+  id                String               @id @default(uuid()) @db.Uuid
+  workspaceId       String               @unique(map: "crm_entitlements_workspace_id_key") @map("workspace_id") @db.Uuid
+  productCode       String               @default("WINCRM") @map("product_code") @db.VarChar(32)
+  planCode          String               @default("TRIAL") @map("plan_code") @db.VarChar(32)
+  status            CrmEntitlementStatus @default(ACTIVE)
+  seatLimit         Int?                 @map("seat_limit")
+  trialStartedAt    DateTime?            @map("trial_started_at")
+  effectiveFrom     DateTime             @map("effective_from")
+  effectiveUntil    DateTime             @map("effective_until")
+  activatedByUserId String               @map("activated_by_user_id")
+  aggregateVersion  BigInt               @default(1) @map("aggregate_version")
+  sourceSequence    BigInt               @map("source_sequence")
+  createdAt         DateTime             @default(now()) @map("created_at")
+  updatedAt         DateTime             @updatedAt @map("updated_at")
+
+  @@index([status, effectiveUntil], map: "crm_entitlements_status_effective_until_idx")
+  @@map("crm_entitlements")
   @@schema("billing")
 }
 
@@ -467,8 +488,8 @@ model IntegrationDeliveryReceipt {
 
   @@unique([eventId, consumer])
   @@index([status, leaseUntil])
-	@@index([consumer, deliveredAt])
-	@@index([deliveredAt])
+  @@index([consumer, deliveredAt])
+  @@index([deliveredAt])
   @@map("integration_delivery_receipts")
   @@schema("billing")
 }
@@ -505,9 +526,9 @@ model IntegrationDeliveryFailure {
 
   @@unique([eventId, consumer])
   @@index([status, createdAt])
-	@@index([resolvedAt, failedAt])
-	@@index([consumer, resolvedAt])
-	@@index([category, resolvedAt, failedAt])
+  @@index([resolvedAt, failedAt])
+  @@index([consumer, resolvedAt])
+  @@index([category, resolvedAt, failedAt])
   @@map("integration_delivery_failures")
   @@schema("billing")
 }
@@ -516,12 +537,14 @@ enum Plan {
   TRIAL
   EASY
   HARD
+
   @@schema("billing")
 }
 
 enum BillingPeriod {
   MONTHLY
   YEARLY
+
   @@schema("billing")
 }
 
@@ -529,6 +552,7 @@ enum SubscriptionStatus {
   ACTIVE
   EXPIRED
   CANCELLED
+
   @@schema("billing")
 }
 
@@ -537,12 +561,14 @@ enum PaymentStatus {
   SUCCEEDED
   CANCELLED
   EXPIRED
+
   @@schema("billing")
 }
 
 enum PaymentKind {
   ONE_TIME
   RECURRING
+
   @@schema("billing")
 }
 
@@ -552,6 +578,7 @@ enum AutoRenewalStatus {
   ADMIN_PAUSED
   TECHNICAL_PAUSE
   REVOKED
+
   @@schema("billing")
 }
 
@@ -569,11 +596,13 @@ enum AutoRenewalConsentEventType {
   RETRY_SCHEDULED
   RETRY_EXHAUSTED
   RETRY_CANCELLED
+
   @@schema("billing")
 }
 
 enum SubscriptionHistoryAction {
   BONUS_DAYS
+
   @@schema("billing")
 }
 
@@ -582,6 +611,7 @@ enum SubscriptionBonusAudience {
   ACTIVE_SUBSCRIPTION
   INACTIVE_SUBSCRIPTION
   ALL
+
   @@schema("billing")
 }
 
@@ -590,6 +620,7 @@ enum SubscriptionExpiryReminderStatus {
   PROCESSING
   SENT
   FAILED
+
   @@schema("billing")
 }
 
@@ -598,6 +629,7 @@ enum AffiliateReferralStatus {
   REWARD_PENDING
   CANCELLED
   PAID
+
   @@schema("billing")
 }
 
@@ -606,6 +638,7 @@ enum ProviderOperationKind {
   CAPTURE_RECURRING
   VERIFY_PAYMENT
   SYNC_RECEIPT
+
   @@schema("billing")
 }
 
@@ -615,6 +648,7 @@ enum ProviderOperationStatus {
   SUCCEEDED
   UNKNOWN
   FAILED
+
   @@schema("billing")
 }
 
@@ -622,6 +656,18 @@ enum OutboxStatus {
   PENDING
   PROCESSING
   PUBLISHED
+
+  @@schema("billing")
+}
+
+enum CrmEntitlementStatus {
+  ACTIVE
+  GRACE
+  READ_ONLY
+  SUSPENDED
+  EXPIRED
+  CANCELLED
+
   @@schema("billing")
 }
 
@@ -632,6 +678,7 @@ enum DeliveryReceiptStatus {
   DEAD_LETTERED
   CLOSED_NO_RETRY
   FAILED
+
   @@schema("billing")
 }
 
@@ -640,12 +687,14 @@ enum IntegrationErrorCategory {
   RATE_LIMIT
   PERMANENT
   AUTH_CONFIGURATION
+
   @@schema("billing")
 }
 
 enum IntegrationFailureResolution {
   DELIVERED
   CLOSED_NO_RETRY
+
   @@schema("billing")
 }
 
@@ -653,6 +702,7 @@ enum DeliveryFailureStatus {
   OPEN
   RETRY_PENDING
   RESOLVED
+
   @@schema("billing")
 }
 
@@ -660,5 +710,6 @@ enum ScheduledRunStatus {
   PROCESSING
   COMPLETED
   FAILED
+
   @@schema("billing")
 }

@@ -54,6 +54,7 @@ function createService(prismaOverrides: Record<string, any> = {}) {
 	const auth = { startSession: jest.fn() };
 	const settings = { assertProviderEnabled: jest.fn() };
 	const refresh = new RefreshTokenService();
+	const workspaces = { provisionPersonalWorkspace: jest.fn() };
 	const service = new OAuthService(
 		{
 			get: (name: keyof typeof configuration) => configuration[name]
@@ -62,9 +63,10 @@ function createService(prismaOverrides: Record<string, any> = {}) {
 		{ emitUserChanged: jest.fn(), emitBillingRequest: jest.fn() } as any,
 		settings as any,
 		auth as any,
-		refresh
+		refresh,
+		workspaces as any
 	);
-	return { service, prisma, auth, refresh, settings };
+	return { service, prisma, auth, refresh, settings, workspaces };
 }
 
 describe('OAuth provider contracts', () => {
@@ -199,6 +201,33 @@ describe('OAuth provider contracts', () => {
 		await expect(
 			(service as any).profile('vk', 'code', 'verifier', 'device', 'state')
 		).rejects.toThrow('OAuth provider response has no user_id');
+	});
+
+	it('provisions a personal workspace in the new OAuth user transaction', async () => {
+		const transaction = {
+			authIdentity: {
+				findUnique: jest
+					.fn()
+					.mockResolvedValueOnce(null)
+					.mockResolvedValueOnce(null)
+			},
+			user: {
+				create: jest.fn().mockResolvedValue({ id: 'new-user' })
+			}
+		};
+		const value = createService({
+			$transaction: jest.fn(callback => callback(transaction))
+		});
+
+		await expect(
+			(value.service as any).upsertUser('google', {
+				providerId: 'provider-id',
+				email: 'USER@example.com'
+			})
+		).resolves.toEqual({ id: 'new-user' });
+		expect(
+			value.workspaces.provisionPersonalWorkspace
+		).toHaveBeenCalledWith(transaction, 'new-user');
 	});
 });
 

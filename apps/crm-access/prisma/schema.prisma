@@ -1,0 +1,45 @@
+generator client {
+  provider        = "prisma-client-js"
+  output          = "../node_modules/@prisma/crm-access-client"
+  previewFeatures = ["multiSchema"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("CRM_ACCESS_DATABASE_URL")
+  schemas  = ["crm_access"]
+}
+
+model ServiceIdentity {
+  id          String   @id @default("singleton")
+  serviceName String   @default("crm-access-service") @map("service_name")
+  databaseId  String   @unique(map: "service_identity_database_id_key") @default(uuid()) @map("database_id") @db.Uuid
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  @@map("service_identity")
+  @@schema("crm_access")
+}
+
+model CrmWorkspaceAccess {
+  id                       String             @id @default(uuid()) @db.Uuid
+  workspaceId              String             @unique @map("workspace_id") @db.Uuid
+  lifecycle                CrmAccessLifecycle @default(ONBOARDING)
+  activatedBySubject       String             @map("activated_by_subject") @db.VarChar(256)
+  trialActivationCommandId String             @unique @map("trial_activation_command_id") @db.Uuid
+  createdAt                DateTime           @default(now()) @map("created_at")
+  updatedAt                DateTime           @updatedAt @map("updated_at")
+
+  @@index([lifecycle, updatedAt])
+  @@map("crm_workspace_access")
+  @@schema("crm_access")
+}
+
+enum CrmAccessLifecycle {
+  ONBOARDING
+  ACTIVE
+  READ_ONLY
+  SUSPENDED
+
+  @@schema("crm_access")
+}

@@ -14,7 +14,7 @@ function credential(service: IdentityInternalService): string {
 function environment(): Record<string, string> {
 	return Object.fromEntries(
 		IDENTITY_INTERNAL_SERVICES.map(service => [
-			`IDENTITY_${service.toUpperCase()}_TOKEN`,
+			`IDENTITY_${service.replace(/-/g, '_').toUpperCase()}_TOKEN`,
 			credential(service)
 		])
 	);

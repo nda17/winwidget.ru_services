@@ -6,7 +6,8 @@ import { IdentityInternalService } from './internal.service';
 
 function service(session: unknown) {
 	const prisma = {
-		userSession: { findFirst: jest.fn().mockResolvedValue(session) }
+		userSession: { findFirst: jest.fn().mockResolvedValue(session) },
+		workspaceMember: { findMany: jest.fn().mockResolvedValue([]) }
 	};
 	const jwt = {
 		verify: jest.fn().mockReturnValue({
@@ -78,6 +79,58 @@ describe('canonical Identity introspection', () => {
 			'Invalid access token'
 		);
 		expect(current.jwt.verify).not.toHaveBeenCalled();
+	});
+
+	it('derives the CRM auth context from the bearer session and active memberships only', async () => {
+		const current = service({
+			id: '00000000-0000-4000-8000-000000000001',
+			user: {
+				id: 'user-id',
+				rights: [Role.USER],
+				status: UserStatus.ACTIVE,
+				deletedAt: null
+			}
+		});
+		current.prisma.workspaceMember.findMany.mockResolvedValue([
+			{
+				id: '00000000-0000-4000-8000-000000000010',
+				workspaceId: '00000000-0000-4000-8000-000000000020',
+				role: 'OWNER'
+			}
+		]);
+
+		await expect(
+			current.value.crmAccessAuthContext('Bearer access-token')
+		).resolves.toEqual({
+			schemaVersion: 1,
+			subject: 'user-id',
+			sessionId: '00000000-0000-4000-8000-000000000001',
+			memberships: [
+				{
+					membershipId: '00000000-0000-4000-8000-000000000010',
+					workspaceId: '00000000-0000-4000-8000-000000000020',
+					role: 'OWNER'
+				}
+			]
+		});
+		expect(current.jwt.verify).toHaveBeenCalledWith('access-token');
+		expect(current.prisma.workspaceMember.findMany).toHaveBeenCalledWith({
+			where: {
+				userId: 'user-id',
+				status: 'ACTIVE',
+				workspace: { status: 'ACTIVE' }
+			},
+			orderBy: [{ workspaceId: 'asc' }, { id: 'asc' }],
+			select: { id: true, workspaceId: true, role: true }
+		});
+	});
+
+	it('does not query memberships when bearer session introspection fails', async () => {
+		const current = service(null);
+		await expect(
+			current.value.crmAccessAuthContext('Bearer access-token')
+		).rejects.toThrow('Invalid session');
+		expect(current.prisma.workspaceMember.findMany).not.toHaveBeenCalled();
 	});
 });
 

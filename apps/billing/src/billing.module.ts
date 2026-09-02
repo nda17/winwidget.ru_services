@@ -4,9 +4,11 @@ import { BillingAuthGuard } from './auth/billing-auth.guard';
 import { BillingOperationsGuard } from './auth/billing-operations.guard';
 import { BillingCampaignsGuard } from './auth/billing-campaigns.guard';
 import { BillingIdentityGuard } from './auth/billing-identity.guard';
+import { BillingCrmAccessGuard } from './auth/billing-crm-access.guard';
 import { BillingCampaignAudienceService } from './domain/billing-campaign-audience.service';
 import { BillingAdminAlertsService } from './domain/billing-admin-alerts.service';
 import { InternalCommandsService } from './domain/internal-commands.service';
+import { CrmEntitlementService } from './domain/crm-entitlement.service';
 import { BillingMessagingAdminService } from './domain/billing-messaging-admin.service';
 import { BillingSettingsService } from './domain/billing-settings.service';
 import { PaymentDomainService } from './domain/payment-domain.service';
@@ -19,6 +21,7 @@ import { AffiliateController } from './http/affiliate.controller';
 import { BillingCampaignAudienceController } from './http/billing-campaign-audience.controller';
 import { BillingOperationsController } from './http/billing-operations.controller';
 import { BillingIdentityController } from './http/billing-identity.controller';
+import { BillingCrmAccessController } from './http/billing-crm-access.controller';
 import { BillingSettingsController } from './http/billing-settings.controller';
 import { PaymentController } from './http/payment.controller';
 import { SubscriptionController } from './http/subscription.controller';
@@ -50,6 +53,7 @@ const API_CONTROLLERS =
 				TariffPricesController,
 				AffiliateController,
 				BillingCampaignAudienceController,
+				BillingCrmAccessController,
 				BillingIdentityController,
 				BillingSettingsController,
 				BillingOperationsController
@@ -62,6 +66,7 @@ const API_PROVIDERS =
 				BillingAuthGuard,
 				BillingOperationsGuard,
 				BillingCampaignsGuard,
+				BillingCrmAccessGuard,
 				BillingIdentityGuard
 			]
 		: [];
@@ -82,6 +87,7 @@ const API_PROVIDERS =
 		SubscriptionDomainService,
 		TariffAffiliateService,
 		InternalCommandsService,
+		CrmEntitlementService,
 		BillingCampaignAudienceService,
 		BillingAdminAlertsService,
 		BillingMessagingAdminService,

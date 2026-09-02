@@ -19,6 +19,7 @@ import { IdentityPrismaService } from '../prisma/identity-prisma.service';
 import { AuthSettingsService } from '../auth/auth-settings.service';
 import { AuthService } from '../auth/auth.service';
 import { RefreshTokenService } from '../auth/refresh-token.service';
+import { WorkspaceProvisioningService } from '../workspaces/workspace-provisioning.service';
 
 type ProviderName = 'google' | 'github' | 'yandex' | 'vk';
 
@@ -46,7 +47,8 @@ export class OAuthService {
 		private readonly events: IdentityEventsService,
 		private readonly settings: AuthSettingsService,
 		private readonly auth: AuthService,
-		private readonly refreshTokens: RefreshTokenService
+		private readonly refreshTokens: RefreshTokenService,
+		private readonly workspaces: WorkspaceProvisioningService
 	) {
 		this.clientOrigin = requireValue(
 			config,
@@ -235,6 +237,10 @@ export class OAuthService {
 				},
 				include: USER_INCLUDE
 			});
+			await this.workspaces.provisionPersonalWorkspace(
+				transaction,
+				created.id
+			);
 			if (referrerId && referrerId !== created.id) {
 				const referrer = await transaction.user.findFirst({
 					where: {

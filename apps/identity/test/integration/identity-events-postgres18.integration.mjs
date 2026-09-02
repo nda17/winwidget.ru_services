@@ -36,7 +36,22 @@ const importedEvents = await import(
 const IdentityEventsService =
 	importedEvents.IdentityEventsService ||
 	importedEvents.default?.IdentityEventsService;
-if (!Prisma || !PrismaClient || !Role || !IdentityEventsService) {
+const importedWorkspaces = await import(
+	new URL(
+		'../../dist/src/workspaces/workspace-provisioning.service.js',
+		import.meta.url
+	)
+);
+const WorkspaceProvisioningService =
+	importedWorkspaces.WorkspaceProvisioningService ||
+	importedWorkspaces.default?.WorkspaceProvisioningService;
+if (
+	!Prisma ||
+	!PrismaClient ||
+	!Role ||
+	!IdentityEventsService ||
+	!WorkspaceProvisioningService
+) {
 	throw new Error(
 		'Compiled Identity integration dependencies are unavailable'
 	);
@@ -62,6 +77,10 @@ try {
 					rights: [Role.USER]
 				}
 			});
+			await new WorkspaceProvisioningService().provisionPersonalWorkspace(
+				transaction,
+				userId
+			);
 			await new IdentityEventsService().emitUserChanged(
 				transaction,
 				userId,
@@ -92,8 +111,22 @@ try {
 		assert.equal(event.payload.aggregateId, userId);
 		assert.equal(event.payload.state.id, userId);
 	}
+	const workspace = await prisma.workspace.findUnique({
+		where: { personalOwnerUserId: userId },
+		include: { members: true }
+	});
+	assert.ok(workspace);
+	assert.equal(workspace.type, 'PERSONAL');
+	assert.equal(workspace.status, 'ACTIVE');
+	assert.equal(workspace.members.length, 1);
+	assert.equal(workspace.members[0].userId, userId);
+	assert.equal(workspace.members[0].role, 'OWNER');
+	assert.equal(workspace.members[0].status, 'ACTIVE');
+	assert.notEqual(workspace.id, workspace.members[0].id);
 
-	console.log('Identity PostgreSQL 18 advisory-lock integration passed');
+	console.log(
+		'Identity PostgreSQL 18 advisory-lock and workspace integration passed'
+	);
 } finally {
 	await prisma
 		.$transaction(async transaction => {

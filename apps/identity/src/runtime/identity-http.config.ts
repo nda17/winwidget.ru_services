@@ -6,6 +6,10 @@ export const IDENTITY_GLOBAL_PREFIX_EXCLUDES = [
 	{ path: 'health/revision', method: RequestMethod.ALL },
 	{ path: 'internal/v1/auth/introspect', method: RequestMethod.ALL },
 	{
+		path: 'internal/v1/crm-access/auth-context',
+		method: RequestMethod.ALL
+	},
+	{
 		path: 'internal/v1/widgets/owners/resolve',
 		method: RequestMethod.ALL
 	},

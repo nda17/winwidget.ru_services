@@ -1,0 +1,22 @@
+generator client {
+  provider        = "prisma-client-js"
+  output          = "../node_modules/@prisma/crm-intake-client"
+  previewFeatures = ["multiSchema"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("CRM_INTAKE_DATABASE_URL")
+  schemas  = ["crm_intake"]
+}
+
+model ServiceIdentity {
+  id          String   @id @default("singleton")
+  serviceName String   @default("crm-intake-service") @map("service_name")
+  databaseId  String   @unique(map: "service_identity_database_id_key") @default(uuid()) @map("database_id") @db.Uuid
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  @@map("service_identity")
+  @@schema("crm_intake")
+}

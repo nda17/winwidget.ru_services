@@ -47,6 +47,14 @@ async function bootstrap(): Promise<void> {
 				method: RequestMethod.GET
 			},
 			{
+				path: 'internal/v1/crm-access/billing/entitlements/:workspaceId',
+				method: RequestMethod.GET
+			},
+			{
+				path: 'internal/v1/crm-access/billing/entitlements/trial',
+				method: RequestMethod.POST
+			},
+			{
 				path: 'internal/v1/billing/campaigns/active-subscriber-ids',
 				method: RequestMethod.POST
 			},

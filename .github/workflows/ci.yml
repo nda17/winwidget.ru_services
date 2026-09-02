@@ -43,6 +43,10 @@ jobs:
           - api-gateway
           - notification-delivery
           - campaigns
+          - crm-access
+          - crm-intake
+          - crm-customers
+          - crm-sales
           - reporting
           - widgets
           - billing
@@ -372,12 +376,155 @@ jobs:
           docker exec "$RABBITMQ_CONTAINER_ID" rabbitmqctl add_user restricted_ci restricted_ci
           docker exec "$RABBITMQ_CONTAINER_ID" rabbitmqctl set_permissions \
             -p winwidget restricted_ci "$configure" "$write" "$read"
+      - name: Prepare existing Identity user before workspace migration
+        if: matrix.app == 'identity'
+        env:
+          POSTGRES_CONTAINER_ID: ${{ job.services.postgres.id }}
+        run: |
+          fixture="$(mktemp -d)"
+          trap 'rm -rf "$fixture"' EXIT
+          cp -R apps/identity/prisma/. "$fixture/"
+          rm -rf "$fixture/migrations/20260902080000_add_workspaces_and_refresh_rotation"
+          pnpm --dir apps/identity exec prisma migrate deploy --schema "$fixture/schema.prisma"
+          docker exec "$POSTGRES_CONTAINER_ID" psql \
+            -U services_ci -d services_ci -v ON_ERROR_STOP=1 \
+            -c "INSERT INTO identity.users (id, password, rights, created_at, updated_at) VALUES ('identity-pg18-existing-user', 'integration-only-hash', ARRAY['USER']::identity.\"Role\"[], CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
       - name: Apply service migrations
         run: pnpm --dir "apps/${{ matrix.app }}" run prisma:migrate:deploy
+      - name: Verify existing Identity user workspace backfill
+        if: matrix.app == 'identity'
+        env:
+          POSTGRES_CONTAINER_ID: ${{ job.services.postgres.id }}
+        run: |
+          result="$(docker exec "$POSTGRES_CONTAINER_ID" psql \
+            -U services_ci -d services_ci -At -v ON_ERROR_STOP=1 \
+            -c "SELECT CASE WHEN (SELECT count(*) FROM identity.workspaces WHERE personal_owner_user_id = 'identity-pg18-existing-user' AND type = 'PERSONAL' AND status = 'ACTIVE') = 1 AND (SELECT count(*) FROM identity.workspace_members AS members JOIN identity.workspaces AS workspaces ON workspaces.id = members.workspace_id WHERE workspaces.personal_owner_user_id = 'identity-pg18-existing-user' AND members.user_id = 'identity-pg18-existing-user' AND members.role = 'OWNER' AND members.status = 'ACTIVE' AND members.id <> members.workspace_id) = 1 THEN 'ok' ELSE 'failed' END")"
+          test "$result" = 'ok'
       - name: Build ${{ matrix.app }}
         run: pnpm --dir "apps/${{ matrix.app }}" run build
       - name: Run service integration
         run: pnpm --dir "apps/${{ matrix.app }}" run test:integration
+
+  crm-migration-smoke:
+    name: CRM PostgreSQL 18 migration / ${{ matrix.app }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - app: billing
+            schema: billing
+            database: winwidget_billing_ci
+            migration_role: winwidget_billing_migration_ci
+            service_name: billing-service
+          - app: crm-access
+            schema: crm_access
+            database: winwidget_crm_access_ci
+            migration_role: winwidget_crm_access_migration_ci
+            service_name: crm-access-service
+          - app: crm-intake
+            schema: crm_intake
+            database: winwidget_crm_intake_ci
+            migration_role: winwidget_crm_intake_migration_ci
+            service_name: crm-intake-service
+          - app: crm-customers
+            schema: crm_customers
+            database: winwidget_crm_customers_ci
+            migration_role: winwidget_crm_customers_migration_ci
+            service_name: crm-customers-service
+          - app: crm-sales
+            schema: crm_sales
+            database: winwidget_crm_sales_ci
+            migration_role: winwidget_crm_sales_migration_ci
+            service_name: crm-sales-service
+    services:
+      postgres:
+        image: postgres:18-bookworm@sha256:1961f96e6029a02c3812d7cb329a3b03a3ac2bb067058dec17b0f5596aca9296
+        env:
+          POSTGRES_USER: crm_bootstrap_ci
+          POSTGRES_PASSWORD: crm_bootstrap_ci
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U crm_bootstrap_ci -d postgres"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 30
+    env:
+      CRM_MIGRATION_ROLE_PASSWORD: crm_migration_role_ci_password
+      BILLING_DATABASE_URL: 'postgresql://winwidget_billing_migration_ci:crm_migration_role_ci_password@127.0.0.1:5432/winwidget_billing_ci?schema=billing&sslmode=disable'
+      CRM_ACCESS_DATABASE_URL: 'postgresql://winwidget_crm_access_migration_ci:crm_migration_role_ci_password@127.0.0.1:5432/winwidget_crm_access_ci?schema=crm_access&sslmode=disable'
+      CRM_INTAKE_DATABASE_URL: 'postgresql://winwidget_crm_intake_migration_ci:crm_migration_role_ci_password@127.0.0.1:5432/winwidget_crm_intake_ci?schema=crm_intake&sslmode=disable'
+      CRM_CUSTOMERS_DATABASE_URL: 'postgresql://winwidget_crm_customers_migration_ci:crm_migration_role_ci_password@127.0.0.1:5432/winwidget_crm_customers_ci?schema=crm_customers&sslmode=disable'
+      CRM_SALES_DATABASE_URL: 'postgresql://winwidget_crm_sales_migration_ci:crm_migration_role_ci_password@127.0.0.1:5432/winwidget_crm_sales_ci?schema=crm_sales&sslmode=disable'
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Verify immutable revision
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.9
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 20
+          cache: pnpm
+          cache-dependency-path: apps/${{ matrix.app }}/pnpm-lock.yaml
+      - name: Install ${{ matrix.app }}
+        run: pnpm --dir "apps/${{ matrix.app }}" install --frozen-lockfile
+      - name: Prepare isolated database and migration role
+        env:
+          POSTGRES_CONTAINER_ID: ${{ job.services.postgres.id }}
+          DATABASE_NAME: ${{ matrix.database }}
+          MIGRATION_ROLE: ${{ matrix.migration_role }}
+          OWNED_SCHEMA: ${{ matrix.schema }}
+        run: |
+          [[ "$DATABASE_NAME" =~ ^[a-z0-9_]+$ ]]
+          [[ "$MIGRATION_ROLE" =~ ^[a-z0-9_]+$ ]]
+          [[ "$OWNED_SCHEMA" =~ ^[a-z0-9_]+$ ]]
+          docker exec "$POSTGRES_CONTAINER_ID" psql \
+            -U crm_bootstrap_ci -d postgres -v ON_ERROR_STOP=1 \
+            -c "CREATE ROLE \"$MIGRATION_ROLE\" LOGIN PASSWORD '$CRM_MIGRATION_ROLE_PASSWORD' NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS"
+          docker exec "$POSTGRES_CONTAINER_ID" psql \
+            -U crm_bootstrap_ci -d postgres -v ON_ERROR_STOP=1 \
+            -c "CREATE DATABASE \"$DATABASE_NAME\" OWNER crm_bootstrap_ci"
+          docker exec "$POSTGRES_CONTAINER_ID" psql \
+            -U crm_bootstrap_ci -d "$DATABASE_NAME" -v ON_ERROR_STOP=1 \
+            -c "REVOKE ALL ON DATABASE \"$DATABASE_NAME\" FROM PUBLIC; GRANT CONNECT ON DATABASE \"$DATABASE_NAME\" TO \"$MIGRATION_ROLE\"; REVOKE ALL ON SCHEMA public FROM PUBLIC; CREATE SCHEMA \"$OWNED_SCHEMA\" AUTHORIZATION \"$MIGRATION_ROLE\"; CREATE SCHEMA foreign_service_guard AUTHORIZATION crm_bootstrap_ci; CREATE TABLE foreign_service_guard.sentinel (id INTEGER PRIMARY KEY); REVOKE ALL ON SCHEMA foreign_service_guard FROM PUBLIC; REVOKE ALL ON ALL TABLES IN SCHEMA foreign_service_guard FROM PUBLIC"
+      - name: Generate Prisma client
+        run: pnpm --dir "apps/${{ matrix.app }}" run prisma:generate
+      - name: Apply migrations on PostgreSQL 18
+        run: pnpm --dir "apps/${{ matrix.app }}" run prisma:migrate:deploy
+      - name: Verify migration role and owned schema boundary
+        env:
+          POSTGRES_CONTAINER_ID: ${{ job.services.postgres.id }}
+          DATABASE_NAME: ${{ matrix.database }}
+          MIGRATION_ROLE: ${{ matrix.migration_role }}
+          OWNED_SCHEMA: ${{ matrix.schema }}
+          SERVICE_NAME: ${{ matrix.service_name }}
+        run: |
+          [[ "$DATABASE_NAME" =~ ^[a-z0-9_]+$ ]]
+          [[ "$MIGRATION_ROLE" =~ ^[a-z0-9_]+$ ]]
+          [[ "$OWNED_SCHEMA" =~ ^[a-z0-9_]+$ ]]
+          [[ "$SERVICE_NAME" =~ ^[a-z0-9-]+$ ]]
+          result="$(docker exec -e PGPASSWORD="$CRM_MIGRATION_ROLE_PASSWORD" \
+            "$POSTGRES_CONTAINER_ID" psql -h 127.0.0.1 \
+            -U "$MIGRATION_ROLE" -d "$DATABASE_NAME" -At -v ON_ERROR_STOP=1 \
+            -c "SELECT CASE WHEN current_database() = '$DATABASE_NAME' AND current_user = '$MIGRATION_ROLE' AND (SELECT pg_get_userbyid(datdba) = 'crm_bootstrap_ci' FROM pg_database WHERE datname = current_database()) AND (SELECT pg_get_userbyid(nspowner) = current_user FROM pg_namespace WHERE nspname = '$OWNED_SCHEMA') AND has_database_privilege(current_user, current_database(), 'CONNECT') AND NOT has_database_privilege(current_user, current_database(), 'CREATE') AND has_schema_privilege(current_user, '$OWNED_SCHEMA', 'USAGE') AND has_schema_privilege(current_user, '$OWNED_SCHEMA', 'CREATE') AND NOT has_schema_privilege(current_user, 'foreign_service_guard', 'USAGE') AND NOT has_schema_privilege(current_user, 'foreign_service_guard', 'CREATE') AND NOT has_table_privilege(current_user, 'foreign_service_guard.sentinel', 'SELECT') AND (SELECT count(*) FROM \"$OWNED_SCHEMA\".service_identity WHERE id = 'singleton' AND service_name = '$SERVICE_NAME' AND database_id IS NOT NULL) = 1 AND (SELECT count(*) FROM \"$OWNED_SCHEMA\"._prisma_migrations WHERE finished_at IS NOT NULL AND rolled_back_at IS NULL) > 0 AND NOT EXISTS (SELECT 1 FROM \"$OWNED_SCHEMA\"._prisma_migrations WHERE finished_at IS NULL OR rolled_back_at IS NOT NULL) AND (SELECT NOT rolsuper AND NOT rolcreatedb AND NOT rolcreaterole AND NOT rolinherit AND rolcanlogin AND NOT rolreplication AND NOT rolbypassrls FROM pg_roles WHERE rolname = current_user) THEN 'ok' ELSE 'failed' END")"
+          test "$result" = 'ok'
+          if docker exec -e PGPASSWORD="$CRM_MIGRATION_ROLE_PASSWORD" \
+            "$POSTGRES_CONTAINER_ID" psql -h 127.0.0.1 \
+            -U "$MIGRATION_ROLE" -d "$DATABASE_NAME" -v ON_ERROR_STOP=1 \
+            -c 'SELECT id FROM foreign_service_guard.sentinel' \
+            >/dev/null 2>&1; then
+            echo 'Migration role unexpectedly accessed a foreign schema.' >&2
+            exit 1
+          fi
 
   production-image:
     name: Production image / ${{ matrix.app }}
@@ -389,6 +536,10 @@ jobs:
         app:
           - billing
           - campaigns
+          - crm-access
+          - crm-intake
+          - crm-customers
+          - crm-sales
           - identity
           - notification-delivery
           - operations
@@ -413,6 +564,7 @@ jobs:
   deploy-production:
     name: Deploy production
     needs:
+      - crm-migration-smoke
       - lifecycle-contract
       - operations-control-ledger
       - operations-restore-rehearsal

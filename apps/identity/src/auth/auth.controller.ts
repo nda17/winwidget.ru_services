@@ -32,7 +32,10 @@ import {
 	RestorePasswordDto
 } from './auth.dto';
 import { AuthRateLimitGuard } from './auth-rate-limit.guard';
-import { AuthService } from './auth.service';
+import {
+	AuthService,
+	RefreshRotationInProgressException
+} from './auth.service';
 import { RecaptchaAction, RecaptchaGuard } from './recaptcha.guard';
 import { RefreshTokenService } from './refresh-token.service';
 
@@ -177,7 +180,9 @@ export class AuthController {
 			this.refresh.add(response, refreshToken);
 			return body;
 		} catch (error) {
-			this.refresh.remove(response);
+			if (!(error instanceof RefreshRotationInProgressException)) {
+				this.refresh.remove(response);
+			}
 			throw error;
 		}
 	}

@@ -1,9 +1,10 @@
 # Сервис Identity
 
 Identity владеет пользователями, идентификаторами аутентификации, сессиями,
-проверочными challenge, OAuth, аватарами профиля, привязками Telegram и схемой
-PostgreSQL `identity`. Объекты аватаров остаются в настроенном S3-хранилище;
-сервис не заменяет их файлами, привязанными к хосту.
+personal workspaces и memberships, проверочными challenge, OAuth, аватарами
+профиля, привязками Telegram и схемой PostgreSQL `identity`. Объекты аватаров
+остаются в настроенном S3-хранилище; сервис не заменяет их файлами,
+привязанными к хосту.
 
 ## Роли процессов
 
@@ -23,9 +24,17 @@ PostgreSQL `identity`. Объекты аватаров остаются в на�
 `/telegram-auth/**` и webhook Telegram. JWKS доступен по
 `GET /api/v1/auth/.well-known/jwks.json`.
 
+Refresh token остаётся общим HttpOnly cookie для доверенных поддоменов.
+Параллельная ротация в коротком grace-окне отвечает
+`409 refresh_rotation_in_progress`, не удаляет cookie и должна повторяться
+клиентом как временный конфликт; просроченный replay предыдущего токена отзывает
+сессию.
+
 Закрытые loopback-контракты не публикуются через Gateway:
 
 - `POST /internal/v1/auth/introspect`
+- `POST /internal/v1/crm-access/auth-context` — только валидная bearer-сессия
+  и активные memberships активных workspaces
 - `/internal/v1/widgets/owners/**`
 - `/internal/v1/operations/audit-snapshots` и
   `GET /internal/v1/operations/admin-health`
@@ -33,10 +42,11 @@ PostgreSQL `identity`. Объекты аватаров остаются в на�
 - `POST /internal/v1/billing/lifecycle/complete`
 - `/internal/v1/identity/messaging/**`
 
-Campaigns, Reporting, Widgets, Billing, Platform, Support и Operations имеют
-раздельные `IDENTITY_<CALLER>_TOKEN`; сервис отклоняет отсутствующие, шаблонные,
-повторно используемые или короткие учётные данные. Сам Identity вызывает
-Billing, Widgets и Operations через отдельные токены с областью Identity.
+Campaigns, Reporting, Widgets, Billing, `crm-access`, Platform, Support и
+Operations имеют раздельные `IDENTITY_<CALLER>_TOKEN`; сервис отклоняет
+отсутствующие, шаблонные, повторно используемые или короткие учётные данные.
+Сам Identity вызывает Billing, Widgets и Operations через отдельные токены с
+областью Identity.
 
 ## Внешние провайдеры
 

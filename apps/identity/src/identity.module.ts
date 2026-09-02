@@ -42,6 +42,7 @@ import { TelegramService } from './telegram/telegram.service';
 import { VerificationTransportService } from './transports/verification-transport.service';
 import { UsersController } from './users/users.controller';
 import { UsersService } from './users/users.service';
+import { WorkspaceProvisioningService } from './workspaces/workspace-provisioning.service';
 
 const PROCESS_ROLE = parseIdentityProcessRole(
 	process.env.IDENTITY_PROCESS_ROLE
@@ -82,7 +83,8 @@ const API_PROVIDERS =
 				RefreshTokenService,
 				TelegramService,
 				UsersService,
-				VerificationTransportService
+				VerificationTransportService,
+				WorkspaceProvisioningService
 			]
 		: [];
 

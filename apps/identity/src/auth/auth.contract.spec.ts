@@ -15,7 +15,11 @@ import { PASSWORD_SALT_ROUNDS } from '../common/identity.util';
 import { AuthController } from './auth.controller';
 import { AuthDto, UpdateUserDto } from './auth.dto';
 import { IdentityAuthGuard } from './auth.guard';
-import { AuthService } from './auth.service';
+import {
+	AuthService,
+	REFRESH_ROTATION_GRACE_MS,
+	RefreshRotationInProgressException
+} from './auth.service';
 import { RefreshTokenService } from './refresh-token.service';
 
 const SESSION_ID = '00000000-0000-4000-8000-000000000001';
@@ -29,6 +33,24 @@ function response() {
 		cookie: jest.fn(),
 		clearCookie: jest.fn()
 	} as unknown as Response;
+}
+
+function activeUser() {
+	const now = new Date('2026-09-02T10:00:00.000Z');
+	return {
+		id: 'user-id',
+		name: 'User',
+		password: '',
+		avatarPath: null,
+		status: UserStatus.ACTIVE,
+		personalDataConsentRevokedAt: null,
+		deletedAt: null,
+		rights: [Role.USER],
+		createdAt: now,
+		updatedAt: now,
+		authIdentities: [],
+		telegramNotificationChannel: null
+	};
 }
 
 function service(overrides: Record<string, any> = {}) {
@@ -60,6 +82,10 @@ function service(overrides: Record<string, any> = {}) {
 	};
 	const refreshTokens = new RefreshTokenService();
 	const jwt = { issue: jest.fn(), ...overrides.jwt };
+	const workspaces = {
+		provisionPersonalWorkspace: jest.fn(),
+		...overrides.workspaces
+	};
 	const auth = new AuthService(
 		prisma as any,
 		users as any,
@@ -67,9 +93,18 @@ function service(overrides: Record<string, any> = {}) {
 		refreshTokens,
 		{ emitUserChanged: jest.fn(), emitBillingRequest: jest.fn() } as any,
 		transport as any,
-		{ ensureTrial: jest.fn() } as any
+		{ ensureTrial: jest.fn() } as any,
+		workspaces as any
 	);
-	return { auth, prisma, users, transport, refreshTokens, jwt };
+	return {
+		auth,
+		prisma,
+		users,
+		transport,
+		refreshTokens,
+		jwt,
+		workspaces
+	};
 }
 
 function deferred() {
@@ -181,7 +216,8 @@ async function passwordRaceService() {
 		new RefreshTokenService(),
 		{} as any,
 		{} as any,
-		owners as any
+		owners as any,
+		{} as any
 	);
 	const changePassword = async (
 		passwordHash: string,
@@ -321,6 +357,74 @@ describe('public auth frozen contracts', () => {
 		expect(value.prisma.$transaction).not.toHaveBeenCalled();
 	});
 
+	it.each([
+		{
+			label: 'email',
+			type: VerificationChallengeType.EMAIL,
+			value: 'user@example.com',
+			register: (auth: AuthService) =>
+				auth.registerByEmail({
+					email: 'USER@example.com',
+					code: '123456'
+				})
+		},
+		{
+			label: 'phone',
+			type: VerificationChallengeType.PHONE,
+			value: '+79991234567',
+			register: (auth: AuthService) =>
+				auth.registerByPhone({
+					phone: '+79991234567',
+					password: 'Secure1',
+					code: '123456'
+				})
+		}
+	])(
+		'provisions the personal workspace inside the $label registration transaction',
+		async scenario => {
+			const codeHash = await hash('123456', PASSWORD_SALT_ROUNDS);
+			const transaction = {
+				authIdentity: { findUnique: jest.fn().mockResolvedValue(null) },
+				verificationChallenge: {
+					deleteMany: jest.fn().mockResolvedValue({ count: 1 })
+				},
+				user: { create: jest.fn().mockResolvedValue({ id: 'new-user' }) }
+			};
+			const value = service({
+				prisma: {
+					$transaction: jest.fn(callback => callback(transaction))
+				}
+			});
+			value.prisma.verificationChallenge.findUnique.mockResolvedValue({
+				id: 'challenge',
+				type: scenario.type,
+				purpose: VerificationChallengePurpose.REGISTER,
+				value: scenario.value,
+				passwordHash: 'password-hash',
+				codeHash,
+				attempts: 0,
+				expiresAt: new Date(Date.now() + 60_000),
+				lastSentAt: new Date()
+			});
+			jest
+				.spyOn(value.auth, 'startSession')
+				.mockResolvedValue({ accessToken: 'access' } as never);
+
+			await expect(scenario.register(value.auth)).resolves.toEqual({
+				accessToken: 'access'
+			});
+			expect(
+				value.workspaces.provisionPersonalWorkspace
+			).toHaveBeenCalledWith(transaction, 'new-user');
+			expect(
+				transaction.user.create.mock.invocationCallOrder[0]
+			).toBeLessThan(
+				value.workspaces.provisionPersonalWorkspace.mock
+					.invocationCallOrder[0]
+			);
+		}
+	);
+
 	it('preserves the empty restore request 404 contract', async () => {
 		const value = service();
 		await expect(value.auth.restorePassword({})).rejects.toEqual(
@@ -432,6 +536,37 @@ describe('refresh cookie fail-closed contract', () => {
 		expect(logoutResponse.cookie).toHaveBeenCalledTimes(1);
 	});
 
+	it('keeps the shared cookie intact for an in-progress concurrent rotation', async () => {
+		const refresh = new RefreshTokenService();
+		const auth = {
+			refresh: jest
+				.fn()
+				.mockRejectedValue(new RefreshRotationInProgressException())
+		};
+		const controller = new AuthController(
+			auth as any,
+			{} as any,
+			refresh,
+			{} as any,
+			{} as any
+		);
+		const target = response();
+
+		await expect(
+			controller.refreshSession(
+				request({ refreshToken: 'old-token' }),
+				target
+			)
+		).rejects.toMatchObject({
+			status: 409,
+			response: {
+				code: 'refresh_rotation_in_progress'
+			}
+		});
+		expect(target.cookie).not.toHaveBeenCalled();
+		expect(target.clearCookie).not.toHaveBeenCalled();
+	});
+
 	it('clears the canonical cookie when the current session is revoked', async () => {
 		const refresh = new RefreshTokenService();
 		const auth = {
@@ -456,6 +591,141 @@ describe('refresh cookie fail-closed contract', () => {
 		const all = response();
 		await expect(controller.revokeAll('user', all)).resolves.toBe(true);
 		expect(all.cookie).toHaveBeenCalledTimes(1);
+	});
+});
+
+describe('refresh rotation concurrency contract', () => {
+	it('keeps the previous token hash when a refresh rotation wins its CAS', async () => {
+		const value = service();
+		const token = value.refreshTokens.create(SESSION_ID);
+		const currentHash = await hash(
+			value.refreshTokens.hashInput(token),
+			PASSWORD_SALT_ROUNDS
+		);
+		value.prisma.userSession.findUnique.mockResolvedValue({
+			id: SESSION_ID,
+			refreshTokenHash: currentHash,
+			previousRefreshTokenHash: null,
+			refreshRotatedAt: null,
+			revokedAt: null,
+			expiresAt: new Date(Date.now() + 60_000),
+			user: activeUser()
+		});
+		value.prisma.userSession.updateMany.mockResolvedValue({ count: 1 });
+		value.jwt.issue.mockReturnValue('access-token');
+
+		await expect(value.auth.refresh(token)).resolves.toEqual(
+			expect.objectContaining({
+				accessToken: 'access-token',
+				refreshToken: expect.any(String)
+			})
+		);
+		expect(value.prisma.userSession.updateMany).toHaveBeenCalledWith({
+			where: {
+				id: SESSION_ID,
+				refreshTokenHash: currentHash,
+				revokedAt: null,
+				expiresAt: { gt: expect.any(Date) }
+			},
+			data: {
+				refreshTokenHash: expect.any(String),
+				previousRefreshTokenHash: currentHash,
+				refreshRotatedAt: expect.any(Date),
+				lastUsedAt: expect.any(Date)
+			}
+		});
+	});
+
+	it('returns 409 without revocation when a concurrent refresh loses its CAS', async () => {
+		const value = service();
+		const token = value.refreshTokens.create(SESSION_ID);
+		const tokenHash = await hash(
+			value.refreshTokens.hashInput(token),
+			PASSWORD_SALT_ROUNDS
+		);
+		value.prisma.userSession.findUnique
+			.mockResolvedValueOnce({
+				id: SESSION_ID,
+				refreshTokenHash: tokenHash,
+				previousRefreshTokenHash: null,
+				refreshRotatedAt: null,
+				revokedAt: null,
+				expiresAt: new Date(Date.now() + 60_000),
+				user: activeUser()
+			})
+			.mockResolvedValueOnce({
+				previousRefreshTokenHash: tokenHash,
+				refreshRotatedAt: new Date(),
+				revokedAt: null,
+				expiresAt: new Date(Date.now() + 60_000)
+			});
+		value.prisma.userSession.updateMany.mockResolvedValue({ count: 0 });
+
+		await expect(value.auth.refresh(token)).rejects.toBeInstanceOf(
+			RefreshRotationInProgressException
+		);
+		expect(value.prisma.userSession.updateMany).toHaveBeenCalledTimes(1);
+		expect(value.jwt.issue).not.toHaveBeenCalled();
+	});
+
+	it('returns 409 for the immediately previous token only inside the grace window', async () => {
+		const value = service();
+		const token = value.refreshTokens.create(SESSION_ID);
+		const previousHash = await hash(
+			value.refreshTokens.hashInput(token),
+			PASSWORD_SALT_ROUNDS
+		);
+		const currentToken = value.refreshTokens.create(SESSION_ID);
+		value.prisma.userSession.findUnique.mockResolvedValue({
+			id: SESSION_ID,
+			refreshTokenHash: await hash(
+				value.refreshTokens.hashInput(currentToken),
+				PASSWORD_SALT_ROUNDS
+			),
+			previousRefreshTokenHash: previousHash,
+			refreshRotatedAt: new Date(
+				Date.now() - Math.floor(REFRESH_ROTATION_GRACE_MS / 2)
+			),
+			revokedAt: null,
+			expiresAt: new Date(Date.now() + 60_000)
+		});
+
+		await expect(value.auth.refresh(token)).rejects.toBeInstanceOf(
+			RefreshRotationInProgressException
+		);
+		expect(value.prisma.userSession.updateMany).not.toHaveBeenCalled();
+	});
+
+	it('revokes and fails closed when the previous token is replayed after grace', async () => {
+		const value = service();
+		const token = value.refreshTokens.create(SESSION_ID);
+		const previousHash = await hash(
+			value.refreshTokens.hashInput(token),
+			PASSWORD_SALT_ROUNDS
+		);
+		const currentToken = value.refreshTokens.create(SESSION_ID);
+		value.prisma.userSession.findUnique.mockResolvedValue({
+			id: SESSION_ID,
+			refreshTokenHash: await hash(
+				value.refreshTokens.hashInput(currentToken),
+				PASSWORD_SALT_ROUNDS
+			),
+			previousRefreshTokenHash: previousHash,
+			refreshRotatedAt: new Date(
+				Date.now() - REFRESH_ROTATION_GRACE_MS - 1
+			),
+			revokedAt: null,
+			expiresAt: new Date(Date.now() + 60_000)
+		});
+		value.prisma.userSession.updateMany.mockResolvedValue({ count: 1 });
+
+		await expect(value.auth.refresh(token)).rejects.toEqual(
+			new UnauthorizedException('Invalid refresh token')
+		);
+		expect(value.prisma.userSession.updateMany).toHaveBeenCalledWith({
+			where: { id: SESSION_ID, revokedAt: null },
+			data: { revokedAt: expect.any(Date) }
+		});
 	});
 });
 

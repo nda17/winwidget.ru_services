@@ -9,7 +9,9 @@ import {
 	AuthIdentityType,
 	Prisma,
 	Role,
-	UserStatus
+	UserStatus,
+	WorkspaceMemberStatus,
+	WorkspaceStatus
 } from '@prisma/identity-client';
 import type { Request, Response } from 'express';
 import { createHash, randomUUID } from 'node:crypto';
@@ -88,6 +90,33 @@ export class IdentityInternalService {
 			subject: session.user.id,
 			sessionId: session.id,
 			roles: [...new Set(session.user.rights)].sort()
+		};
+	}
+
+	async crmAccessAuthContext(authorization?: string) {
+		const identity = await this.introspect(authorization);
+		const memberships = await this.prisma.workspaceMember.findMany({
+			where: {
+				userId: identity.subject,
+				status: WorkspaceMemberStatus.ACTIVE,
+				workspace: { status: WorkspaceStatus.ACTIVE }
+			},
+			orderBy: [{ workspaceId: 'asc' }, { id: 'asc' }],
+			select: {
+				id: true,
+				workspaceId: true,
+				role: true
+			}
+		});
+		return {
+			schemaVersion: 1 as const,
+			subject: identity.subject,
+			sessionId: identity.sessionId,
+			memberships: memberships.map(membership => ({
+				membershipId: membership.id,
+				workspaceId: membership.workspaceId,
+				role: membership.role
+			}))
 		};
 	}
 

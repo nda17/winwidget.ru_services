@@ -29,6 +29,7 @@ import { IdentityEventsService } from '../events/identity-events.service';
 import { IdentityPrismaService } from '../prisma/identity-prisma.service';
 import { AuthSettingsService } from '../auth/auth-settings.service';
 import { AuthService } from '../auth/auth.service';
+import { WorkspaceProvisioningService } from '../workspaces/workspace-provisioning.service';
 
 type TelegramUser = {
 	id: number;
@@ -87,7 +88,8 @@ export class TelegramService {
 		private readonly prisma: IdentityPrismaService,
 		private readonly events: IdentityEventsService,
 		private readonly settings: AuthSettingsService,
-		private readonly auth: AuthService
+		private readonly auth: AuthService,
+		private readonly workspaces: WorkspaceProvisioningService
 	) {}
 
 	async startLogin() {
@@ -450,6 +452,7 @@ export class TelegramService {
 			},
 			include: USER_INCLUDE
 		});
+		await this.workspaces.provisionPersonalWorkspace(transaction, user.id);
 		const normalizedReferrer = referrerId?.trim();
 		if (
 			normalizedReferrer &&

@@ -15,6 +15,7 @@ export const IDENTITY_INTERNAL_SERVICES = [
 	'reporting',
 	'widgets',
 	'billing',
+	'crm-access',
 	'platform',
 	'support',
 	'operations'
@@ -31,6 +32,7 @@ const PLACEHOLDERS = new Set([
 	'identity_reporting_token',
 	'identity_widgets_token',
 	'identity_billing_token',
+	'identity_crm_access_token',
 	'identity_platform_token',
 	'identity_support_token',
 	'identity_operations_token',
@@ -39,6 +41,7 @@ const PLACEHOLDERS = new Set([
 	'ci_identity_reporting_token_at_least_32_chars',
 	'ci_identity_widgets_token_at_least_32_chars',
 	'ci_identity_billing_token_at_least_32_chars',
+	'ci_identity_crm_access_token_at_least_32_chars',
 	'ci_identity_platform_token_at_least_32_chars',
 	'ci_identity_support_token_at_least_32_chars',
 	'ci_identity_operations_token_at_least_32_chars'
@@ -56,7 +59,7 @@ export class IdentityInternalGuard implements CanActivate {
 		private readonly reflector: Reflector
 	) {
 		for (const service of IDENTITY_INTERNAL_SERVICES) {
-			const name = `IDENTITY_${service.toUpperCase()}_TOKEN`;
+			const name = `IDENTITY_${service.replace(/-/g, '_').toUpperCase()}_TOKEN`;
 			const value = config.get<string>(name)?.trim() || '';
 			if (value.length < 32 || PLACEHOLDERS.has(value)) {
 				throw new Error(

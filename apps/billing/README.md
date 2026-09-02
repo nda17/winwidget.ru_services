@@ -29,6 +29,10 @@ Webhook YooKassa обрабатывается по `POST /api/v1/payments/webhoo
   `BILLING_IDENTITY_TOKEN`.
 - Campaigns вызывает `/internal/v1/billing/campaigns/active-subscriber-ids` с
   `BILLING_CAMPAIGNS_TOKEN`.
+- `crm-access` читает WinCRM entitlement и идемпотентно запускает отдельный
+  пятидневный Trial через `/internal/v1/crm-access/billing/entitlements/**` с
+  `BILLING_CRM_ACCESS_TOKEN`. Посещение CRM, вход и подключение источника этот
+  Trial не создают; повторный запуск для workspace запрещён.
 - Operations вызывает `/internal/v1/operations/billing/admin-alerts` и
   `/internal/v1/operations/billing/messaging/**` с
   `BILLING_OPERATIONS_TOKEN`; и вызывающая сторона, и сокет должны быть

@@ -11,10 +11,12 @@ runtime, его маршруты, очереди, пользователей и�
 
 - Backend расположен в `winwidget.ru_services` и состоит только из автономных
   приложений: Gateway, Billing, Campaigns, Identity, Notification Delivery,
-  Operations, Platform, Reporting, Support и Widgets.
-- Каждый доменный сервис владеет своей PostgreSQL 18 database, migrations,
-  runtime/migration/backup roles и transactional Outbox. Запись в чужую БД и
-  общий Prisma Client запрещены.
+  Operations, Platform, Reporting, Support, Widgets, CRM Access, CRM Intake,
+  CRM Customers и CRM Sales.
+- Каждый доменный сервис владеет своей PostgreSQL 18 database, migrations и
+  runtime/migration/backup roles. Если сервис публикует событие, зависящее от
+  локальной транзакции, он также владеет transactional Outbox. Запись в чужую
+  БД и общий Prisma Client запрещены.
 - Критичные изменения бизнес-состояния выполняются синхронно в PostgreSQL.
   RabbitMQ используется для асинхронных побочных эффектов.
 - RabbitMQ работает по модели at-least-once. Consumer идемпотентен по паре
@@ -66,6 +68,45 @@ Read-only аудит production API и личного кабинета ЮKassa �
 
 Не объявлять платёжный контур production-ready до получения этих внешних
 доказательств. Codex не выполняет реальный платёж без участия пользователя.
+
+## WinCRM
+
+### P0 — подготовить отдельный production rollout CRM foundation
+
+Локальная foundation WinCRM и четыре независимых `crm-*` приложения не должны
+попасть в production обычным рестартом существующего контура. До merge/deploy
+ветки CRM обязательно:
+
+- окончательно согласовать коммерческие состояния после пятидневного Trial
+  (`GRACE`, `READ_ONLY`, срок экспорта и блокировка), тарифы и active-seat
+  semantics; не выводить из текущих тарифов Widgets цены WinCRM;
+- синхронно добавить отдельные production tokens Identity/Billing для
+  `crm-access`, не ослабляя обязательную проверку токенов в runtime;
+- добавить точные Gateway routes `/api/v1/crm/access` -> `crm-access` и
+  `/api/v1/crm/templates` -> `crm-sales`, origin `https://crm.winwidget.ru` и
+  обновить route-manifest только вместе с полной двусторонней синхронизацией
+  production env;
+- создать для каждого `crm-*` собственные runtime/migration/backup роли и БД,
+  Compose services, migration jobs, health/smoke, backup/restore и независимый
+  rollback; нельзя объединять CRM-схемы или давать сервисам доступ к чужим
+  таблицам;
+- проверить PostgreSQL 18 migrations, Identity backfill существующих
+  пользователей, вход через основной сайт, явную идемпотентную активацию Trial
+  и fail-closed доступ при недоступности Identity/Billing;
+- исключить окно между Identity backfill и переключением нового runtime:
+  остановить создание пользователей старой ревизией через drain/write-fence
+  либо выполнить доказанную идемпотентную reconciliation после её остановки;
+  rollout блокируется, пока любой пользователь, созданный в этом окне, может
+  остаться без личного workspace и OWNER membership;
+- до публикации каталога закрепить immutable fingerprint каждой пары
+  `templateKey@version`; после публикации не переписывать v1, а выпускать новую
+  версию с точной установкой выбранной пары;
+- сохранить Widgets отдельным продуктом: отсутствие CRM не влияет на заявки,
+  а нативный managed connector разрешается только для оплаченных `EASY`/`HARD`
+  после отдельного согласования обратной совместимости и expiry semantics.
+
+До выполнения этих условий текущая CRM-ветка является локальной foundation,
+а не разрешением на production rollout или изменение VPS.
 
 ## RabbitMQ и фоновые задачи
 
