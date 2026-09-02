@@ -122,7 +122,7 @@
 			]
 		},
 		"identity": {
-			"manifestSha256": "c434d76db3dc9f216c62771a75c85ab499b26ef03e454de30385e56385cf4d26",
+			"manifestSha256": "f70ee35d30c9bdfe6fb230ef154f824bf02affbe05ccaaf45dcfbac845452943",
 			"migrations": [
 				{
 					"name": "20260814000000_init_identity",
@@ -139,6 +139,10 @@
 				{
 					"name": "20260830020000_harden_default_routine_acl",
 					"checksum": "be8118f8e5d7bdf75388779695641eb289640bc9d5bcaf572fbea3111553b73f"
+				},
+				{
+					"name": "20260902080000_add_workspaces_and_refresh_rotation",
+					"checksum": "e40b381bacdc09658edb72fb8de63348ccef87aec67653c2d4de735f7afd57d6"
 				}
 			]
 		},

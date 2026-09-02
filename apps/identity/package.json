@@ -69,6 +69,7 @@
 			"@nestjs/platform-express>multer": "2.2.0",
 			"@react-email/code-block>prismjs": "1.30.0",
 			"body-parser": "2.3.0",
+			"qs": "6.16.0",
 			"editorconfig>minimatch": "9.0.9"
 		}
 	},
