@@ -599,6 +599,110 @@ jobs:
       - name: Test Billing CRM provenance migration upgrade
         run: pnpm --dir apps/billing run test:migration:crm-provenance
 
+  billing-crm-policy-integration:
+    name: Billing CRM policy PostgreSQL 18
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:18-bookworm@sha256:1961f96e6029a02c3812d7cb329a3b03a3ac2bb067058dec17b0f5596aca9296
+        env:
+          POSTGRES_USER: billing_crm_policy_bootstrap_ci
+          POSTGRES_PASSWORD: billing_crm_policy_bootstrap_ci
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U billing_crm_policy_bootstrap_ci -d postgres"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 30
+    env:
+      BILLING_CRM_POLICY_TEST_ALLOW_MUTATION: 'true'
+      BILLING_CRM_POLICY_TEST_DATABASE_URL: 'postgresql://winwidget_billing_policy_runtime_ci:billing_policy_runtime_ci_password@127.0.0.1:5432/winwidget_billing_crm_policy_test?schema=billing&sslmode=disable'
+      BILLING_CRM_POLICY_TEST_RUNTIME_ROLE: winwidget_billing_policy_runtime_ci
+      BILLING_DATABASE_URL: 'postgresql://winwidget_billing_policy_migration_ci:billing_policy_migration_ci_password@127.0.0.1:5432/winwidget_billing_crm_policy_test?schema=billing&sslmode=disable'
+      BILLING_POLICY_MIGRATION_ROLE_PASSWORD: billing_policy_migration_ci_password
+      BILLING_POLICY_RUNTIME_ROLE_PASSWORD: billing_policy_runtime_ci_password
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Verify immutable revision
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.9
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 20
+          cache: pnpm
+          cache-dependency-path: apps/billing/pnpm-lock.yaml
+      - name: Install Billing
+        run: pnpm --dir apps/billing install --frozen-lockfile
+      - name: Prepare isolated Billing policy database and roles
+        env:
+          POSTGRES_CONTAINER_ID: ${{ job.services.postgres.id }}
+        run: |
+          docker exec "$POSTGRES_CONTAINER_ID" psql \
+            -U billing_crm_policy_bootstrap_ci -d postgres -v ON_ERROR_STOP=1 \
+            -c "CREATE ROLE winwidget_billing_policy_migration_ci LOGIN PASSWORD '$BILLING_POLICY_MIGRATION_ROLE_PASSWORD' NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS"
+          docker exec "$POSTGRES_CONTAINER_ID" psql \
+            -U billing_crm_policy_bootstrap_ci -d postgres -v ON_ERROR_STOP=1 \
+            -c "CREATE ROLE winwidget_billing_policy_runtime_ci LOGIN PASSWORD '$BILLING_POLICY_RUNTIME_ROLE_PASSWORD' NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS"
+          docker exec "$POSTGRES_CONTAINER_ID" psql \
+            -U billing_crm_policy_bootstrap_ci -d postgres -v ON_ERROR_STOP=1 \
+            -c 'CREATE DATABASE winwidget_billing_crm_policy_test OWNER billing_crm_policy_bootstrap_ci'
+          docker exec "$POSTGRES_CONTAINER_ID" psql \
+            -U billing_crm_policy_bootstrap_ci -d winwidget_billing_crm_policy_test \
+            -v ON_ERROR_STOP=1 \
+            -c "REVOKE ALL ON DATABASE winwidget_billing_crm_policy_test FROM PUBLIC; GRANT CONNECT ON DATABASE winwidget_billing_crm_policy_test TO winwidget_billing_policy_migration_ci, winwidget_billing_policy_runtime_ci; REVOKE ALL ON SCHEMA public FROM PUBLIC; CREATE SCHEMA billing AUTHORIZATION winwidget_billing_policy_migration_ci; CREATE SCHEMA foreign_service_guard AUTHORIZATION billing_crm_policy_bootstrap_ci; CREATE TABLE foreign_service_guard.sentinel (id INTEGER PRIMARY KEY); REVOKE ALL ON SCHEMA foreign_service_guard FROM PUBLIC; REVOKE ALL ON ALL TABLES IN SCHEMA foreign_service_guard FROM PUBLIC"
+      - name: Generate Billing Prisma client
+        run: pnpm --dir apps/billing run prisma:generate
+      - name: Apply Billing migrations as migration role
+        run: pnpm --dir apps/billing run prisma:migrate:deploy
+      - name: Verify immutable policy triggers as schema owner
+        env:
+          POSTGRES_CONTAINER_ID: ${{ job.services.postgres.id }}
+        run: |
+          docker exec -i "$POSTGRES_CONTAINER_ID" psql \
+            -U winwidget_billing_policy_migration_ci -d winwidget_billing_crm_policy_test \
+            -v ON_ERROR_STOP=1 <<'SQL'
+          DO $assert$
+          DECLARE statement text;
+          BEGIN
+            FOREACH statement IN ARRAY ARRAY[
+              'UPDATE billing.crm_commercial_policies SET included_seats = 3 WHERE version = 1',
+              'DELETE FROM billing.crm_commercial_policies WHERE version = 1',
+              'TRUNCATE billing.crm_commercial_policies CASCADE'
+            ] LOOP
+              BEGIN
+                EXECUTE statement;
+                RAISE EXCEPTION 'policy mutation unexpectedly accepted' USING ERRCODE = 'XX000';
+              EXCEPTION WHEN SQLSTATE 'P0001' THEN
+                IF SQLERRM <> 'WinCRM commercial policy versions are immutable' THEN
+                  RAISE;
+                END IF;
+              END;
+            END LOOP;
+          END
+          $assert$;
+          SQL
+      - name: Grant exact Billing policy runtime privileges
+        env:
+          POSTGRES_CONTAINER_ID: ${{ job.services.postgres.id }}
+        run: |
+          docker exec "$POSTGRES_CONTAINER_ID" psql \
+            -U billing_crm_policy_bootstrap_ci -d winwidget_billing_crm_policy_test \
+            -v ON_ERROR_STOP=1 \
+            -c "GRANT USAGE ON SCHEMA billing TO winwidget_billing_policy_runtime_ci; GRANT SELECT ON billing.service_identity TO winwidget_billing_policy_runtime_ci; GRANT SELECT, INSERT ON billing.crm_commercial_policies, billing.command_receipts TO winwidget_billing_policy_runtime_ci; GRANT SELECT, INSERT, UPDATE ON billing.source_sequences TO winwidget_billing_policy_runtime_ci; GRANT SELECT, INSERT, UPDATE, DELETE ON billing.crm_entitlements, billing.outbox_events TO winwidget_billing_policy_runtime_ci; REVOKE ALL ON billing._prisma_migrations FROM winwidget_billing_policy_runtime_ci"
+      - name: Build Billing
+        run: pnpm --dir apps/billing run build
+      - name: Test Billing CRM policy runtime and concurrency
+        run: pnpm --dir apps/billing run test:integration:crm-policy
+
   crm-sales-integration:
     name: CRM Sales PostgreSQL 18 atomic installation
     runs-on: ubuntu-latest
@@ -714,6 +818,7 @@ jobs:
   deploy-production:
     name: Deploy production
     needs:
+      - billing-crm-policy-integration
       - billing-crm-provenance-migration
       - crm-migration-smoke
       - crm-sales-integration

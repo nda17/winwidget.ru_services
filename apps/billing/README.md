@@ -64,6 +64,64 @@ snapshot, а migration очищает ранее сохранённые snapshot
 
 ## Настройка и развёртывание
 
+### Коммерческие настройки WinCRM
+
+`GET /api/v1/billing-settings/admin/crm` доступен `ADMIN` и `DEV`.
+`PUT` по тому же адресу доступен только `DEV` после Identity introspection.
+Команда содержит `schemaVersion: 1`, UUIDv4 `commandId`, совпадающий с
+`Idempotency-Key`, `expectedVersion` и полный набор четырёх цен и двух
+лимитов. Цены передаются целыми копейками RUB в диапазоне 1–100000000:
+`monthlyPriceMinor`, `yearlyPriceMinor`, `additionalSeatMonthlyPriceMinor`,
+`additionalSeatYearlyPriceMinor`. `includedSeats` включает владельца;
+`includedSeats` и отдельный `trialSeatLimit` допускают 2–10000 мест.
+
+Migration создаёт временные значения: 990 ₽/месяц, 9900 ₽/год,
+290 ₽/месяц и 2900 ₽/год за дополнительное место, два включённых места,
+пять мест в Trial. Trial остаётся пятидневным, затем действуют три дня
+`GRACE`, после которых доступ становится `READ_ONLY`. Изменение цен пока
+не создаёт checkout или списание и не затрагивает тарифы Widgets.
+
+Каждое сохранение добавляет immutable-версию `crm_commercial_policies`,
+receipt команды и событие Журнала в одной SERIALIZABLE-транзакции.
+Receipt привязан к payload и actor; повтор возвращает первоначальный
+результат. `expectedVersion` защищает от потери параллельных изменений;
+409 требует повторного чтения и явной проверки формы. БД запрещает
+UPDATE/DELETE/TRUNCATE версий. Аудит использует существующий
+`SITE_SETTINGS_UPDATE`, `entity.type=crm_commercial_policy` и безопасные
+снимки before/after через Billing Outbox.
+
+Новые Trial сохраняют `policyVersion`, `seatLimit` и `graceUntil` при
+активации. Новые цены и лимиты не переписывают начатый Trial. Существующие
+entitlements получают nullable поля без изменения дат/лимитов и сохраняют
+прежнее истечение `EXPIRED`. Internal entitlement DTO добавляет обязательные
+nullable `policyVersion` и `graceUntil`; Billing и `crm-access` обновляются
+согласованно. Readiness проверяет новые колонки и наличие policy seed.
+
+`pnpm run test:integration:crm-policy` выполняет реальные PostgreSQL 18
+проверки immutable-версий, runtime-роли, CAS, конкурентного replay, атомарного
+отката при ошибке аудита и сохранения Trial snapshot. Перед запуском нужны
+`pnpm run prisma:generate`, `pnpm run build` и чистая БД со всеми migrations.
+Скрипт требует `BILLING_CRM_POLICY_TEST_ALLOW_MUTATION=true`, отдельные
+`BILLING_CRM_POLICY_TEST_DATABASE_URL` и
+`BILLING_CRM_POLICY_TEST_RUNTIME_ROLE`; допускает только loopback БД с именем
+`winwidget_billing_crm_policy_test` или её суффиксом `_testname`. Runtime роль
+не должна владеть схемой. Проверка оставляет данные в выделенной тестовой
+БД; её контейнер и volume удаляются общим локальным rehearsal cleanup.
+
+Для этого изолированного теста migration-role владеет только схемой
+`billing`. Runtime-role: `LOGIN NOINHERIT NOSUPERUSER NOCREATEDB
+NOCREATEROLE NOREPLICATION NOBYPASSRLS`, без CREATE на БД. Grant allowlist:
+`USAGE` на `billing`; `SELECT` на `service_identity`;
+`SELECT, INSERT` на `crm_commercial_policies` и `command_receipts`;
+`SELECT, INSERT, UPDATE` на `source_sequences`;
+`SELECT, INSERT, UPDATE, DELETE` на `crm_entitlements` и `outbox_events`.
+`source_sequences` — таблица, дополнительные PostgreSQL sequences этому
+сценарию не нужны. Sentinel `foreign_service_guard.sentinel` принадлежит
+другой роли; runtime не получает USAGE/SELECT. Скрипт проверяет отказ
+доступа к sentinel. Production ACL этим тестом не изменяются.
+
+### Окружение и миграции
+
 Скопируйте `.env.example` в `.env.production` внутри каталога Billing на VPS.
 `.env.production` игнорируется Git. Используйте отдельные ограниченные учётные
 данные для базы данных, RabbitMQ и внутренних вызовов; никогда не используйте

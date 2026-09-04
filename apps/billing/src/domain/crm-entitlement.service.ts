@@ -16,12 +16,12 @@ import {
 	billingCommandRequestHash,
 	lockBillingCommand
 } from './billing-command-idempotency';
+import { requireCrmCommercialPolicy } from './crm-commercial-policy.service';
 
 const CRM_PRODUCT_CODE = 'WINCRM';
 const CRM_TRIAL_PLAN_CODE = 'TRIAL';
 const CRM_TRIAL_PROVISIONING_COMMAND_TYPE = 'ACTIVATE_WINCRM_TRIAL';
-const CRM_TRIAL_DAYS = 5;
-const CRM_TRIAL_DURATION_MS = CRM_TRIAL_DAYS * 24 * 60 * 60 * 1000;
+const DAY_MS = 24 * 60 * 60 * 1000;
 
 type EffectiveCrmEntitlementStatus =
 	| CrmEntitlementStatus
@@ -36,6 +36,8 @@ export interface CrmEntitlementResponse {
 		workspaceId: string;
 		planCode: string;
 		seatLimit: number | null;
+		policyVersion: number | null;
+		graceUntil: string | null;
 		trialStartedAt: string | null;
 		effectiveFrom: string;
 		effectiveUntil: string;
@@ -124,6 +126,7 @@ export class CrmEntitlementService {
 								activated: false
 							};
 						} else {
+							const policy = await requireCrmCommercialPolicy(transaction);
 							const sourceSequence = await this.nextSequence(transaction);
 							const entitlement = await transaction.crmEntitlement.create({
 								data: {
@@ -131,10 +134,16 @@ export class CrmEntitlementService {
 									productCode: CRM_PRODUCT_CODE,
 									planCode: CRM_TRIAL_PLAN_CODE,
 									status: CrmEntitlementStatus.ACTIVE,
+									seatLimit: policy.trialSeatLimit,
+									policyVersion: policy.version,
 									trialStartedAt: now,
 									effectiveFrom: now,
 									effectiveUntil: new Date(
-										now.getTime() + CRM_TRIAL_DURATION_MS
+										now.getTime() + policy.trialDays * DAY_MS
+									),
+									graceUntil: new Date(
+										now.getTime() +
+											(policy.trialDays + policy.graceDays) * DAY_MS
 									),
 									provisioningCommandId: dto.commandId,
 									provisioningCommandType: commandType,
@@ -190,7 +199,11 @@ export class CrmEntitlementService {
 		const status =
 			entitlement.status === CrmEntitlementStatus.ACTIVE &&
 			entitlement.effectiveUntil <= now
-				? CrmEntitlementStatus.EXPIRED
+				? entitlement.graceUntil
+					? now < entitlement.graceUntil
+						? CrmEntitlementStatus.GRACE
+						: CrmEntitlementStatus.READ_ONLY
+					: CrmEntitlementStatus.EXPIRED
 				: entitlement.status;
 		return {
 			schemaVersion: 1 as const,
@@ -201,6 +214,8 @@ export class CrmEntitlementService {
 				workspaceId: entitlement.workspaceId,
 				planCode: entitlement.planCode,
 				seatLimit: entitlement.seatLimit,
+				policyVersion: entitlement.policyVersion,
+				graceUntil: entitlement.graceUntil?.toISOString() || null,
 				trialStartedAt: entitlement.trialStartedAt?.toISOString() || null,
 				effectiveFrom: entitlement.effectiveFrom.toISOString(),
 				effectiveUntil: entitlement.effectiveUntil.toISOString(),

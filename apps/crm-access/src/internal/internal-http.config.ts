@@ -4,8 +4,12 @@ const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '[::1]', '::1']);
 export function parseInternalBaseUrl(
 	name: string,
 	value: string | undefined,
-	fallback: string
+	fallback: string,
+	mode = process.env.NODE_ENV
 ): string {
+	if (mode === 'production' && !value?.trim()) {
+		throw new Error(`${name} must be explicitly configured in production`);
+	}
 	let url: URL;
 	try {
 		url = new URL(value?.trim() || fallback);
@@ -13,15 +17,20 @@ export function parseInternalBaseUrl(
 		throw new Error(`${name} must be a valid URL`);
 	}
 	if (
-		url.protocol !== 'http:' ||
-		!LOOPBACK_HOSTS.has(url.hostname.toLowerCase()) ||
+		(url.protocol !== 'https:' &&
+			!(
+				url.protocol === 'http:' &&
+				LOOPBACK_HOSTS.has(url.hostname.toLowerCase())
+			)) ||
 		url.username ||
 		url.password ||
 		url.pathname !== '/' ||
 		url.search ||
 		url.hash
 	) {
-		throw new Error(`${name} must be an exact loopback HTTP origin`);
+		throw new Error(
+			`${name} must be an exact HTTPS origin or loopback HTTP origin`
+		);
 	}
 	return url.toString().replace(/\/$/, '');
 }

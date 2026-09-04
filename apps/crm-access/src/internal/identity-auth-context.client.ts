@@ -74,6 +74,7 @@ export class IdentityAuthContextClient {
 				`${this.baseUrl}/internal/v1/crm-access/auth-context`,
 				{
 					method: 'POST',
+					redirect: 'error',
 					headers: {
 						authorization,
 						'x-winwidget-service': 'crm-access',

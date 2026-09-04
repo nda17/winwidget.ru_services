@@ -43,6 +43,34 @@ model CrmWorkspaceAccess {
   @@schema("crm_access")
 }
 
+model CrmWorkspaceMember {
+  id           String        @id @default(uuid()) @db.Uuid
+  workspaceId  String        @map("workspace_id") @db.Uuid
+  subject      String        @db.VarChar(256)
+  membershipId String        @map("membership_id") @db.Uuid
+  role         CrmMemberRole
+  teamIds      String[]      @default([]) @map("team_ids") @db.Uuid
+  disabledAt   DateTime?     @map("disabled_at")
+  version      Int           @default(1)
+  createdAt    DateTime      @default(now()) @map("created_at")
+  updatedAt    DateTime      @updatedAt @map("updated_at")
+
+  @@unique([workspaceId, subject])
+  @@unique([workspaceId, membershipId])
+  @@index([workspaceId, disabledAt])
+  @@map("crm_workspace_members")
+  @@schema("crm_access")
+}
+
+enum CrmMemberRole {
+  CRM_ADMIN
+  TEAM_LEAD
+  MANAGER
+  ANALYST
+
+  @@schema("crm_access")
+}
+
 enum CrmAccessLifecycle {
   ONBOARDING
   ACTIVE

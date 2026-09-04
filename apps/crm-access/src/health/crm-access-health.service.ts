@@ -42,6 +42,16 @@ export class CrmAccessHealthService {
 					onboardingCompletedAt: true
 				}
 			});
+			await this.prisma.crmWorkspaceMember.findFirst({
+				select: {
+					workspaceId: true,
+					membershipId: true,
+					role: true,
+					teamIds: true,
+					disabledAt: true,
+					version: true
+				}
+			});
 			return {
 				...this.status('ready'),
 				database: {

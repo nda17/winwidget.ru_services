@@ -175,6 +175,7 @@ export class CrmSalesPipelineClient {
 		try {
 			return await fetch(`${this.baseUrl}${path}`, {
 				...init,
+				redirect: 'error',
 				headers: {
 					...init.headers,
 					accept: 'application/json',

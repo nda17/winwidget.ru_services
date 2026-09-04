@@ -19,6 +19,7 @@ describe('CrmAccessHealthService', () => {
 
 	it('requires its own database and exact service identity for readiness', async () => {
 		const health = new CrmAccessHealthService({
+			crmWorkspaceMember: { findFirst: jest.fn().mockResolvedValue(null) },
 			$queryRaw: jest.fn().mockResolvedValue([{ '?column?': 1 }]),
 			serviceIdentity: {
 				findUnique: jest.fn().mockResolvedValue(identity)

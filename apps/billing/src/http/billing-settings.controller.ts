@@ -1,9 +1,12 @@
 import {
+	BadRequestException,
 	Body,
 	Controller,
 	Get,
+	Headers,
 	HttpCode,
 	Patch,
+	Put,
 	Req,
 	UseGuards,
 	UsePipes,
@@ -15,11 +18,55 @@ import { CurrentBillingActor } from '../auth/current-billing-actor.decorator';
 import type { BillingActor } from '../auth/billing-request';
 import { getBillingClientContext } from '../common/billing-request-context';
 import { BillingSettingsService } from '../domain/billing-settings.service';
-import { BillingSettingsPatchDto } from './billing.dto';
+import { CrmCommercialPolicyService } from '../domain/crm-commercial-policy.service';
+import {
+	BillingSettingsPatchDto,
+	UpdateCrmCommercialPolicyDto
+} from './billing.dto';
 
 @Controller('billing-settings')
 export class BillingSettingsController {
-	constructor(private readonly service: BillingSettingsService) {}
+	constructor(
+		private readonly service: BillingSettingsService,
+		private readonly crmPolicy: CrmCommercialPolicyService
+	) {}
+
+	@Get('admin/crm')
+	@HttpCode(200)
+	@BillingAuth(['ADMIN', 'DEV'])
+	@UseGuards(BillingAuthGuard)
+	crmSettings() {
+		return this.crmPolicy.get();
+	}
+
+	@Put('admin/crm')
+	@HttpCode(200)
+	@BillingAuth(['DEV'])
+	@UseGuards(BillingAuthGuard)
+	@UsePipes(
+		new ValidationPipe({
+			whitelist: true,
+			forbidNonWhitelisted: true,
+			transform: true
+		})
+	)
+	updateCrmSettings(
+		@Body() dto: UpdateCrmCommercialPolicyDto,
+		@CurrentBillingActor() actor: BillingActor,
+		@Req() request: Request,
+		@Headers('idempotency-key') idempotencyKey?: string
+	) {
+		if (idempotencyKey !== dto.commandId) {
+			throw new BadRequestException({
+				code: 'crm_commercial_policy_idempotency_key_mismatch',
+				message: 'idempotency-key must match commandId'
+			});
+		}
+		return this.crmPolicy.update(dto, {
+			actor,
+			...getBillingClientContext(request)
+		});
+	}
 
 	@Get('public')
 	@HttpCode(200)

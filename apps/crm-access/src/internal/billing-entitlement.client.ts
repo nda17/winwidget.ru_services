@@ -34,6 +34,8 @@ export interface CrmEntitlementDetails {
 	activatedByUserId: string;
 	planCode: string;
 	seatLimit: number | null;
+	policyVersion: number | null;
+	graceUntil: string | null;
 	trialStartedAt: string | null;
 	effectiveFrom: string;
 	effectiveUntil: string;
@@ -135,6 +137,7 @@ export class BillingEntitlementClient {
 		try {
 			response = await fetch(`${this.baseUrl}${path}`, {
 				...init,
+				redirect: 'error',
 				headers: {
 					...init.headers,
 					'x-winwidget-service': 'crm-access',
@@ -240,8 +243,10 @@ export class BillingEntitlementClient {
 				'aggregateVersion',
 				'effectiveFrom',
 				'effectiveUntil',
+				'graceUntil',
 				'id',
 				'planCode',
+				'policyVersion',
 				'provisioningCommandId',
 				'provisioningCommandType',
 				'seatLimit',
@@ -263,6 +268,7 @@ export class BillingEntitlementClient {
 			!value.planCode ||
 			value.planCode.length > 64 ||
 			!this.isSeatLimit(value.seatLimit) ||
+			!this.isPolicySnapshot(value) ||
 			!this.isTrialStartedAt(value.trialStartedAt, value.planCode) ||
 			!this.isIsoDate(value.effectiveFrom) ||
 			!this.isIsoDate(value.effectiveUntil) ||
@@ -285,6 +291,21 @@ export class BillingEntitlementClient {
 			(typeof value === 'number' &&
 				Number.isSafeInteger(value) &&
 				value > 0)
+		);
+	}
+
+	private isPolicySnapshot(value: Record<string, unknown>): boolean {
+		if (value.policyVersion === null) return value.graceUntil === null;
+		return (
+			typeof value.policyVersion === 'number' &&
+			Number.isSafeInteger(value.policyVersion) &&
+			value.policyVersion > 0 &&
+			typeof value.seatLimit === 'number' &&
+			Number.isSafeInteger(value.seatLimit) &&
+			value.seatLimit >= 2 &&
+			this.isIsoDate(value.graceUntil) &&
+			this.isIsoDate(value.effectiveUntil) &&
+			Date.parse(value.graceUntil) > Date.parse(value.effectiveUntil)
 		);
 	}
 

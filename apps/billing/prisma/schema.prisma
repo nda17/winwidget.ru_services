@@ -419,6 +419,24 @@ model BillingCommandReceipt {
   @@schema("billing")
 }
 
+model CrmCommercialPolicy {
+  version                         Int      @id
+  monthlyPriceMinor               Int      @map("monthly_price_minor")
+  yearlyPriceMinor                Int      @map("yearly_price_minor")
+  additionalSeatMonthlyPriceMinor Int      @map("additional_seat_monthly_price_minor")
+  additionalSeatYearlyPriceMinor  Int      @map("additional_seat_yearly_price_minor")
+  includedSeats                   Int      @map("included_seats")
+  trialSeatLimit                  Int      @map("trial_seat_limit")
+  trialDays                       Int      @map("trial_days")
+  graceDays                       Int      @map("grace_days")
+  createdByUserId                 String?  @map("created_by_user_id")
+  createdAt                       DateTime @default(now()) @map("created_at")
+  entitlements                    CrmEntitlement[]
+
+  @@map("crm_commercial_policies")
+  @@schema("billing")
+}
+
 model CrmEntitlement {
   id                      String               @id @default(uuid()) @db.Uuid
   workspaceId             String               @unique(map: "crm_entitlements_workspace_id_key") @map("workspace_id") @db.Uuid
@@ -426,6 +444,9 @@ model CrmEntitlement {
   planCode                String               @default("TRIAL") @map("plan_code") @db.VarChar(32)
   status                  CrmEntitlementStatus @default(ACTIVE)
   seatLimit               Int?                 @map("seat_limit")
+  policyVersion           Int?                 @map("policy_version")
+  policy                  CrmCommercialPolicy? @relation(fields: [policyVersion], references: [version], onDelete: Restrict, onUpdate: Restrict)
+  graceUntil              DateTime?            @map("grace_until")
   trialStartedAt          DateTime?            @map("trial_started_at")
   effectiveFrom           DateTime             @map("effective_from")
   effectiveUntil          DateTime             @map("effective_until")

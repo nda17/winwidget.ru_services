@@ -1,4 +1,4 @@
-import { Logger, RequestMethod } from '@nestjs/common';
+import { Logger, RequestMethod, ValidationPipe } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import type { NestExpressApplication } from '@nestjs/platform-express';
 import { parseCrmCustomersCorsAllowedOrigins } from './config/crm-customers-cors.config';
@@ -20,6 +20,15 @@ async function bootstrap(): Promise<void> {
 	const app = await NestFactory.create<NestExpressApplication>(
 		CrmCustomersModule,
 		{ forceCloseConnections: true }
+	);
+	app.useBodyParser('json', { limit: '32kb' });
+	app.useGlobalPipes(
+		new ValidationPipe({
+			transform: true,
+			whitelist: true,
+			forbidNonWhitelisted: true,
+			validationError: { target: false, value: false }
+		})
 	);
 
 	app.setGlobalPrefix('api/v1', {

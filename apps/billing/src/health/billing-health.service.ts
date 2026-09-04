@@ -30,7 +30,7 @@ export class BillingHealthService {
 	async readiness() {
 		try {
 			await this.prisma.$queryRaw`SELECT 1`;
-			const [identity] = await Promise.all([
+			const [identity, , policy] = await Promise.all([
 				this.prisma.serviceIdentity.findUnique({
 					where: { id: 'singleton' },
 					select: { serviceName: true, databaseId: true }
@@ -38,13 +38,19 @@ export class BillingHealthService {
 				this.prisma.crmEntitlement.findFirst({
 					select: {
 						provisioningCommandId: true,
-						provisioningCommandType: true
+						provisioningCommandType: true,
+						policyVersion: true,
+						graceUntil: true
 					}
+				}),
+				this.prisma.crmCommercialPolicy.findFirst({
+					orderBy: { version: 'desc' }
 				})
 			]);
 			if (
 				identity?.serviceName !== 'billing-service' ||
-				!identity.databaseId
+				!identity.databaseId ||
+				!policy
 			) {
 				throw new Error();
 			}

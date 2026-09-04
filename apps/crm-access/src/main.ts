@@ -24,7 +24,11 @@ async function bootstrap(): Promise<void> {
 	app.setGlobalPrefix('api/v1', {
 		exclude: [
 			{ path: 'health/live', method: RequestMethod.GET },
-			{ path: 'health/ready', method: RequestMethod.GET }
+			{ path: 'health/ready', method: RequestMethod.GET },
+			{
+				path: 'internal/v1/crm-access/authorize',
+				method: RequestMethod.POST
+			}
 		]
 	});
 	app.use(crmAccessRequestContextMiddleware);

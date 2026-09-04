@@ -9,6 +9,7 @@ import { BillingCampaignAudienceService } from './domain/billing-campaign-audien
 import { BillingAdminAlertsService } from './domain/billing-admin-alerts.service';
 import { InternalCommandsService } from './domain/internal-commands.service';
 import { CrmEntitlementService } from './domain/crm-entitlement.service';
+import { CrmCommercialPolicyService } from './domain/crm-commercial-policy.service';
 import { BillingMessagingAdminService } from './domain/billing-messaging-admin.service';
 import { BillingSettingsService } from './domain/billing-settings.service';
 import { PaymentDomainService } from './domain/payment-domain.service';
@@ -88,6 +89,7 @@ const API_PROVIDERS =
 		TariffAffiliateService,
 		InternalCommandsService,
 		CrmEntitlementService,
+		CrmCommercialPolicyService,
 		BillingCampaignAudienceService,
 		BillingAdminAlertsService,
 		BillingMessagingAdminService,

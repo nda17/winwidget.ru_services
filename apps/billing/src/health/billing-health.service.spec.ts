@@ -47,12 +47,16 @@ describe('BillingHealthService provider configuration', () => {
 		const yookassa = new YooKassaService();
 		const paymentMethodCrypto = new PaymentMethodCryptoService();
 		const crmEntitlementFindFirst = jest.fn().mockResolvedValue(null);
+		const crmCommercialPolicyFindFirst = jest
+			.fn()
+			.mockResolvedValue({ version: 1 });
 		const service = new BillingHealthService(
 			{
 				$queryRaw: jest.fn().mockResolvedValue([{ '?column?': 1 }]),
 				crmEntitlement: {
 					findFirst: crmEntitlementFindFirst
 				},
+				crmCommercialPolicy: { findFirst: crmCommercialPolicyFindFirst },
 				serviceIdentity: {
 					findUnique: jest.fn().mockResolvedValue({
 						serviceName: 'billing-service',
@@ -80,7 +84,12 @@ describe('BillingHealthService provider configuration', () => {
 				isReady: jest.fn().mockReturnValue(true)
 			} as unknown as BillingSchedulerService
 		);
-		return { crmEntitlementFindFirst, service, yookassa };
+		return {
+			crmEntitlementFindFirst,
+			crmCommercialPolicyFindFirst,
+			service,
+			yookassa
+		};
 	};
 
 	it('publishes only a boolean when production YooKassa credentials are configured', async () => {
@@ -129,6 +138,14 @@ describe('BillingHealthService provider configuration', () => {
 		);
 	});
 
+	it('fails readiness closed when the commercial policy seed is absent', async () => {
+		const { crmCommercialPolicyFindFirst, service } = createService('api');
+		crmCommercialPolicyFindFirst.mockResolvedValueOnce(null);
+		await expect(service.readiness()).rejects.toThrow(
+			'Billing database is not ready'
+		);
+	});
+
 	it('fails worker readiness closed when the payment-method key is not a valid base64 32-byte key', async () => {
 		process.env.MODE = 'production';
 		process.env.YOOKASSA_PRODUCTION_SHOP_ID = 'test-shop';
@@ -170,7 +187,9 @@ describe('BillingHealthService provider configuration', () => {
 		expect(crmEntitlementFindFirst).toHaveBeenCalledWith({
 			select: {
 				provisioningCommandId: true,
-				provisioningCommandType: true
+				provisioningCommandType: true,
+				policyVersion: true,
+				graceUntil: true
 			}
 		});
 	});

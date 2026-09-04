@@ -10,6 +10,12 @@ import { CrmSalesPipelineClient } from './internal/crm-sales-pipeline.client';
 import { CrmAccessPrismaModule } from './prisma/crm-access-prisma.module';
 import { CrmAccessPrismaService } from './prisma/crm-access-prisma.service';
 import { CrmAccessRuntimeModule } from './runtime/crm-access-runtime.module';
+import {
+	CrmAuthorizationController,
+	CrmPermissionsController
+} from './authorization/crm-authorization.controller';
+import { CrmAuthorizationService } from './authorization/crm-authorization.service';
+import { CrmInternalGuard } from './authorization/crm-internal.guard';
 
 @Module({
 	imports: [
@@ -17,8 +23,15 @@ import { CrmAccessRuntimeModule } from './runtime/crm-access-runtime.module';
 		CrmAccessRuntimeModule,
 		CrmAccessPrismaModule
 	],
-	controllers: [CrmAccessHealthController, CrmAccessController],
+	controllers: [
+		CrmAccessHealthController,
+		CrmAccessController,
+		CrmPermissionsController,
+		CrmAuthorizationController
+	],
 	providers: [
+		CrmAuthorizationService,
+		CrmInternalGuard,
 		IdentityAuthContextClient,
 		BillingEntitlementClient,
 		CrmSalesPipelineClient,

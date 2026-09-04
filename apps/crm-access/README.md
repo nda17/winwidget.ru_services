@@ -26,7 +26,7 @@ workspace или подписками: актуальную сессию и memb
 проверяются fail-closed, но не включаются в публичный CRM-ответ.
 
 `POST /onboarding/template` доступен только `OWNER` рабочего пространства с
-активным entitlement. Команда фиксирует точную пару
+entitlement в `ACTIVE` или `GRACE`. Команда фиксирует точную пару
 `templateKey@templateVersion`, синхронно просит `crm-sales` создать независимую
 воронку, повторно проверяет Billing и только затем переводит локальный lifecycle
 из `ONBOARDING` в `ACTIVE`. Полная команда защищена совпадающим
@@ -46,7 +46,21 @@ pnpm build
 pnpm start
 ```
 
-Production internal URLs обязаны быть точными loopback HTTP origins. Любая
+В production все internal URLs задаются явно: удалённые Identity и Billing
+доступны через точные HTTPS origins, локальный `crm-sales` может использовать
+loopback HTTP. CRM backend размещается на отдельном VPS от платформы, а CRM
+frontend — на ещё одном VPS. Межсерверные обращения идут через защищённый
+private ingress на стороне владельца сервиса; его listener остаётся локальным,
+а service token проверяется независимо от TLS и сетевого allowlist. Нельзя
+открывать внутренние API на публичном Gateway. HTTP redirects запрещены, чтобы
+не передать service token другому origin. TLS verification не отключается.
+
+Billing возвращает сохранённые `policyVersion`, `seatLimit` и `graceUntil`:
+новый Trial длится 5 дней, следующие 3 дня `GRACE` допускают работу и завершение
+onboarding, затем `READ_ONLY` запрещает команды. Локальный `SUSPENDED` всегда
+блокирует доступ. Старые периоды с `policyVersion=null` сохраняют свои условия.
+
+Любая
 сетевая ошибка, HTTP error (включая `404`) или невалидный ответ Identity/Billing
 закрывает доступ с `503`; отсутствие entitlement признаётся только по успешному
 ответу Billing со статусом `NOT_ACTIVATED`.

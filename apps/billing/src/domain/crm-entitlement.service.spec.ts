@@ -17,6 +17,8 @@ const entitlement = (overrides: Record<string, unknown> = {}) => ({
 	planCode: 'TRIAL',
 	status: CrmEntitlementStatus.ACTIVE,
 	seatLimit: null,
+	policyVersion: null,
+	graceUntil: null,
 	trialStartedAt: NOW,
 	effectiveFrom: NOW,
 	effectiveUntil: new Date('2026-09-07T10:00:00.000Z'),
@@ -94,6 +96,8 @@ describe('CrmEntitlementService', () => {
 				workspaceId: WORKSPACE_ID,
 				planCode: 'TRIAL',
 				seatLimit: null,
+				policyVersion: null,
+				graceUntil: null,
 				trialStartedAt: NOW.toISOString(),
 				effectiveFrom: NOW.toISOString(),
 				effectiveUntil: '2026-09-07T10:00:00.000Z',
@@ -105,6 +109,65 @@ describe('CrmEntitlementService', () => {
 			}
 		});
 	});
+
+	it.each([
+		['2026-09-07T09:59:59.999Z', 'ACTIVE'],
+		['2026-09-07T10:00:00.000Z', 'GRACE'],
+		['2026-09-10T09:59:59.999Z', 'GRACE'],
+		['2026-09-10T10:00:00.000Z', 'READ_ONLY'],
+		['2027-01-01T00:00:00.000Z', 'READ_ONLY']
+	])(
+		'derives the snapshotted lifecycle at %s as %s without reading the latest policy',
+		async (date, status) => {
+			jest.useFakeTimers().setSystemTime(new Date(date));
+			const prisma = {
+				crmEntitlement: {
+					findUnique: jest.fn().mockResolvedValue(
+						entitlement({
+							policyVersion: 1,
+							seatLimit: 5,
+							graceUntil: new Date('2026-09-10T10:00:00.000Z')
+						})
+					)
+				},
+				crmCommercialPolicy: { findFirst: jest.fn() }
+			};
+			const service = new CrmEntitlementService(prisma as never);
+			await expect(service.get(WORKSPACE_ID)).resolves.toMatchObject({
+				status,
+				entitlement: {
+					policyVersion: 1,
+					seatLimit: 5,
+					graceUntil: '2026-09-10T10:00:00.000Z'
+				}
+			});
+			expect(prisma.crmCommercialPolicy.findFirst).not.toHaveBeenCalled();
+		}
+	);
+
+	it.each(['SUSPENDED', 'CANCELLED'])(
+		'never overrides an explicit %s entitlement during grace',
+		async status => {
+			jest
+				.useFakeTimers()
+				.setSystemTime(new Date('2026-09-08T10:00:00.000Z'));
+			const service = new CrmEntitlementService({
+				crmEntitlement: {
+					findUnique: jest.fn().mockResolvedValue(
+						entitlement({
+							status,
+							policyVersion: 1,
+							seatLimit: 5,
+							graceUntil: new Date('2026-09-10T10:00:00.000Z')
+						})
+					)
+				}
+			} as never);
+			await expect(service.get(WORKSPACE_ID)).resolves.toMatchObject({
+				status
+			});
+		}
+	);
 
 	it('keeps trial metadata nullable for a future paid entitlement', async () => {
 		jest.useFakeTimers().setSystemTime(NOW);
@@ -133,6 +196,14 @@ describe('CrmEntitlementService', () => {
 		const created = entitlement();
 		const transaction = {
 			$executeRaw: jest.fn().mockResolvedValue(1),
+			crmCommercialPolicy: {
+				findFirst: jest.fn().mockResolvedValue({
+					version: 1,
+					trialSeatLimit: 5,
+					trialDays: 5,
+					graceDays: 3
+				})
+			},
 			billingCommandReceipt: {
 				findUnique: jest.fn().mockResolvedValue(null),
 				create: jest.fn().mockResolvedValue({})
@@ -170,6 +241,9 @@ describe('CrmEntitlementService', () => {
 				workspaceId: WORKSPACE_ID,
 				productCode: 'WINCRM',
 				planCode: 'TRIAL',
+				seatLimit: 5,
+				policyVersion: 1,
+				graceUntil: new Date('2026-09-10T10:00:00.000Z'),
 				trialStartedAt: NOW,
 				effectiveUntil: new Date('2026-09-07T10:00:00.000Z'),
 				provisioningCommandId: COMMAND_ID,

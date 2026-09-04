@@ -39,6 +39,8 @@ const active = () => ({
 		activatedByUserId: 'user-1',
 		planCode: 'TRIAL',
 		seatLimit: null,
+		policyVersion: null,
+		graceUntil: null,
 		trialStartedAt: '2026-09-02T10:00:00.000Z',
 		effectiveFrom: '2026-09-02T10:00:00.000Z',
 		effectiveUntil: '2026-09-07T10:00:00.000Z',
@@ -49,6 +51,82 @@ const active = () => ({
 
 describe('BillingEntitlementClient', () => {
 	afterEach(() => jest.restoreAllMocks());
+
+	it('accepts the versioned seat and grace snapshot without local recalculation', async () => {
+		jest.spyOn(global, 'fetch').mockResolvedValue(
+			new Response(
+				JSON.stringify({
+					...active(),
+					status: 'GRACE',
+					entitlement: {
+						...active().entitlement,
+						policyVersion: 2,
+						seatLimit: 5,
+						graceUntil: '2026-09-10T10:00:00.000Z'
+					}
+				}),
+				{ status: 200 }
+			)
+		);
+		await expect(
+			client().get(WORKSPACE_ID, CORRELATION_ID)
+		).resolves.toMatchObject({
+			status: 'GRACE',
+			entitlement: {
+				policyVersion: 2,
+				seatLimit: 5,
+				graceUntil: '2026-09-10T10:00:00.000Z'
+			}
+		});
+	});
+
+	it.each([
+		{
+			policyVersion: 0,
+			seatLimit: 5,
+			graceUntil: '2026-09-10T10:00:00.000Z'
+		},
+		{
+			policyVersion: 1.5,
+			seatLimit: 5,
+			graceUntil: '2026-09-10T10:00:00.000Z'
+		},
+		{
+			policyVersion: 1,
+			seatLimit: 1,
+			graceUntil: '2026-09-10T10:00:00.000Z'
+		},
+		{
+			policyVersion: 1,
+			seatLimit: null,
+			graceUntil: '2026-09-10T10:00:00.000Z'
+		},
+		{
+			policyVersion: null,
+			seatLimit: 5,
+			graceUntil: '2026-09-10T10:00:00.000Z'
+		},
+		{ policyVersion: 1, seatLimit: 5, graceUntil: null },
+		{
+			policyVersion: 1,
+			seatLimit: 5,
+			graceUntil: '2026-09-07T10:00:00.000Z'
+		},
+		{ policyVersion: 1, seatLimit: 5, graceUntil: 'invalid' }
+	])('rejects an inconsistent commercial snapshot %j', async snapshot => {
+		jest.spyOn(global, 'fetch').mockResolvedValue(
+			new Response(
+				JSON.stringify({
+					...active(),
+					entitlement: { ...active().entitlement, ...snapshot }
+				}),
+				{ status: 200 }
+			)
+		);
+		await expect(
+			client().get(WORKSPACE_ID, CORRELATION_ID)
+		).rejects.toBeInstanceOf(ServiceUnavailableException);
+	});
 
 	it('accepts NOT_ACTIVATED only from a successful exact Billing response', async () => {
 		jest.spyOn(global, 'fetch').mockResolvedValue(

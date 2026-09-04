@@ -101,16 +101,15 @@ export class CrmAccessService {
 				select: CRM_ACCESS_PROFILE_SELECT
 			})
 		]);
-		const access =
-			entitlement.status === 'ACTIVE'
-				? await this.reconcileAccessProfile(
-						selection.workspaceId,
-						entitlement.entitlement,
-						storedAccess
-					)
-				: storedAccess;
+		const access = this.isWritableEntitlement(entitlement.status)
+			? await this.reconcileAccessProfile(
+					selection.workspaceId,
+					entitlement.entitlement,
+					storedAccess
+				)
+			: storedAccess;
 		if (
-			entitlement.status === 'ACTIVE' &&
+			this.isWritableEntitlement(entitlement.status) &&
 			access?.lifecycle === CrmAccessLifecycle.ONBOARDING
 		) {
 			const installed = await this.sales.getInstallation(
@@ -122,7 +121,7 @@ export class CrmAccessService {
 					selection.workspaceId,
 					correlationId
 				);
-				if (confirmedEntitlement.status !== 'ACTIVE') {
+				if (!this.isWritableEntitlement(confirmedEntitlement.status)) {
 					return this.bootstrapResponse(
 						context,
 						selection,
@@ -178,7 +177,7 @@ export class CrmAccessService {
 				select: CRM_ACCESS_PROFILE_SELECT
 			})
 		]);
-		if (entitlement.status !== 'ACTIVE') {
+		if (!this.isWritableEntitlement(entitlement.status)) {
 			throw new ForbiddenException(
 				'An active WinCRM entitlement is required'
 			);
@@ -221,7 +220,7 @@ export class CrmAccessService {
 			dto.workspaceId,
 			correlationId
 		);
-		if (confirmedEntitlement.status !== 'ACTIVE') {
+		if (!this.isWritableEntitlement(confirmedEntitlement.status)) {
 			throw new ForbiddenException(
 				'WinCRM entitlement changed during onboarding'
 			);
@@ -474,6 +473,8 @@ export class CrmAccessService {
 			workspaceId: entitlement.workspaceId,
 			planCode: entitlement.planCode,
 			seatLimit: entitlement.seatLimit,
+			policyVersion: entitlement.policyVersion,
+			graceUntil: entitlement.graceUntil,
 			trialStartedAt: entitlement.trialStartedAt,
 			effectiveFrom: entitlement.effectiveFrom,
 			effectiveUntil: entitlement.effectiveUntil,
@@ -494,12 +495,17 @@ export class CrmAccessService {
 		status: CrmEntitlementStatus,
 		lifecycle: CrmAccessLifecycle | null
 	): Exclude<CrmBootstrapState, 'WORKSPACE_SELECTION_REQUIRED'> {
-		if (status === 'ACTIVE') {
+		if (lifecycle === CrmAccessLifecycle.SUSPENDED) return 'SUSPENDED';
+		if (this.isWritableEntitlement(status)) {
 			if (!lifecycle || lifecycle === CrmAccessLifecycle.ONBOARDING) {
 				return 'ONBOARDING';
 			}
-			return lifecycle;
+			return lifecycle === CrmAccessLifecycle.ACTIVE ? status : lifecycle;
 		}
 		return status;
+	}
+
+	private isWritableEntitlement(status: CrmEntitlementStatus): boolean {
+		return status === 'ACTIVE' || status === 'GRACE';
 	}
 }

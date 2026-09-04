@@ -55,6 +55,8 @@ const activeEntitlement = () => ({
 		activatedByUserId: 'user-1',
 		planCode: 'TRIAL',
 		seatLimit: null,
+		policyVersion: null,
+		graceUntil: null,
 		trialStartedAt: '2026-09-02T10:00:00.000Z',
 		effectiveFrom: '2026-09-02T10:00:00.000Z',
 		effectiveUntil: '2026-09-07T10:00:00.000Z',
@@ -285,8 +287,11 @@ describe('CrmAccessService bootstrap', () => {
 		expect(current.sales.getInstallation).not.toHaveBeenCalled();
 	});
 
-	it('preserves GRACE as Billing truth without inventing read-only policy', async () => {
+	it('opens completed onboarding with writable GRACE access', async () => {
 		const current = build();
+		current.prisma.crmWorkspaceAccess.findUnique.mockResolvedValue(
+			completedAccess()
+		);
 		current.billing.get.mockResolvedValue({
 			...activeEntitlement(),
 			status: 'GRACE'
@@ -299,6 +304,42 @@ describe('CrmAccessService bootstrap', () => {
 		});
 		expect(current.sales.getInstallation).not.toHaveBeenCalled();
 	});
+
+	it('keeps unfinished onboarding available during GRACE', async () => {
+		const current = build();
+		current.billing.get.mockResolvedValue({
+			...activeEntitlement(),
+			status: 'GRACE'
+		});
+		current.prisma.crmWorkspaceAccess.findUnique.mockResolvedValue(
+			onboardingAccess()
+		);
+		await expect(
+			current.service.bootstrap('Bearer token')
+		).resolves.toMatchObject({
+			state: 'ONBOARDING',
+			entitlementStatus: 'GRACE'
+		});
+		expect(current.sales.getInstallation).toHaveBeenCalledTimes(1);
+	});
+
+	it.each(['GRACE', 'READ_ONLY'])(
+		'does not override workspace suspension with Billing %s',
+		async status => {
+			const current = build();
+			current.billing.get.mockResolvedValue({
+				...activeEntitlement(),
+				status
+			});
+			current.prisma.crmWorkspaceAccess.findUnique.mockResolvedValue(
+				completedAccess(CrmAccessLifecycle.SUSPENDED)
+			);
+			await expect(
+				current.service.bootstrap('Bearer token')
+			).resolves.toMatchObject({ state: 'SUSPENDED' });
+			expect(current.sales.getInstallation).not.toHaveBeenCalled();
+		}
+	);
 
 	it('reconciles a committed Sales installation and confirms entitlement again', async () => {
 		const current = build();
@@ -455,7 +496,6 @@ describe('CrmAccessService pipeline template onboarding', () => {
 
 	it.each([
 		'NOT_ACTIVATED',
-		'GRACE',
 		'READ_ONLY',
 		'SUSPENDED',
 		'EXPIRED',
@@ -474,6 +514,40 @@ describe('CrmAccessService pipeline template onboarding', () => {
 			current.service.installTemplate('Bearer token', installDto())
 		).rejects.toBeInstanceOf(ForbiddenException);
 		expect(current.sales.installTemplate).not.toHaveBeenCalled();
+		expect(
+			current.prisma.crmWorkspaceAccess.updateMany
+		).not.toHaveBeenCalled();
+	});
+
+	it('allows OWNER to finish onboarding in GRACE and returns GRACE', async () => {
+		const current = build();
+		current.billing.get.mockResolvedValue({
+			...activeEntitlement(),
+			status: 'GRACE'
+		});
+		current.prisma.crmWorkspaceAccess.findUnique.mockResolvedValue(
+			onboardingAccess()
+		);
+		await expect(
+			current.service.installTemplate('Bearer token', installDto())
+		).resolves.toMatchObject({ access: { state: 'GRACE' } });
+		expect(current.sales.installTemplate).toHaveBeenCalledTimes(1);
+	});
+
+	it('rejects onboarding completion when GRACE expires during the Sales call', async () => {
+		const current = build();
+		current.billing.get
+			.mockResolvedValueOnce({ ...activeEntitlement(), status: 'GRACE' })
+			.mockResolvedValueOnce({
+				...activeEntitlement(),
+				status: 'READ_ONLY'
+			});
+		current.prisma.crmWorkspaceAccess.findUnique.mockResolvedValue(
+			onboardingAccess()
+		);
+		await expect(
+			current.service.installTemplate('Bearer token', installDto())
+		).rejects.toBeInstanceOf(ForbiddenException);
 		expect(
 			current.prisma.crmWorkspaceAccess.updateMany
 		).not.toHaveBeenCalled();

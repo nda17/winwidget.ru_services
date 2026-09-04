@@ -23,6 +23,49 @@ import {
 	SubscriptionBonusAudience
 } from '@prisma/billing-client';
 
+export class UpdateCrmCommercialPolicyDto {
+	@Equals(1)
+	schemaVersion!: 1;
+
+	@IsUUID('4')
+	commandId!: string;
+
+	@IsInt()
+	@Min(1)
+	@Max(2_147_483_647)
+	expectedVersion!: number;
+
+	@IsInt()
+	@Min(1)
+	@Max(100_000_000)
+	monthlyPriceMinor!: number;
+
+	@IsInt()
+	@Min(1)
+	@Max(100_000_000)
+	yearlyPriceMinor!: number;
+
+	@IsInt()
+	@Min(1)
+	@Max(100_000_000)
+	additionalSeatMonthlyPriceMinor!: number;
+
+	@IsInt()
+	@Min(1)
+	@Max(100_000_000)
+	additionalSeatYearlyPriceMinor!: number;
+
+	@IsInt()
+	@Min(2)
+	@Max(10_000)
+	includedSeats!: number;
+
+	@IsInt()
+	@Min(2)
+	@Max(10_000)
+	trialSeatLimit!: number;
+}
+
 export class CreatePaymentDto {
 	@IsEnum(Plan)
 	plan!: Plan;

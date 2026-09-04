@@ -42,4 +42,14 @@ describe('CrmCustomersHealthService', () => {
 			ServiceUnavailableException
 		);
 	});
+
+	it('fails readiness when the owned customer migration is missing', async () => {
+		const prisma = createPrisma();
+		(prisma.$queryRaw as jest.Mock)
+			.mockResolvedValueOnce([])
+			.mockRejectedValueOnce(new Error('column does not exist'));
+		await expect(
+			new CrmCustomersHealthService(prisma).readiness()
+		).rejects.toBeInstanceOf(ServiceUnavailableException);
+	});
 });

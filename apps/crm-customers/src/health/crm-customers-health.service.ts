@@ -26,6 +26,14 @@ export class CrmCustomersHealthService {
 	async readiness() {
 		try {
 			await this.prisma.$queryRaw`SELECT 1`;
+			await this.prisma
+				.$queryRaw`SELECT c.id, c.workspace_id, c.name, c.phone, c.email, c.company_id, c.notes, c.created_by_subject, c.team_id, c.version, c.archived_at, c.created_at, c.updated_at FROM crm_customers.contacts c LIMIT 0`;
+			await this.prisma
+				.$queryRaw`SELECT c.id, c.workspace_id, c.name, c.inn, c.website, c.notes, c.created_by_subject, c.team_id, c.version, c.archived_at, c.created_at, c.updated_at FROM crm_customers.companies c LIMIT 0`;
+			await this.prisma
+				.$queryRaw`SELECT command_id, workspace_id, entity_id, entity_kind, actor_subject, request_hash, response, created_at FROM crm_customers.customer_commands LIMIT 0`;
+			await this.prisma
+				.$queryRaw`SELECT id, workspace_id, entity_id, entity_kind, command_id, actor_subject, action, entity_version, changed_fields, created_at FROM crm_customers.customer_activities LIMIT 0`;
 			const identity = await this.prisma.serviceIdentity.findUnique({
 				where: { id: 'singleton' },
 				select: { serviceName: true, databaseId: true }
