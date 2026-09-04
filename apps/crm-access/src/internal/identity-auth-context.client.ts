@@ -29,6 +29,13 @@ export interface CrmIdentityAuthContext {
 	memberships: CrmWorkspaceMembership[];
 }
 
+export interface CrmIdentitySourceContext {
+	schemaVersion: 1;
+	workspaceId: string;
+	subject: string;
+	membership: CrmWorkspaceMembership | null;
+}
+
 const IDENTITY_TOKEN_PLACEHOLDERS = [
 	'identity_crm_access_token',
 	'ci_identity_crm_access_token_at_least_32_chars'
@@ -114,6 +121,68 @@ export class IdentityAuthContextClient {
 			);
 		}
 		return value;
+	}
+
+	async sourceContext(
+		workspaceId: string,
+		subject: string,
+		correlationId: string
+	): Promise<CrmIdentitySourceContext> {
+		try {
+			const response = await fetch(
+				`${this.baseUrl}/internal/v1/crm-access/source-context`,
+				{
+					method: 'POST',
+					redirect: 'error',
+					headers: {
+						'x-winwidget-service': 'crm-access',
+						'x-winwidget-internal-token': this.token,
+						'x-correlation-id': correlationId,
+						'content-type': 'application/json',
+						accept: 'application/json'
+					},
+					body: JSON.stringify({ schemaVersion: 1, workspaceId, subject }),
+					signal: AbortSignal.timeout(this.timeoutMs)
+				}
+			);
+			if (response.status !== 200) {
+				await response.body?.cancel();
+				throw new Error('SOURCE_CONTEXT_RESPONSE');
+			}
+			const value = await readBoundedJson(response);
+			if (
+				!isRecord(value) ||
+				!hasExactKeys(value, [
+					'schemaVersion',
+					'workspaceId',
+					'subject',
+					'membership'
+				]) ||
+				value.schemaVersion !== 1 ||
+				value.workspaceId !== workspaceId ||
+				value.subject !== subject
+			)
+				throw new Error('SOURCE_CONTEXT_CONTRACT');
+			const membership = value.membership;
+			if (
+				membership !== null &&
+				(!isRecord(membership) ||
+					!hasExactKeys(membership, [
+						'membershipId',
+						'workspaceId',
+						'role'
+					]) ||
+					!isUuidV4(membership.membershipId) ||
+					membership.workspaceId !== workspaceId ||
+					(membership.role !== 'OWNER' && membership.role !== 'MEMBER'))
+			)
+				throw new Error('SOURCE_CONTEXT_MEMBERSHIP');
+			return value as unknown as CrmIdentitySourceContext;
+		} catch {
+			throw new ServiceUnavailableException(
+				'Source authorization service is unavailable'
+			);
+		}
 	}
 
 	private isAuthContext(value: unknown): value is CrmIdentityAuthContext {

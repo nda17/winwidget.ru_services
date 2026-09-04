@@ -7,7 +7,10 @@ import { IdentityInternalService } from './internal.service';
 function service(session: unknown) {
 	const prisma = {
 		userSession: { findFirst: jest.fn().mockResolvedValue(session) },
-		workspaceMember: { findMany: jest.fn().mockResolvedValue([]) }
+		workspaceMember: {
+			findMany: jest.fn().mockResolvedValue([]),
+			findFirst: jest.fn().mockResolvedValue(null)
+		}
 	};
 	const jwt = {
 		verify: jest.fn().mockReturnValue({
@@ -27,6 +30,47 @@ function service(session: unknown) {
 }
 
 describe('canonical Identity introspection', () => {
+	it('resolves durable source authority without a JWT and without inactive users or memberships', async () => {
+		const current = service(null);
+		const workspaceId = '33333333-3333-4333-8333-333333333333';
+		expect(
+			await current.value.crmSourceContext(workspaceId, 'user-id')
+		).toEqual({
+			schemaVersion: 1,
+			workspaceId,
+			subject: 'user-id',
+			membership: null
+		});
+		expect(current.prisma.workspaceMember.findFirst).toHaveBeenCalledWith({
+			where: {
+				workspaceId,
+				userId: 'user-id',
+				status: 'ACTIVE',
+				workspace: { status: 'ACTIVE' },
+				user: { status: 'ACTIVE', deletedAt: null }
+			},
+			select: { id: true, workspaceId: true, role: true }
+		});
+		current.prisma.workspaceMember.findFirst.mockResolvedValue({
+			id: 'membership-id',
+			workspaceId,
+			role: 'OWNER'
+		});
+		expect(
+			await current.value.crmSourceContext(workspaceId, 'user-id')
+		).toEqual({
+			schemaVersion: 1,
+			workspaceId,
+			subject: 'user-id',
+			membership: {
+				membershipId: 'membership-id',
+				workspaceId,
+				role: 'OWNER'
+			}
+		});
+		expect(current.jwt.verify).not.toHaveBeenCalled();
+		expect(current.prisma.userSession.findFirst).not.toHaveBeenCalled();
+	});
 	it('distinguishes a missing/revoked session from an inactive user', async () => {
 		const revoked = service(null);
 		await expect(

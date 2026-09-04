@@ -140,6 +140,31 @@ export class IdentityInternalService {
 		};
 	}
 
+	async crmSourceContext(workspaceId: string, subject: string) {
+		const membership = await this.prisma.workspaceMember.findFirst({
+			where: {
+				workspaceId,
+				userId: subject,
+				status: WorkspaceMemberStatus.ACTIVE,
+				workspace: { status: WorkspaceStatus.ACTIVE },
+				user: { status: UserStatus.ACTIVE, deletedAt: null }
+			},
+			select: { id: true, workspaceId: true, role: true }
+		});
+		return {
+			schemaVersion: 1 as const,
+			workspaceId,
+			subject,
+			membership: membership
+				? {
+						membershipId: membership.id,
+						workspaceId: membership.workspaceId,
+						role: membership.role
+					}
+				: null
+		};
+	}
+
 	async searchOwners(dto: DirectorySearchDto) {
 		if (dto.plan) {
 			throw new BadRequestException(

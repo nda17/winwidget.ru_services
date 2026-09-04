@@ -2,10 +2,35 @@ import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
 import {
 	AuditSnapshotsDto,
-	CampaignContactsDto
+	CampaignContactsDto,
+	CrmSourceContextDto
 } from './internal.controller';
 
 describe('Identity internal DTO contracts', () => {
+	it('bounds source authority to an exact workspace and canonical subject', async () => {
+		const dto = {
+			schemaVersion: 1,
+			workspaceId: '33333333-3333-4333-8333-333333333333',
+			subject: 'user-1'
+		};
+		expect(
+			await validate(plainToInstance(CrmSourceContextDto, dto))
+		).toHaveLength(0);
+		for (const change of [
+			{ schemaVersion: 2 },
+			{ subject: ' user-1' },
+			{ subject: 'x'.repeat(257) },
+			{ workspaceId: 'other' },
+			{ userEmail: 'private@example.test' }
+		]) {
+			expect(
+				await validate(
+					plainToInstance(CrmSourceContextDto, { ...dto, ...change }),
+					{ whitelist: true, forbidNonWhitelisted: true }
+				)
+			).not.toHaveLength(0);
+		}
+	});
 	it('requires one to one hundred stable audit snapshot user IDs', async () => {
 		await expect(
 			validate(plainToInstance(AuditSnapshotsDto, { userIds: [] }))

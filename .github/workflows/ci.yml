@@ -780,6 +780,130 @@ jobs:
       - name: Run CRM Sales PostgreSQL 18 integration
         run: pnpm --dir apps/crm-sales run test:integration
 
+  crm-domain-integration:
+    name: CRM domain PostgreSQL 18 / ${{ matrix.app }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - app: crm-customers
+            schema: crm_customers
+            script: test:integration:postgres18
+          - app: crm-intake
+            schema: crm_intake
+            script: test:integration:postgres18
+          - app: crm-sales
+            schema: crm_sales
+            script: test:workflow
+    services:
+      postgres:
+        image: postgres:18-bookworm@sha256:1961f96e6029a02c3812d7cb329a3b03a3ac2bb067058dec17b0f5596aca9296
+        env:
+          POSTGRES_USER: crm_domain_bootstrap_ci
+          POSTGRES_PASSWORD: crm_domain_bootstrap_ci
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U crm_domain_bootstrap_ci -d postgres"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 30
+    env:
+      DOMAIN_APP: ${{ matrix.app }}
+      DOMAIN_SCHEMA: ${{ matrix.schema }}
+      DOMAIN_DATABASE: winwidget_${{ matrix.schema }}_test_ci
+      DOMAIN_MIGRATION_URL: 'postgresql://crm_domain_migration_ci:crm_domain_migration_ci_password@127.0.0.1:5432/winwidget_${{ matrix.schema }}_test_ci?schema=${{ matrix.schema }}&sslmode=disable'
+      DOMAIN_RUNTIME_URL: 'postgresql://crm_domain_runtime_ci:crm_domain_runtime_ci_password@127.0.0.1:5432/winwidget_${{ matrix.schema }}_test_ci?schema=${{ matrix.schema }}&sslmode=disable'
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Verify immutable revision
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.9
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 20
+          cache: pnpm
+          cache-dependency-path: apps/${{ matrix.app }}/pnpm-lock.yaml
+      - name: Install service
+        run: pnpm --dir "apps/$DOMAIN_APP" install --frozen-lockfile
+      - name: Create isolated database and least-privilege roles
+        env:
+          POSTGRES_CONTAINER_ID: ${{ job.services.postgres.id }}
+        run: |
+          [[ "$DOMAIN_SCHEMA" =~ ^crm_(customers|intake|sales)$ ]]
+          [[ "$DOMAIN_DATABASE" = "winwidget_${DOMAIN_SCHEMA}_test_ci" ]]
+          docker exec -i "$POSTGRES_CONTAINER_ID" psql -U crm_domain_bootstrap_ci -d postgres -v ON_ERROR_STOP=1 <<SQL
+          CREATE ROLE crm_domain_migration_ci LOGIN PASSWORD 'crm_domain_migration_ci_password' NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
+          CREATE ROLE crm_domain_runtime_ci LOGIN PASSWORD 'crm_domain_runtime_ci_password' NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
+          CREATE DATABASE "$DOMAIN_DATABASE" OWNER crm_domain_bootstrap_ci;
+          REVOKE ALL ON DATABASE "$DOMAIN_DATABASE" FROM PUBLIC;
+          GRANT CONNECT ON DATABASE "$DOMAIN_DATABASE" TO crm_domain_migration_ci, crm_domain_runtime_ci;
+          SQL
+          docker exec -i "$POSTGRES_CONTAINER_ID" psql -U crm_domain_bootstrap_ci -d "$DOMAIN_DATABASE" -v ON_ERROR_STOP=1 <<SQL
+          REVOKE ALL ON SCHEMA public FROM PUBLIC;
+          CREATE SCHEMA "$DOMAIN_SCHEMA" AUTHORIZATION crm_domain_migration_ci;
+          CREATE SCHEMA foreign_service_guard AUTHORIZATION crm_domain_bootstrap_ci;
+          CREATE TABLE foreign_service_guard.sentinel (id INTEGER PRIMARY KEY);
+          REVOKE ALL ON SCHEMA foreign_service_guard FROM PUBLIC;
+          REVOKE ALL ON ALL TABLES IN SCHEMA foreign_service_guard FROM PUBLIC;
+          SQL
+      - name: Generate client and apply migrations as migration role
+        run: |
+          domain_prefix="$(printf '%s' "$DOMAIN_SCHEMA" | tr '[:lower:]' '[:upper:]')"
+          env "${domain_prefix}_DATABASE_URL=$DOMAIN_MIGRATION_URL" pnpm --dir "apps/$DOMAIN_APP" run prisma:generate
+          env "${domain_prefix}_DATABASE_URL=$DOMAIN_MIGRATION_URL" pnpm --dir "apps/$DOMAIN_APP" run prisma:migrate:deploy
+      - name: Build domain service
+        run: pnpm --dir "apps/$DOMAIN_APP" run build
+      - name: Grant explicit runtime privileges
+        env:
+          POSTGRES_CONTAINER_ID: ${{ job.services.postgres.id }}
+        run: |
+          case "$DOMAIN_APP" in
+            crm-customers)
+              mutable_tables='crm_customers.contacts, crm_customers.companies'
+              receipt_tables='crm_customers.customer_commands, crm_customers.customer_activities'
+              ;;
+            crm-intake)
+              mutable_tables='crm_intake.inbox_entries, crm_intake.intake_sources'
+              receipt_tables='crm_intake.intake_commands, crm_intake.intake_activities, crm_intake.inbound_receipts'
+              docker exec "$POSTGRES_CONTAINER_ID" psql -U crm_domain_bootstrap_ci -d "$DOMAIN_DATABASE" -v ON_ERROR_STOP=1 -c 'GRANT SELECT, INSERT, UPDATE, DELETE ON crm_intake.ingestion_rate_buckets TO crm_domain_runtime_ci'
+              ;;
+            crm-sales)
+              mutable_tables='crm_sales.deals, crm_sales.tasks'
+              receipt_tables='crm_sales.deal_timeline, crm_sales.command_receipts, crm_sales.pipeline_template_installations, crm_sales.pipeline_template_installation_commands'
+              docker exec "$POSTGRES_CONTAINER_ID" psql -U crm_domain_bootstrap_ci -d "$DOMAIN_DATABASE" -v ON_ERROR_STOP=1 -c 'GRANT SELECT, INSERT, UPDATE, DELETE ON crm_sales.pipelines, crm_sales.pipeline_stages TO crm_domain_runtime_ci'
+              ;;
+            *) exit 1 ;;
+          esac
+          docker exec -i "$POSTGRES_CONTAINER_ID" psql -U crm_domain_bootstrap_ci -d "$DOMAIN_DATABASE" -v ON_ERROR_STOP=1 <<SQL
+          GRANT USAGE ON SCHEMA "$DOMAIN_SCHEMA" TO crm_domain_runtime_ci;
+          GRANT SELECT ON "$DOMAIN_SCHEMA".service_identity TO crm_domain_runtime_ci;
+          GRANT SELECT, INSERT, UPDATE ON $mutable_tables TO crm_domain_runtime_ci;
+          GRANT SELECT, INSERT ON $receipt_tables TO crm_domain_runtime_ci;
+          REVOKE ALL ON "$DOMAIN_SCHEMA"._prisma_migrations FROM crm_domain_runtime_ci;
+          SQL
+      - name: Prove domain invariants on PostgreSQL 18
+        env:
+          DOMAIN_TEST_SCRIPT: ${{ matrix.script }}
+        run: |
+          domain_prefix="$(printf '%s' "$DOMAIN_SCHEMA" | tr '[:lower:]' '[:upper:]')"
+          env "${domain_prefix}_DATABASE_URL=$DOMAIN_MIGRATION_URL" \
+            "${domain_prefix}_TEST_DATABASE_URL=$DOMAIN_RUNTIME_URL" \
+            "${domain_prefix}_TEST_MIGRATION_DATABASE_URL=$DOMAIN_MIGRATION_URL" \
+            "${domain_prefix}_TEST_RUNTIME_ROLE=crm_domain_runtime_ci" \
+            "${domain_prefix}_TEST_SKIP_MIGRATIONS=true" \
+            "${domain_prefix}_INTEGRATION_ALLOW_MUTATION=true" \
+            pnpm --dir "apps/$DOMAIN_APP" run "$DOMAIN_TEST_SCRIPT"
+
   production-image:
     name: Production image / ${{ matrix.app }}
     runs-on: ubuntu-latest
@@ -821,6 +945,7 @@ jobs:
       - billing-crm-policy-integration
       - billing-crm-provenance-migration
       - crm-migration-smoke
+      - crm-domain-integration
       - crm-sales-integration
       - lifecycle-contract
       - operations-control-ledger

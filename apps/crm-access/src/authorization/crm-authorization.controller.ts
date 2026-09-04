@@ -2,6 +2,7 @@ import {
 	Body,
 	Controller,
 	Get,
+	ForbiddenException,
 	Header,
 	Headers,
 	HttpCode,
@@ -9,7 +10,14 @@ import {
 	Query,
 	UseGuards
 } from '@nestjs/common';
-import { Equals, IsInt, IsUUID } from 'class-validator';
+import {
+	Equals,
+	IsInt,
+	IsUUID,
+	IsString,
+	Matches,
+	MaxLength
+} from 'class-validator';
 import {
 	CrmAuthorizationService,
 	type CrmCaller
@@ -27,6 +35,13 @@ export class CrmAuthorizeDto {
 export class CrmPermissionsQueryDto {
 	@IsUUID('4')
 	workspaceId!: string;
+}
+
+export class CrmAuthorizeSourceDto extends CrmAuthorizeDto {
+	@IsString()
+	@MaxLength(256)
+	@Matches(/^[^\s\x00-\x1f\x7f]{1,256}$/)
+	subject!: string;
 }
 
 /** UI capabilities are advisory; every domain endpoint reauthorizes independently. */
@@ -56,5 +71,21 @@ export class CrmAuthorizationController {
 		@Body() dto: CrmAuthorizeDto
 	) {
 		return this.authorization.authorize(token, dto.workspaceId, caller);
+	}
+
+	@Post('authorize-source')
+	@HttpCode(200)
+	authorizeSource(
+		@Headers('x-winwidget-service') caller: CrmCaller,
+		@Body() dto: CrmAuthorizeSourceDto
+	) {
+		if (caller !== 'crm-intake')
+			throw new ForbiddenException(
+				'Only CRM Intake can authorize a durable source'
+			);
+		return this.authorization.authorizeSource(
+			dto.workspaceId,
+			dto.subject
+		);
 	}
 }

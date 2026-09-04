@@ -20,3 +20,116 @@ model ServiceIdentity {
   @@map("service_identity")
   @@schema("crm_intake")
 }
+
+model InboxEntry {
+  id               String          @id @default(uuid()) @db.Uuid
+  workspaceId      String          @map("workspace_id") @db.Uuid
+  title            String          @db.VarChar(200)
+  name             String          @db.VarChar(200)
+  phone            String?         @db.VarChar(16)
+  email            String?         @db.VarChar(254)
+  message          String?         @db.VarChar(5000)
+  origin           String          @db.VarChar(16)
+  sourceId         String?         @map("source_id") @db.Uuid
+  status           String          @default("NEW") @db.VarChar(16)
+  createdBySubject String          @map("created_by_subject") @db.VarChar(256)
+  teamId           String?         @map("team_id") @db.Uuid
+  version          Int             @default(1)
+  contactId        String?         @map("contact_id") @db.Uuid
+  dealId           String?         @map("deal_id") @db.Uuid
+  rejectionReason  String?         @map("rejection_reason") @db.VarChar(2000)
+  receivedAt       DateTime        @default(now()) @map("received_at")
+  updatedAt        DateTime        @updatedAt @map("updated_at")
+  acceptedAt       DateTime?       @map("accepted_at")
+  rejectedAt       DateTime?       @map("rejected_at")
+  source           IntakeSource?   @relation(fields: [workspaceId, sourceId], references: [workspaceId, id], onDelete: Restrict, onUpdate: Restrict)
+  inboundReceipt   InboundReceipt?
+
+  @@unique([workspaceId, id])
+  @@index([workspaceId, status, receivedAt, id])
+  @@index([workspaceId, createdBySubject, status])
+  @@index([workspaceId, teamId, status])
+  @@index([workspaceId, sourceId])
+  @@map("inbox_entries")
+  @@schema("crm_intake")
+}
+
+model IntakeSource {
+  id               String           @id @default(uuid()) @db.Uuid
+  workspaceId      String           @map("workspace_id") @db.Uuid
+  name             String           @db.VarChar(200)
+  kind             String           @default("API") @db.VarChar(16)
+  tokenHash        String           @unique @map("token_hash") @db.Char(64)
+  tokenVersion     Int              @default(1) @map("token_version")
+  createdBySubject String           @map("created_by_subject") @db.VarChar(256)
+  teamId           String?          @map("team_id") @db.Uuid
+  version          Int              @default(1)
+  revokedAt        DateTime?        @map("revoked_at")
+  createdAt        DateTime         @default(now()) @map("created_at")
+  updatedAt        DateTime         @updatedAt @map("updated_at")
+  entries          InboxEntry[]
+  inboundReceipts  InboundReceipt[]
+
+  @@unique([workspaceId, id])
+  @@index([workspaceId, createdAt, id])
+  @@map("intake_sources")
+  @@schema("crm_intake")
+}
+
+model IntakeCommand {
+  commandId    String   @id @map("command_id") @db.Uuid
+  workspaceId  String   @map("workspace_id") @db.Uuid
+  entityId     String   @map("entity_id") @db.Uuid
+  entityKind   String   @map("entity_kind") @db.VarChar(16)
+  actorSubject String   @map("actor_subject") @db.VarChar(256)
+  requestHash  String   @map("request_hash") @db.Char(64)
+  response     Json
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  @@index([workspaceId, entityId])
+  @@map("intake_commands")
+  @@schema("crm_intake")
+}
+
+model IntakeActivity {
+  id            String   @id @default(uuid()) @db.Uuid
+  workspaceId   String   @map("workspace_id") @db.Uuid
+  entityId      String   @map("entity_id") @db.Uuid
+  entityKind    String   @map("entity_kind") @db.VarChar(16)
+  commandId     String   @unique @map("command_id") @db.Uuid
+  actorSubject  String   @map("actor_subject") @db.VarChar(256)
+  action        String   @db.VarChar(32)
+  entityVersion Int      @map("entity_version")
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  @@index([workspaceId, entityKind, entityId, createdAt, id], map: "intake_activities_entity_created_idx")
+  @@map("intake_activities")
+  @@schema("crm_intake")
+}
+
+model InboundReceipt {
+  sourceId          String       @map("source_id") @db.Uuid
+  externalCommandId String       @map("external_command_id") @db.Uuid
+  workspaceId       String       @map("workspace_id") @db.Uuid
+  entryId           String       @map("entry_id") @db.Uuid
+  auditCommandId    String       @unique @map("audit_command_id") @db.Uuid
+  requestHash       String       @map("request_hash") @db.Char(64)
+  receivedAt        DateTime     @map("received_at")
+  source            IntakeSource @relation(fields: [workspaceId, sourceId], references: [workspaceId, id], onDelete: Restrict, onUpdate: Restrict)
+  entry             InboxEntry   @relation(fields: [workspaceId, entryId], references: [workspaceId, id], onDelete: Restrict, onUpdate: Restrict)
+
+  @@id([sourceId, externalCommandId])
+  @@unique([workspaceId, entryId])
+  @@map("inbound_receipts")
+  @@schema("crm_intake")
+}
+
+model IngestionRateBucket {
+  bucketKey   String   @map("bucket_key") @db.VarChar(80)
+  windowStart DateTime @map("window_start")
+  count       Int
+
+  @@id([bucketKey, windowStart])
+  @@map("ingestion_rate_buckets")
+  @@schema("crm_intake")
+}

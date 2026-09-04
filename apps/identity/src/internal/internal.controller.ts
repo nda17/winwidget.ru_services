@@ -19,6 +19,8 @@ import {
 	IsArray,
 	IsIn,
 	IsString,
+	IsUUID,
+	Matches,
 	MaxLength
 } from 'class-validator';
 import {
@@ -45,6 +47,19 @@ export class AuditSnapshotsDto {
 	@IsString({ each: true })
 	@MaxLength(255, { each: true })
 	userIds!: string[];
+}
+
+export class CrmSourceContextDto {
+	@Equals(1)
+	schemaVersion!: 1;
+
+	@IsUUID('4')
+	workspaceId!: string;
+
+	@IsString()
+	@MaxLength(256)
+	@Matches(/^[^\s\x00-\x1f\x7f]{1,256}$/)
+	subject!: string;
 }
 
 @Controller('internal/v1')
@@ -82,6 +97,13 @@ export class IdentityInternalController {
 	@InternalServices('crm-access')
 	crmAccessAuthContext(@Headers('authorization') authorization?: string) {
 		return this.internal.crmAccessAuthContext(authorization);
+	}
+
+	@Post('crm-access/source-context')
+	@HttpCode(200)
+	@InternalServices('crm-access')
+	crmSourceContext(@Body() dto: CrmSourceContextDto) {
+		return this.internal.crmSourceContext(dto.workspaceId, dto.subject);
 	}
 
 	@Post('widgets/owners/resolve')

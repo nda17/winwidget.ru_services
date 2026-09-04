@@ -5,6 +5,19 @@ import { IdentityInternalController } from '../internal/internal.controller';
 import { IDENTITY_GLOBAL_PREFIX_EXCLUDES } from './identity-http.config';
 
 describe('Identity HTTP route contract', () => {
+	it('exposes the sessionless source context only to the scoped CRM Access caller', () => {
+		const handler = IdentityInternalController.prototype.crmSourceContext;
+		expect(Reflect.getMetadata(PATH_METADATA, handler)).toBe(
+			'crm-access/source-context'
+		);
+		expect(
+			Reflect.getMetadata('identity.internal.services', handler)
+		).toEqual(['crm-access']);
+		expect(IDENTITY_GLOBAL_PREFIX_EXCLUDES).toContainEqual({
+			path: 'internal/v1/crm-access/source-context',
+			method: RequestMethod.POST
+		});
+	});
 	it('keeps the scoped CRM access context on its canonical internal path', () => {
 		const handler =
 			IdentityInternalController.prototype.crmAccessAuthContext;

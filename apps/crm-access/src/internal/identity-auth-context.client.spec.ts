@@ -40,6 +40,63 @@ const response = () => ({
 
 describe('IdentityAuthContextClient', () => {
 	afterEach(() => jest.restoreAllMocks());
+	it('uses only the scoped service credential for fresh source authority and validates its exact workspace/subject', async () => {
+		const workspaceId = response().memberships[0].workspaceId;
+		const result = {
+			schemaVersion: 1,
+			workspaceId,
+			subject: 'user-1',
+			membership: response().memberships[0]
+		};
+		const fetchMock = jest
+			.spyOn(global, 'fetch')
+			.mockResolvedValue(new Response(JSON.stringify(result)));
+		expect(
+			await client().sourceContext(workspaceId, 'user-1', CORRELATION_ID)
+		).toEqual(result);
+		expect(fetchMock).toHaveBeenCalledWith(
+			'http://127.0.0.1:4900/internal/v1/crm-access/source-context',
+			expect.objectContaining({
+				redirect: 'error',
+				body: JSON.stringify({
+					schemaVersion: 1,
+					workspaceId,
+					subject: 'user-1'
+				}),
+				headers: expect.not.objectContaining({
+					authorization: expect.anything()
+				})
+			})
+		);
+		for (const change of [
+			{ subject: 'other' },
+			{ workspaceId: CORRELATION_ID },
+			{ email: 'private@example.test' },
+			{ membership: { ...result.membership, role: 'ADMIN' } }
+		]) {
+			fetchMock.mockResolvedValueOnce(
+				new Response(JSON.stringify({ ...result, ...change }))
+			);
+			await expect(
+				client().sourceContext(workspaceId, 'user-1', CORRELATION_ID)
+			).rejects.toBeInstanceOf(ServiceUnavailableException);
+		}
+	});
+	it('returns missing source membership as a denial decision, not a synthetic session', async () => {
+		const workspaceId = response().memberships[0].workspaceId;
+		const result = {
+			schemaVersion: 1,
+			workspaceId,
+			subject: 'user-1',
+			membership: null
+		};
+		jest
+			.spyOn(global, 'fetch')
+			.mockResolvedValue(new Response(JSON.stringify(result)));
+		expect(
+			await client().sourceContext(workspaceId, 'user-1', CORRELATION_ID)
+		).toEqual(result);
+	});
 
 	it('passes the user Bearer token through to scoped Identity auth context', async () => {
 		const fetchMock = jest

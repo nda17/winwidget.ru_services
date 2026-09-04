@@ -1,6 +1,7 @@
 import { ForbiddenException, type ExecutionContext } from '@nestjs/common';
 import type { ConfigService } from '@nestjs/config';
 import { CrmInternalGuard, CRM_CALLERS } from './crm-internal.guard';
+import { CrmAuthorizationController } from './crm-authorization.controller';
 
 const credentials = Object.fromEntries(
 	Object.values(CRM_CALLERS).map(name => [
@@ -33,6 +34,27 @@ function context(
 	} as ExecutionContext;
 }
 describe('CRM internal caller credentials', () => {
+	it('limits durable source authorization to Intake even for another correctly authenticated CRM service', () => {
+		const authorization = { authorizeSource: jest.fn() };
+		const controller = new CrmAuthorizationController(
+			authorization as never
+		);
+		const dto = {
+			schemaVersion: 1 as const,
+			workspaceId: '33333333-3333-4333-8333-333333333333',
+			subject: 'user-1'
+		};
+		for (const caller of ['crm-sales', 'crm-customers'] as const)
+			expect(() => controller.authorizeSource(caller, dto)).toThrow(
+				ForbiddenException
+			);
+		expect(authorization.authorizeSource).not.toHaveBeenCalled();
+		controller.authorizeSource('crm-intake', dto);
+		expect(authorization.authorizeSource).toHaveBeenCalledWith(
+			dto.workspaceId,
+			dto.subject
+		);
+	});
 	it.each(Object.entries(CRM_CALLERS))(
 		'accepts only the scoped %s credential',
 		(caller, envKey) => {

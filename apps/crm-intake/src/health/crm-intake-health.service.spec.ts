@@ -42,4 +42,14 @@ describe('CrmIntakeHealthService', () => {
 			ServiceUnavailableException
 		);
 	});
+
+	it('fails readiness for the old skeleton schema', async () => {
+		const prisma = createPrisma();
+		(prisma.$queryRaw as jest.Mock)
+			.mockResolvedValueOnce([])
+			.mockRejectedValueOnce(new Error('table does not exist'));
+		await expect(
+			new CrmIntakeHealthService(prisma).readiness()
+		).rejects.toBeInstanceOf(ServiceUnavailableException);
+	});
 });

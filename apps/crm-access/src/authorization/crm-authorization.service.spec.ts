@@ -10,6 +10,16 @@ const teamId = '33333333-3333-4333-8333-333333333333';
 
 function setup(role = 'OWNER', status = 'ACTIVE') {
 	const identity = {
+		sourceContext: jest.fn().mockResolvedValue({
+			schemaVersion: 1,
+			workspaceId,
+			subject: 'user-1',
+			membership: {
+				workspaceId,
+				membershipId,
+				role: role === 'OWNER' ? 'OWNER' : 'MEMBER'
+			}
+		}),
 		authContext: jest.fn().mockResolvedValue({
 			subject: 'user-1',
 			memberships: [
@@ -56,6 +66,59 @@ function setup(role = 'OWNER', status = 'ACTIVE') {
 }
 
 describe('CRM service authorization', () => {
+	it.each(['OWNER', 'CRM_ADMIN'])(
+		'freshly revalidates the active %s delegated source actor without a user session',
+		async role => {
+			const current = setup(role, 'GRACE');
+			for (let i = 0; i < 2; i++)
+				expect(
+					await current.service.authorizeSource(workspaceId, 'user-1')
+				).toMatchObject({
+					subject: 'user-1',
+					state: 'GRACE',
+					role,
+					permissions: expect.arrayContaining(['intake:manage-sources'])
+				});
+			expect(current.identity.sourceContext).toHaveBeenCalledTimes(2);
+			expect(current.identity.authContext).not.toHaveBeenCalled();
+			expect(current.billing.get).toHaveBeenCalledTimes(2);
+		}
+	);
+	it.each(['MANAGER', 'TEAM_LEAD', 'ANALYST'])(
+		'denies delegated sources after demotion to %s',
+		async role => {
+			await expect(
+				setup(role).service.authorizeSource(workspaceId, 'user-1')
+			).rejects.toBeInstanceOf(ForbiddenException);
+		}
+	);
+	it('halts sources after read-only, disabled CRM membership, or missing Identity authority', async () => {
+		await expect(
+			setup('OWNER', 'READ_ONLY').service.authorizeSource(
+				workspaceId,
+				'user-1'
+			)
+		).rejects.toBeInstanceOf(ForbiddenException);
+		const current = setup('CRM_ADMIN');
+		current.prisma.crmWorkspaceMember.findUnique.mockResolvedValue({
+			role: 'CRM_ADMIN',
+			membershipId,
+			teamIds: [],
+			disabledAt: new Date()
+		});
+		await expect(
+			current.service.authorizeSource(workspaceId, 'user-1')
+		).rejects.toBeInstanceOf(ForbiddenException);
+		current.identity.sourceContext.mockResolvedValue({
+			schemaVersion: 1,
+			workspaceId,
+			subject: 'user-1',
+			membership: null
+		});
+		await expect(
+			current.service.authorizeSource(workspaceId, 'user-1')
+		).rejects.toBeInstanceOf(ForbiddenException);
+	});
 	it('returns the full advisory permission matrix only for the public user request', async () => {
 		const current = setup();
 		const result = await current.service.authorize(

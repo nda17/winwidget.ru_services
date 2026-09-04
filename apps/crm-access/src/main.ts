@@ -28,6 +28,10 @@ async function bootstrap(): Promise<void> {
 			{
 				path: 'internal/v1/crm-access/authorize',
 				method: RequestMethod.POST
+			},
+			{
+				path: 'internal/v1/crm-access/authorize-source',
+				method: RequestMethod.POST
 			}
 		]
 	});

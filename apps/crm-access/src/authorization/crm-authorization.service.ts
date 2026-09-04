@@ -2,7 +2,10 @@ import { ForbiddenException, Injectable } from '@nestjs/common';
 import { CrmAccessLifecycle } from '@prisma/crm-access-client';
 import { getCrmAccessCorrelationId } from '../common/crm-access-request-context';
 import { BillingEntitlementClient } from '../internal/billing-entitlement.client';
-import { IdentityAuthContextClient } from '../internal/identity-auth-context.client';
+import {
+	IdentityAuthContextClient,
+	type CrmWorkspaceMembership
+} from '../internal/identity-auth-context.client';
 import { CrmAccessPrismaService } from '../prisma/crm-access-prisma.service';
 
 export type CrmRole =
@@ -57,6 +60,45 @@ export class CrmAuthorizationService {
 		const membership = identity.memberships.find(
 			item => item.workspaceId === workspaceId
 		);
+		return this.resolve(
+			workspaceId,
+			identity.subject,
+			membership,
+			correlationId,
+			caller
+		);
+	}
+
+	async authorizeSource(workspaceId: string, subject: string) {
+		const correlationId = getCrmAccessCorrelationId();
+		const identity = await this.identity.sourceContext(
+			workspaceId,
+			subject,
+			correlationId
+		);
+		const context = await this.resolve(
+			workspaceId,
+			identity.subject,
+			identity.membership,
+			correlationId,
+			'crm-intake'
+		);
+		if (
+			context.state === 'READ_ONLY' ||
+			!['OWNER', 'CRM_ADMIN'].includes(context.role) ||
+			!context.permissions.includes('intake:manage-sources')
+		)
+			throw new ForbiddenException('Source delegation is not active');
+		return context;
+	}
+
+	private async resolve(
+		workspaceId: string,
+		subject: string,
+		membership: CrmWorkspaceMembership | null | undefined,
+		correlationId: string,
+		caller?: CrmCaller
+	) {
 		if (!membership)
 			throw new ForbiddenException('Workspace membership is required');
 		const [billing, workspace, member] = await Promise.all([
@@ -70,7 +112,7 @@ export class CrmAuthorizationService {
 						where: {
 							workspaceId_subject: {
 								workspaceId,
-								subject: identity.subject
+								subject
 							}
 						}
 					})
@@ -113,7 +155,7 @@ export class CrmAuthorizationService {
 		return {
 			schemaVersion: 1 as const,
 			workspaceId,
-			subject: identity.subject,
+			subject,
 			role,
 			state,
 			dataScope:
