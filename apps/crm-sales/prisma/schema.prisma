@@ -33,6 +33,7 @@ model Pipeline {
   updatedAt           DateTime                      @updatedAt @map("updated_at")
   stages              PipelineStage[]
   installation        PipelineTemplateInstallation?
+  deals               Deal[]
 
   @@unique([id, workspaceId])
   @@index([workspaceId, createdAt])
@@ -51,9 +52,11 @@ model PipelineStage {
   createdAt   DateTime              @default(now()) @map("created_at")
   updatedAt   DateTime              @updatedAt @map("updated_at")
   pipeline    Pipeline              @relation(fields: [pipelineId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+  deals       Deal[]
 
   @@unique([pipelineId, key])
   @@unique([pipelineId, position])
+  @@unique([id, pipelineId, workspaceId])
   @@map("pipeline_stages")
   @@schema("crm_sales")
 }
@@ -94,6 +97,96 @@ enum CrmPipelineStageState {
   OPEN
   WON
   LOST
+
+  @@schema("crm_sales")
+}
+
+model Deal {
+  id                String                @id @default(uuid()) @db.Uuid
+  workspaceId       String                @map("workspace_id") @db.Uuid
+  version           Int                   @default(1)
+  title             String                @db.VarChar(200)
+  currency          String                @default("RUB") @db.Char(3)
+  amountMinor       Int                   @map("amount_minor")
+  pipelineId        String                @map("pipeline_id") @db.Uuid
+  stageId           String                @map("stage_id") @db.Uuid
+  status            CrmPipelineStageState @default(OPEN)
+  contactId         String                @map("contact_id") @db.Uuid
+  contactName       String                @map("contact_name") @db.VarChar(200)
+  assignedToSubject String                @map("assigned_to_subject") @db.VarChar(256)
+  teamId            String?               @map("team_id") @db.Uuid
+  nextTaskId        String?               @map("next_task_id") @db.Uuid
+  archivedAt        DateTime?             @map("archived_at")
+  createdAt         DateTime              @default(now()) @map("created_at")
+  updatedAt         DateTime              @updatedAt @map("updated_at")
+  pipeline          Pipeline              @relation(fields: [pipelineId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
+  stage             PipelineStage         @relation(fields: [stageId, pipelineId, workspaceId], references: [id, pipelineId, workspaceId], onDelete: Restrict)
+  tasks             SalesTask[]
+  timeline          DealTimeline[]
+
+  @@unique([id, workspaceId])
+  @@index([workspaceId, archivedAt, createdAt])
+  @@index([workspaceId, assignedToSubject, createdAt])
+  @@index([workspaceId, teamId, createdAt])
+  @@map("deals")
+  @@schema("crm_sales")
+}
+
+model SalesTask {
+  id                String          @id @default(uuid()) @db.Uuid
+  workspaceId       String          @map("workspace_id") @db.Uuid
+  dealId            String          @map("deal_id") @db.Uuid
+  version           Int             @default(1)
+  title             String          @db.VarChar(200)
+  dueAt             DateTime        @map("due_at")
+  status            SalesTaskStatus @default(OPEN)
+  assignedToSubject String          @map("assigned_to_subject") @db.VarChar(256)
+  completedAt       DateTime?       @map("completed_at")
+  createdAt         DateTime        @default(now()) @map("created_at")
+  updatedAt         DateTime        @updatedAt @map("updated_at")
+  deal              Deal            @relation(fields: [dealId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
+
+  @@unique([id, dealId, workspaceId])
+  @@index([workspaceId, status, dueAt])
+  @@map("tasks")
+  @@schema("crm_sales")
+}
+
+model DealTimeline {
+  id           String   @id @default(uuid()) @db.Uuid
+  workspaceId  String   @map("workspace_id") @db.Uuid
+  dealId       String   @map("deal_id") @db.Uuid
+  kind         String   @db.VarChar(32)
+  actorSubject String   @map("actor_subject") @db.VarChar(256)
+  outcome      String   @db.VarChar(4000)
+  fromStageId  String?  @map("from_stage_id") @db.Uuid
+  toStageId    String?  @map("to_stage_id") @db.Uuid
+  createdAt    DateTime @default(now()) @map("created_at")
+  deal         Deal     @relation(fields: [dealId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
+
+  @@index([workspaceId, dealId, createdAt])
+  @@map("deal_timeline")
+  @@schema("crm_sales")
+}
+
+model SalesCommandReceipt {
+  commandId    String   @id @map("command_id") @db.Uuid
+  workspaceId  String   @map("workspace_id") @db.Uuid
+  actorSubject String   @map("actor_subject") @db.VarChar(256)
+  commandType  String   @map("command_type") @db.VarChar(64)
+  requestHash  String   @map("request_hash") @db.Char(64)
+  dealId       String   @map("deal_id") @db.Uuid
+  result       Json
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  @@map("command_receipts")
+  @@schema("crm_sales")
+}
+
+enum SalesTaskStatus {
+  OPEN
+  COMPLETED
+  CANCELLED
 
   @@schema("crm_sales")
 }

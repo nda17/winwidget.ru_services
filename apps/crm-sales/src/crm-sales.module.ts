@@ -8,6 +8,10 @@ import { PipelineTemplateInstallationController } from './pipelines/pipeline-tem
 import { PipelineTemplateInstallationService } from './pipelines/pipeline-template-installation.service';
 import { PipelineTemplateCatalogController } from './templates/pipeline-template-catalog.controller';
 import { PipelineTemplateCatalogService } from './templates/pipeline-template-catalog.service';
+import { SalesController } from './sales/sales.controller';
+import { SalesService } from './sales/sales.service';
+import { SalesAccessClient, SalesAccessGuard } from './sales/sales-access';
+import { SalesContactClient } from './sales/sales-contact.client';
 
 @Module({
 	imports: [
@@ -17,13 +21,18 @@ import { PipelineTemplateCatalogService } from './templates/pipeline-template-ca
 	controllers: [
 		CrmSalesHealthController,
 		PipelineTemplateCatalogController,
-		PipelineTemplateInstallationController
+		PipelineTemplateInstallationController,
+		SalesController
 	],
 	providers: [
 		CrmSalesHealthService,
 		CrmSalesInternalGuard,
 		PipelineTemplateCatalogService,
-		PipelineTemplateInstallationService
+		PipelineTemplateInstallationService,
+		SalesService,
+		SalesAccessClient,
+		SalesAccessGuard,
+		SalesContactClient
 	]
 })
 export class CrmSalesModule {}
