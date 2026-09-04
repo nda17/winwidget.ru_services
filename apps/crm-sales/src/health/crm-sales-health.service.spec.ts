@@ -6,6 +6,14 @@ describe('CrmSalesHealthService', () => {
 	const createPrisma = (serviceName = 'crm-sales-service') =>
 		({
 			$queryRaw: jest.fn().mockResolvedValue([{ '?column?': 1 }]),
+			pipeline: { findFirst: jest.fn().mockResolvedValue(null) },
+			pipelineStage: { findFirst: jest.fn().mockResolvedValue(null) },
+			pipelineTemplateInstallation: {
+				findFirst: jest.fn().mockResolvedValue(null)
+			},
+			pipelineTemplateInstallationCommand: {
+				findFirst: jest.fn().mockResolvedValue(null)
+			},
 			serviceIdentity: {
 				findUnique: jest.fn().mockResolvedValue({
 					serviceName,
@@ -27,17 +35,41 @@ describe('CrmSalesHealthService', () => {
 	});
 
 	it('reports readiness only for the owned database identity', async () => {
-		const service = new CrmSalesHealthService(createPrisma());
+		const prisma = createPrisma();
+		const service = new CrmSalesHealthService(prisma);
 		await expect(service.readiness()).resolves.toMatchObject({
 			status: 'ready',
 			service: 'crm-sales'
 		});
+		expect(prisma.pipeline.findFirst).toHaveBeenCalledWith({
+			select: { id: true }
+		});
+		expect(prisma.pipelineStage.findFirst).toHaveBeenCalledWith({
+			select: { id: true }
+		});
+		expect(
+			prisma.pipelineTemplateInstallation.findFirst
+		).toHaveBeenCalledWith({ select: { id: true } });
+		expect(
+			prisma.pipelineTemplateInstallationCommand.findFirst
+		).toHaveBeenCalledWith({ select: { commandId: true } });
 	});
 
 	it('fails readiness for another service database', async () => {
 		const service = new CrmSalesHealthService(
 			createPrisma('crm-customers-service')
 		);
+		await expect(service.readiness()).rejects.toBeInstanceOf(
+			ServiceUnavailableException
+		);
+	});
+
+	it('fails readiness when the latest CRM Sales schema is unavailable', async () => {
+		const prisma = createPrisma();
+		(
+			prisma.pipelineTemplateInstallationCommand.findFirst as jest.Mock
+		).mockRejectedValue(new Error('relation does not exist'));
+		const service = new CrmSalesHealthService(prisma);
 		await expect(service.readiness()).rejects.toBeInstanceOf(
 			ServiceUnavailableException
 		);

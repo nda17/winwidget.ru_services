@@ -29,6 +29,9 @@ export type CrmEntitlementStatus =
 export interface CrmEntitlementDetails {
 	id: string;
 	workspaceId: string;
+	provisioningCommandId: string;
+	provisioningCommandType: string;
+	activatedByUserId: string;
 	planCode: string;
 	seatLimit: number | null;
 	trialStartedAt: string | null;
@@ -60,6 +63,8 @@ const BILLING_TOKEN_PLACEHOLDERS = [
 	'billing_crm_access_token',
 	'ci_billing_crm_access_token_at_least_32_chars'
 ];
+const PROVISIONING_COMMAND_TYPE_PATTERN = /^[A-Z][A-Z0-9_]{0,63}$/;
+const SUBJECT_PATTERN = /^[A-Za-z0-9_-]{1,256}$/;
 
 @Injectable()
 export class BillingEntitlementClient {
@@ -113,7 +118,8 @@ export class BillingEntitlementClient {
 				},
 				body: JSON.stringify(command)
 			},
-			true
+			true,
+			command
 		) as Promise<CrmTrialActivationResponse>;
 	}
 
@@ -122,7 +128,8 @@ export class BillingEntitlementClient {
 		workspaceId: string,
 		correlationId: string,
 		init: RequestInit,
-		expectActivation: boolean
+		expectActivation: boolean,
+		expectedActivation?: ActivateCrmTrialCommand
 	): Promise<CrmEntitlementResponse | CrmTrialActivationResponse> {
 		let response: Response;
 		try {
@@ -161,7 +168,14 @@ export class BillingEntitlementClient {
 				'Billing service returned an invalid response'
 			);
 		}
-		if (!this.isResponse(value, workspaceId, expectActivation)) {
+		if (
+			!this.isResponse(
+				value,
+				workspaceId,
+				expectActivation,
+				expectedActivation
+			)
+		) {
 			throw new ServiceUnavailableException(
 				'Billing service returned an invalid response'
 			);
@@ -172,7 +186,8 @@ export class BillingEntitlementClient {
 	private isResponse(
 		value: unknown,
 		workspaceId: string,
-		expectActivation: boolean
+		expectActivation: boolean,
+		expectedActivation?: ActivateCrmTrialCommand
 	): value is CrmEntitlementResponse | CrmTrialActivationResponse {
 		if (!isRecord(value)) return false;
 		const expectedKeys = [
@@ -199,11 +214,18 @@ export class BillingEntitlementClient {
 				(!expectActivation || value.activated === false)
 			);
 		}
+		if (!this.isEntitlement(value.entitlement, workspaceId)) return false;
 		return (
-			this.isEntitlement(value.entitlement, workspaceId) &&
-			(!expectActivation ||
-				value.activated === false ||
-				(value.activated === true && value.status === 'ACTIVE'))
+			!expectActivation ||
+			value.activated === false ||
+			(value.activated === true &&
+				value.status === 'ACTIVE' &&
+				value.entitlement.provisioningCommandId ===
+					expectedActivation?.commandId &&
+				value.entitlement.provisioningCommandType ===
+					'ACTIVATE_WINCRM_TRIAL' &&
+				value.entitlement.activatedByUserId ===
+					expectedActivation.activatedByUserId)
 		);
 	}
 
@@ -214,11 +236,14 @@ export class BillingEntitlementClient {
 		if (
 			!isRecord(value) ||
 			!hasExactKeys(value, [
+				'activatedByUserId',
 				'aggregateVersion',
 				'effectiveFrom',
 				'effectiveUntil',
 				'id',
 				'planCode',
+				'provisioningCommandId',
+				'provisioningCommandType',
 				'seatLimit',
 				'sourceSequence',
 				'trialStartedAt',
@@ -227,6 +252,13 @@ export class BillingEntitlementClient {
 			!isUuidV4(value.id) ||
 			value.workspaceId !== workspaceId ||
 			!isUuidV4(value.workspaceId) ||
+			!isUuidV4(value.provisioningCommandId) ||
+			typeof value.provisioningCommandType !== 'string' ||
+			!PROVISIONING_COMMAND_TYPE_PATTERN.test(
+				value.provisioningCommandType
+			) ||
+			typeof value.activatedByUserId !== 'string' ||
+			!SUBJECT_PATTERN.test(value.activatedByUserId) ||
 			typeof value.planCode !== 'string' ||
 			!value.planCode ||
 			value.planCode.length > 64 ||

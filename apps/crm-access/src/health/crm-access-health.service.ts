@@ -27,6 +27,21 @@ export class CrmAccessHealthService {
 			) {
 				throw new Error('Invalid database identity');
 			}
+			await this.prisma.crmWorkspaceAccess.findFirst({
+				select: {
+					lifecycle: true,
+					billingEntitlementId: true,
+					provisioningCommandId: true,
+					provisioningCommandType: true,
+					activatedBySubject: true,
+					onboardingCommandId: true,
+					onboardingTemplateKey: true,
+					onboardingTemplateVersion: true,
+					onboardingTemplateFingerprint: true,
+					onboardingPipelineId: true,
+					onboardingCompletedAt: true
+				}
+			});
 			return {
 				...this.status('ready'),
 				database: {

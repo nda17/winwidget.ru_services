@@ -12,7 +12,8 @@ import {
 import { CrmAccessService } from './crm-access.service';
 import {
 	ActivateCrmTrialDto,
-	CrmBootstrapQueryDto
+	CrmBootstrapQueryDto,
+	InstallCrmPipelineTemplateDto
 } from './crm-access.dto';
 
 @Controller('crm/access')
@@ -43,5 +44,21 @@ export class CrmAccessController {
 			);
 		}
 		return this.access.activateTrial(authorization, dto);
+	}
+
+	@Post('onboarding/template')
+	@HttpCode(200)
+	@Header('Cache-Control', 'no-store')
+	installTemplate(
+		@Headers('authorization') authorization: string | undefined,
+		@Headers('idempotency-key') idempotencyKey: string | undefined,
+		@Body() dto: InstallCrmPipelineTemplateDto
+	) {
+		if (idempotencyKey !== dto.commandId) {
+			throw new BadRequestException(
+				'Idempotency-Key must match commandId'
+			);
+		}
+		return this.access.installTemplate(authorization, dto);
 	}
 }

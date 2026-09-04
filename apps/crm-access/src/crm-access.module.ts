@@ -6,6 +6,7 @@ import { CrmAccessHealthController } from './health/crm-access-health.controller
 import { CrmAccessHealthService } from './health/crm-access-health.service';
 import { BillingEntitlementClient } from './internal/billing-entitlement.client';
 import { IdentityAuthContextClient } from './internal/identity-auth-context.client';
+import { CrmSalesPipelineClient } from './internal/crm-sales-pipeline.client';
 import { CrmAccessPrismaModule } from './prisma/crm-access-prisma.module';
 import { CrmAccessPrismaService } from './prisma/crm-access-prisma.service';
 import { CrmAccessRuntimeModule } from './runtime/crm-access-runtime.module';
@@ -20,6 +21,7 @@ import { CrmAccessRuntimeModule } from './runtime/crm-access-runtime.module';
 	providers: [
 		IdentityAuthContextClient,
 		BillingEntitlementClient,
+		CrmSalesPipelineClient,
 		CrmAccessService,
 		CrmAccessHealthService
 	]

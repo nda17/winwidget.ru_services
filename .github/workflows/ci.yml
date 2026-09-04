@@ -526,6 +526,156 @@ jobs:
             exit 1
           fi
 
+  billing-crm-provenance-migration:
+    name: Billing CRM provenance PostgreSQL 18 upgrade / ${{ matrix.scenario }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        scenario:
+          - valid-backfill
+          - missing-receipt
+          - invalid-receipt
+          - legacy-unbound-receipt
+          - ambiguous-receipts
+    services:
+      postgres:
+        image: postgres:18-bookworm@sha256:1961f96e6029a02c3812d7cb329a3b03a3ac2bb067058dec17b0f5596aca9296
+        env:
+          POSTGRES_USER: billing_crm_provenance_bootstrap_ci
+          POSTGRES_PASSWORD: billing_crm_provenance_bootstrap_ci
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U billing_crm_provenance_bootstrap_ci -d postgres"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 30
+    env:
+      BILLING_CRM_PROVENANCE_MIGRATION_ALLOW_MUTATION: 'true'
+      BILLING_CRM_PROVENANCE_TEST_DATABASE_URL: 'postgresql://winwidget_billing_provenance_migration_ci:billing_provenance_migration_ci_password@127.0.0.1:5432/winwidget_billing_crm_provenance_ci?schema=billing&sslmode=disable'
+      BILLING_CRM_PROVENANCE_TEST_MIGRATION_ROLE: winwidget_billing_provenance_migration_ci
+      BILLING_CRM_PROVENANCE_TEST_SCENARIO: ${{ matrix.scenario }}
+      BILLING_DATABASE_URL: 'postgresql://winwidget_billing_provenance_migration_ci:billing_provenance_migration_ci_password@127.0.0.1:5432/winwidget_billing_crm_provenance_ci?schema=billing&sslmode=disable'
+      BILLING_PROVENANCE_MIGRATION_ROLE_PASSWORD: billing_provenance_migration_ci_password
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Verify immutable revision
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.9
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 20
+          cache: pnpm
+          cache-dependency-path: apps/billing/pnpm-lock.yaml
+      - name: Install Billing
+        run: pnpm --dir apps/billing install --frozen-lockfile
+      - name: Prepare isolated Billing migration role
+        env:
+          POSTGRES_CONTAINER_ID: ${{ job.services.postgres.id }}
+        run: |
+          docker exec "$POSTGRES_CONTAINER_ID" psql \
+            -U billing_crm_provenance_bootstrap_ci -d postgres \
+            -v ON_ERROR_STOP=1 \
+            -c "CREATE ROLE winwidget_billing_provenance_migration_ci LOGIN PASSWORD '$BILLING_PROVENANCE_MIGRATION_ROLE_PASSWORD' NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS"
+          docker exec "$POSTGRES_CONTAINER_ID" psql \
+            -U billing_crm_provenance_bootstrap_ci -d postgres \
+            -v ON_ERROR_STOP=1 \
+            -c 'CREATE DATABASE winwidget_billing_crm_provenance_ci OWNER billing_crm_provenance_bootstrap_ci'
+          docker exec "$POSTGRES_CONTAINER_ID" psql \
+            -U billing_crm_provenance_bootstrap_ci \
+            -d winwidget_billing_crm_provenance_ci -v ON_ERROR_STOP=1 \
+            -c "REVOKE ALL ON DATABASE winwidget_billing_crm_provenance_ci FROM PUBLIC; GRANT CONNECT ON DATABASE winwidget_billing_crm_provenance_ci TO winwidget_billing_provenance_migration_ci; REVOKE ALL ON SCHEMA public FROM PUBLIC; CREATE SCHEMA billing AUTHORIZATION winwidget_billing_provenance_migration_ci; CREATE SCHEMA foreign_service_guard AUTHORIZATION billing_crm_provenance_bootstrap_ci; CREATE TABLE foreign_service_guard.sentinel (id INTEGER PRIMARY KEY); REVOKE ALL ON SCHEMA foreign_service_guard FROM PUBLIC; REVOKE ALL ON ALL TABLES IN SCHEMA foreign_service_guard FROM PUBLIC"
+      - name: Generate Billing Prisma client
+        run: pnpm --dir apps/billing run prisma:generate
+      - name: Test Billing CRM provenance migration upgrade
+        run: pnpm --dir apps/billing run test:migration:crm-provenance
+
+  crm-sales-integration:
+    name: CRM Sales PostgreSQL 18 atomic installation
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:18-bookworm@sha256:1961f96e6029a02c3812d7cb329a3b03a3ac2bb067058dec17b0f5596aca9296
+        env:
+          POSTGRES_USER: crm_sales_bootstrap_ci
+          POSTGRES_PASSWORD: crm_sales_bootstrap_ci
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U crm_sales_bootstrap_ci -d postgres"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 30
+    env:
+      CRM_SALES_INTEGRATION_ALLOW_MUTATION: 'true'
+      CRM_SALES_TEST_DATABASE_URL: 'postgresql://winwidget_crm_sales_runtime_ci:crm_sales_runtime_ci_password@127.0.0.1:5432/winwidget_crm_sales_integration_ci?schema=crm_sales&sslmode=disable'
+      CRM_SALES_TEST_MIGRATION_DATABASE_URL: 'postgresql://winwidget_crm_sales_migration_ci:crm_sales_migration_ci_password@127.0.0.1:5432/winwidget_crm_sales_integration_ci?schema=crm_sales&sslmode=disable'
+      CRM_SALES_TEST_RUNTIME_ROLE: winwidget_crm_sales_runtime_ci
+      CRM_SALES_MIGRATION_ROLE_PASSWORD: crm_sales_migration_ci_password
+      CRM_SALES_RUNTIME_ROLE_PASSWORD: crm_sales_runtime_ci_password
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Verify immutable revision
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.9
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 20
+          cache: pnpm
+          cache-dependency-path: apps/crm-sales/pnpm-lock.yaml
+      - name: Install crm-sales
+        run: pnpm --dir apps/crm-sales install --frozen-lockfile
+      - name: Prepare isolated migration and runtime roles
+        env:
+          POSTGRES_CONTAINER_ID: ${{ job.services.postgres.id }}
+        run: |
+          docker exec "$POSTGRES_CONTAINER_ID" psql \
+            -U crm_sales_bootstrap_ci -d postgres -v ON_ERROR_STOP=1 \
+            -c "CREATE ROLE winwidget_crm_sales_migration_ci LOGIN PASSWORD '$CRM_SALES_MIGRATION_ROLE_PASSWORD' NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS"
+          docker exec "$POSTGRES_CONTAINER_ID" psql \
+            -U crm_sales_bootstrap_ci -d postgres -v ON_ERROR_STOP=1 \
+            -c "CREATE ROLE winwidget_crm_sales_runtime_ci LOGIN PASSWORD '$CRM_SALES_RUNTIME_ROLE_PASSWORD' NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS"
+          docker exec "$POSTGRES_CONTAINER_ID" psql \
+            -U crm_sales_bootstrap_ci -d postgres -v ON_ERROR_STOP=1 \
+            -c 'CREATE DATABASE winwidget_crm_sales_integration_ci OWNER crm_sales_bootstrap_ci'
+          docker exec "$POSTGRES_CONTAINER_ID" psql \
+            -U crm_sales_bootstrap_ci -d winwidget_crm_sales_integration_ci \
+            -v ON_ERROR_STOP=1 \
+            -c "REVOKE ALL ON DATABASE winwidget_crm_sales_integration_ci FROM PUBLIC; GRANT CONNECT ON DATABASE winwidget_crm_sales_integration_ci TO winwidget_crm_sales_migration_ci, winwidget_crm_sales_runtime_ci; REVOKE ALL ON SCHEMA public FROM PUBLIC; CREATE SCHEMA crm_sales AUTHORIZATION winwidget_crm_sales_migration_ci; CREATE SCHEMA foreign_service_guard AUTHORIZATION crm_sales_bootstrap_ci; CREATE TABLE foreign_service_guard.sentinel (id INTEGER PRIMARY KEY); REVOKE ALL ON SCHEMA foreign_service_guard FROM PUBLIC; REVOKE ALL ON ALL TABLES IN SCHEMA foreign_service_guard FROM PUBLIC"
+      - name: Generate CRM Sales Prisma client
+        run: pnpm --dir apps/crm-sales run prisma:generate
+      - name: Apply CRM Sales migrations as migration role
+        run: >-
+          env CRM_SALES_DATABASE_URL="$CRM_SALES_TEST_MIGRATION_DATABASE_URL"
+          pnpm --dir apps/crm-sales run prisma:migrate:deploy
+      - name: Grant exact runtime DML privileges
+        env:
+          POSTGRES_CONTAINER_ID: ${{ job.services.postgres.id }}
+        run: |
+          docker exec "$POSTGRES_CONTAINER_ID" psql \
+            -U crm_sales_bootstrap_ci -d winwidget_crm_sales_integration_ci \
+            -v ON_ERROR_STOP=1 \
+            -c "GRANT USAGE ON SCHEMA crm_sales TO winwidget_crm_sales_runtime_ci; GRANT SELECT ON crm_sales.service_identity TO winwidget_crm_sales_runtime_ci; GRANT SELECT, INSERT, UPDATE, DELETE ON crm_sales.pipelines, crm_sales.pipeline_stages TO winwidget_crm_sales_runtime_ci; GRANT SELECT, INSERT ON crm_sales.pipeline_template_installations, crm_sales.pipeline_template_installation_commands TO winwidget_crm_sales_runtime_ci; REVOKE ALL ON crm_sales._prisma_migrations FROM winwidget_crm_sales_runtime_ci"
+      - name: Run CRM Sales PostgreSQL 18 integration
+        run: pnpm --dir apps/crm-sales run test:integration
+
   production-image:
     name: Production image / ${{ matrix.app }}
     runs-on: ubuntu-latest
@@ -564,7 +714,9 @@ jobs:
   deploy-production:
     name: Deploy production
     needs:
+      - billing-crm-provenance-migration
       - crm-migration-smoke
+      - crm-sales-integration
       - lifecycle-contract
       - operations-control-ledger
       - operations-restore-rehearsal

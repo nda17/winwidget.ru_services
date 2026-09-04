@@ -22,6 +22,9 @@ describe('CrmAccessHealthService', () => {
 			$queryRaw: jest.fn().mockResolvedValue([{ '?column?': 1 }]),
 			serviceIdentity: {
 				findUnique: jest.fn().mockResolvedValue(identity)
+			},
+			crmWorkspaceAccess: {
+				findFirst: jest.fn().mockResolvedValue(null)
 			}
 		} as never);
 		await expect(health.readiness()).resolves.toMatchObject({
@@ -42,6 +45,24 @@ describe('CrmAccessHealthService', () => {
 					...identity,
 					serviceName: 'other-service'
 				})
+			},
+			crmWorkspaceAccess: {
+				findFirst: jest.fn().mockResolvedValue(null)
+			}
+		} as never);
+		await expect(health.readiness()).rejects.toBeInstanceOf(
+			ServiceUnavailableException
+		);
+	});
+
+	it('fails readiness closed when the onboarding schema is missing', async () => {
+		const health = new CrmAccessHealthService({
+			$queryRaw: jest.fn().mockResolvedValue([{ '?column?': 1 }]),
+			serviceIdentity: {
+				findUnique: jest.fn().mockResolvedValue(identity)
+			},
+			crmWorkspaceAccess: {
+				findFirst: jest.fn().mockRejectedValue(new Error('missing column'))
 			}
 		} as never);
 		await expect(health.readiness()).rejects.toBeInstanceOf(

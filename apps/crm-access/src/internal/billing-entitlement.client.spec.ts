@@ -34,6 +34,9 @@ const active = () => ({
 	entitlement: {
 		id: '44444444-4444-4444-8444-444444444444',
 		workspaceId: WORKSPACE_ID,
+		provisioningCommandId: COMMAND_ID,
+		provisioningCommandType: 'ACTIVATE_WINCRM_TRIAL',
+		activatedByUserId: 'user-1',
 		planCode: 'TRIAL',
 		seatLimit: null,
 		trialStartedAt: '2026-09-02T10:00:00.000Z',
@@ -153,6 +156,7 @@ describe('BillingEntitlementClient', () => {
 					entitlement: {
 						...active().entitlement,
 						planCode: 'MONTHLY',
+						provisioningCommandType: 'ACTIVATE_WINCRM_SUBSCRIPTION',
 						trialStartedAt: null
 					}
 				}),
@@ -165,6 +169,62 @@ describe('BillingEntitlementClient', () => {
 			entitlement: { planCode: 'MONTHLY', trialStartedAt: null }
 		});
 	});
+
+	it('rejects a non-authoritative entitlement without provisioning provenance', async () => {
+		jest.spyOn(global, 'fetch').mockResolvedValue(
+			new Response(
+				JSON.stringify({
+					...active(),
+					entitlement: {
+						...active().entitlement,
+						provisioningCommandId: undefined
+					}
+				}),
+				{ status: 200 }
+			)
+		);
+		await expect(
+			client().get(WORKSPACE_ID, CORRELATION_ID)
+		).rejects.toBeInstanceOf(ServiceUnavailableException);
+	});
+
+	it.each([
+		{
+			field: 'provisioningCommandId',
+			value: 'not-a-uuid'
+		},
+		{
+			field: 'provisioningCommandType',
+			value: 'activate_wincrm_trial'
+		},
+		{
+			field: 'provisioningCommandType',
+			value: `A${'B'.repeat(64)}`
+		},
+		{
+			field: 'activatedByUserId',
+			value: 'invalid subject'
+		}
+	])(
+		'rejects invalid Billing provenance field $field',
+		async ({ field, value }) => {
+			jest.spyOn(global, 'fetch').mockResolvedValue(
+				new Response(
+					JSON.stringify({
+						...active(),
+						entitlement: {
+							...active().entitlement,
+							[field]: value
+						}
+					}),
+					{ status: 200 }
+				)
+			);
+			await expect(
+				client().get(WORKSPACE_ID, CORRELATION_ID)
+			).rejects.toBeInstanceOf(ServiceUnavailableException);
+		}
+	);
 
 	it('requires current TRIAL entitlements to keep an ISO trialStartedAt', async () => {
 		jest.spyOn(global, 'fetch').mockResolvedValue(
@@ -208,5 +268,101 @@ describe('BillingEntitlementClient', () => {
 				CORRELATION_ID
 			)
 		).rejects.toBeInstanceOf(ServiceUnavailableException);
+	});
+
+	it('rejects a newly activated entitlement tied to a different command', async () => {
+		jest.spyOn(global, 'fetch').mockResolvedValue(
+			new Response(
+				JSON.stringify({
+					...active(),
+					entitlement: {
+						...active().entitlement,
+						provisioningCommandId: '55555555-5555-4555-8555-555555555555'
+					},
+					activated: true
+				}),
+				{ status: 200 }
+			)
+		);
+		await expect(
+			client().activateTrial(
+				{
+					schemaVersion: 1,
+					commandId: COMMAND_ID,
+					workspaceId: WORKSPACE_ID,
+					activatedByUserId: 'user-1'
+				},
+				CORRELATION_ID
+			)
+		).rejects.toBeInstanceOf(ServiceUnavailableException);
+	});
+
+	it.each([
+		{
+			provisioningCommandType: 'ACTIVATE_WINCRM_SUBSCRIPTION'
+		},
+		{ activatedByUserId: 'other-user' }
+	])(
+		'rejects newly activated Trial provenance that differs from the request',
+		async provenance => {
+			jest.spyOn(global, 'fetch').mockResolvedValue(
+				new Response(
+					JSON.stringify({
+						...active(),
+						entitlement: {
+							...active().entitlement,
+							...provenance
+						},
+						activated: true
+					}),
+					{ status: 200 }
+				)
+			);
+			await expect(
+				client().activateTrial(
+					{
+						schemaVersion: 1,
+						commandId: COMMAND_ID,
+						workspaceId: WORKSPACE_ID,
+						activatedByUserId: 'user-1'
+					},
+					CORRELATION_ID
+				)
+			).rejects.toBeInstanceOf(ServiceUnavailableException);
+		}
+	);
+
+	it('accepts an existing entitlement provenance on an activated false replay', async () => {
+		jest.spyOn(global, 'fetch').mockResolvedValue(
+			new Response(
+				JSON.stringify({
+					...active(),
+					entitlement: {
+						...active().entitlement,
+						provisioningCommandId: '55555555-5555-4555-8555-555555555555',
+						activatedByUserId: 'original-owner'
+					},
+					activated: false
+				}),
+				{ status: 200 }
+			)
+		);
+		await expect(
+			client().activateTrial(
+				{
+					schemaVersion: 1,
+					commandId: COMMAND_ID,
+					workspaceId: WORKSPACE_ID,
+					activatedByUserId: 'user-1'
+				},
+				CORRELATION_ID
+			)
+		).resolves.toMatchObject({
+			activated: false,
+			entitlement: {
+				provisioningCommandId: '55555555-5555-4555-8555-555555555555',
+				activatedByUserId: 'original-owner'
+			}
+		});
 	});
 });

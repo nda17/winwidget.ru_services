@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import {
 	PIPELINE_STAGE_STATES,
 	PipelineTemplateDefinition,
@@ -12,6 +13,7 @@ const MAX_INDUSTRY_TAGS = 50;
 const MAX_KEY_LENGTH = 64;
 const MAX_STAGES = 100;
 const MAX_STAGE_NAME_LENGTH = 200;
+export const MAX_PIPELINE_TEMPLATE_VERSION = 32_767;
 
 const RAW_PIPELINE_TEMPLATES_V1: PipelineTemplateDefinition[] = [
 	{
@@ -386,7 +388,11 @@ export function validatePipelineTemplateCatalog(
 		) {
 			throw new Error(`Invalid template key: ${template.key}`);
 		}
-		if (!Number.isSafeInteger(template.version) || template.version < 1) {
+		if (
+			!Number.isSafeInteger(template.version) ||
+			template.version < 1 ||
+			template.version > MAX_PIPELINE_TEMPLATE_VERSION
+		) {
 			throw new Error(`Invalid template version: ${template.key}`);
 		}
 		const versionId = pipelineTemplateVersionId(
@@ -499,6 +505,25 @@ export const PIPELINE_TEMPLATE_VERSIONS: Readonly<
 	Record<string, PipelineTemplateDefinition>
 > = buildPipelineTemplateVersionIndex(PIPELINE_TEMPLATES_V1);
 
+export const PIPELINE_TEMPLATE_FINGERPRINTS: Readonly<
+	Record<string, string>
+> = Object.freeze(
+	Object.fromEntries(
+		PIPELINE_TEMPLATES_V1.map(template => [
+			pipelineTemplateVersionId(template.key, template.version),
+			pipelineTemplateFingerprint(template)
+		])
+	)
+);
+
+export function pipelineTemplateFingerprint(
+	template: PipelineTemplateDefinition
+): string {
+	return createHash('sha256')
+		.update(JSON.stringify(template))
+		.digest('hex');
+}
+
 export function buildPipelineTemplateVersionIndex(
 	templates: readonly PipelineTemplateDefinition[]
 ): Readonly<Record<string, PipelineTemplateDefinition>> {
@@ -519,6 +544,15 @@ export function getPipelineTemplateFromIndex(
 	version: number
 ): PipelineTemplateDefinition | undefined {
 	return index[pipelineTemplateVersionId(key, version)];
+}
+
+export function getPipelineTemplateFingerprint(
+	key: string,
+	version: number
+): string | undefined {
+	return PIPELINE_TEMPLATE_FINGERPRINTS[
+		pipelineTemplateVersionId(key, version)
+	];
 }
 
 export function getPipelineTemplate(

@@ -46,9 +46,13 @@ describe('BillingHealthService provider configuration', () => {
 		} as BillingRuntimeService;
 		const yookassa = new YooKassaService();
 		const paymentMethodCrypto = new PaymentMethodCryptoService();
+		const crmEntitlementFindFirst = jest.fn().mockResolvedValue(null);
 		const service = new BillingHealthService(
 			{
 				$queryRaw: jest.fn().mockResolvedValue([{ '?column?': 1 }]),
+				crmEntitlement: {
+					findFirst: crmEntitlementFindFirst
+				},
 				serviceIdentity: {
 					findUnique: jest.fn().mockResolvedValue({
 						serviceName: 'billing-service',
@@ -76,7 +80,7 @@ describe('BillingHealthService provider configuration', () => {
 				isReady: jest.fn().mockReturnValue(true)
 			} as unknown as BillingSchedulerService
 		);
-		return { service, yookassa };
+		return { crmEntitlementFindFirst, service, yookassa };
 	};
 
 	it('publishes only a boolean when production YooKassa credentials are configured', async () => {
@@ -150,6 +154,38 @@ describe('BillingHealthService provider configuration', () => {
 		expect(readiness).not.toHaveProperty('providers');
 		expect(readiness).not.toHaveProperty('providerConfiguration');
 		expect(configured).not.toHaveBeenCalled();
+	});
+
+	it('checks the WinCRM provisioning provenance schema before reporting readiness', async () => {
+		process.env.PAYMENT_METHOD_ENCRYPTION_KEY = Buffer.alloc(
+			32,
+			7
+		).toString('base64');
+		const { crmEntitlementFindFirst, service } = createService('api');
+
+		await expect(service.readiness()).resolves.toMatchObject({
+			status: 'ready',
+			role: 'api'
+		});
+		expect(crmEntitlementFindFirst).toHaveBeenCalledWith({
+			select: {
+				provisioningCommandId: true,
+				provisioningCommandType: true
+			}
+		});
+	});
+
+	it('fails readiness closed when the WinCRM provisioning provenance schema is missing', async () => {
+		process.env.PAYMENT_METHOD_ENCRYPTION_KEY = Buffer.alloc(
+			32,
+			7
+		).toString('base64');
+		const { crmEntitlementFindFirst, service } = createService('api');
+		crmEntitlementFindFirst.mockRejectedValue(new Error('missing column'));
+
+		await expect(service.readiness()).rejects.toThrow(
+			'Billing database is not ready'
+		);
 	});
 
 	it.each([undefined, 'not-a-valid-key'])(

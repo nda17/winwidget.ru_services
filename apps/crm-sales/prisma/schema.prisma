@@ -20,3 +20,80 @@ model ServiceIdentity {
   @@map("service_identity")
   @@schema("crm_sales")
 }
+
+model Pipeline {
+  id                  String                        @id @default(uuid()) @db.Uuid
+  workspaceId         String                        @map("workspace_id") @db.Uuid
+  name                String                        @db.VarChar(200)
+  templateKey         String                        @map("template_key") @db.VarChar(64)
+  templateVersion     Int                           @map("template_version") @db.SmallInt
+  templateFingerprint String                        @map("template_fingerprint") @db.Char(64)
+  installedBySubject  String                        @map("installed_by_subject") @db.VarChar(256)
+  createdAt           DateTime                      @default(now()) @map("created_at")
+  updatedAt           DateTime                      @updatedAt @map("updated_at")
+  stages              PipelineStage[]
+  installation        PipelineTemplateInstallation?
+
+  @@unique([id, workspaceId])
+  @@index([workspaceId, createdAt])
+  @@map("pipelines")
+  @@schema("crm_sales")
+}
+
+model PipelineStage {
+  id          String                @id @default(uuid()) @db.Uuid
+  pipelineId  String                @map("pipeline_id") @db.Uuid
+  workspaceId String                @map("workspace_id") @db.Uuid
+  key         String                @db.VarChar(64)
+  name        String                @db.VarChar(200)
+  position    Int                   @db.SmallInt
+  state       CrmPipelineStageState
+  createdAt   DateTime              @default(now()) @map("created_at")
+  updatedAt   DateTime              @updatedAt @map("updated_at")
+  pipeline    Pipeline              @relation(fields: [pipelineId, workspaceId], references: [id, workspaceId], onDelete: Cascade)
+
+  @@unique([pipelineId, key])
+  @@unique([pipelineId, position])
+  @@map("pipeline_stages")
+  @@schema("crm_sales")
+}
+
+model PipelineTemplateInstallation {
+  id                  String                                @id @default(uuid()) @db.Uuid
+  initialCommandId    String                                @unique @map("initial_command_id") @db.Uuid
+  workspaceId         String                                @unique @map("workspace_id") @db.Uuid
+  pipelineId          String                                @unique @map("pipeline_id") @db.Uuid
+  templateKey         String                                @map("template_key") @db.VarChar(64)
+  templateVersion     Int                                   @map("template_version") @db.SmallInt
+  templateFingerprint String                                @map("template_fingerprint") @db.Char(64)
+  installedBySubject  String                                @map("installed_by_subject") @db.VarChar(256)
+  createdAt           DateTime                              @default(now()) @map("created_at")
+  pipeline            Pipeline                              @relation(fields: [pipelineId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
+  commands            PipelineTemplateInstallationCommand[]
+
+  @@unique([pipelineId, workspaceId])
+  @@map("pipeline_template_installations")
+  @@schema("crm_sales")
+}
+
+model PipelineTemplateInstallationCommand {
+  commandId          String                       @id @map("command_id") @db.Uuid
+  installationId     String                       @map("installation_id") @db.Uuid
+  requestHash        String                       @map("request_hash") @db.Char(64)
+  requestHashVersion Int                          @default(1) @map("request_hash_version") @db.SmallInt
+  requestedBySubject String                       @map("requested_by_subject") @db.VarChar(256)
+  createdAt          DateTime                     @default(now()) @map("created_at")
+  installation       PipelineTemplateInstallation @relation(fields: [installationId], references: [id], onDelete: Restrict)
+
+  @@index([installationId, createdAt])
+  @@map("pipeline_template_installation_commands")
+  @@schema("crm_sales")
+}
+
+enum CrmPipelineStageState {
+  OPEN
+  WON
+  LOST
+
+  @@schema("crm_sales")
+}

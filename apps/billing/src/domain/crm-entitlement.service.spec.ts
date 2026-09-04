@@ -1,9 +1,13 @@
 import { CrmEntitlementStatus } from '@prisma/billing-client';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { billingCommandRequestHash } from './billing-command-idempotency';
 import { CrmEntitlementService } from './crm-entitlement.service';
 
 const WORKSPACE_ID = '11111111-1111-4111-8111-111111111111';
 const COMMAND_ID = '22222222-2222-4222-8222-222222222222';
+const REPLACEMENT_COMMAND_ID = '44444444-4444-4444-8444-444444444444';
+const PROVISIONING_COMMAND_TYPE = 'ACTIVATE_WINCRM_TRIAL';
 const NOW = new Date('2026-09-02T10:00:00.000Z');
 
 const entitlement = (overrides: Record<string, unknown> = {}) => ({
@@ -16,6 +20,8 @@ const entitlement = (overrides: Record<string, unknown> = {}) => ({
 	trialStartedAt: NOW,
 	effectiveFrom: NOW,
 	effectiveUntil: new Date('2026-09-07T10:00:00.000Z'),
+	provisioningCommandId: COMMAND_ID,
+	provisioningCommandType: PROVISIONING_COMMAND_TYPE,
 	activatedByUserId: 'user-1',
 	aggregateVersion: 1n,
 	sourceSequence: 1n,
@@ -66,6 +72,36 @@ describe('CrmEntitlementService', () => {
 			entitlement: {
 				workspaceId: WORKSPACE_ID,
 				effectiveUntil: '2026-09-07T10:00:00.000Z'
+			}
+		});
+	});
+
+	it('returns Billing-owned provisioning provenance in the internal entitlement contract', async () => {
+		jest.useFakeTimers().setSystemTime(NOW);
+		const prisma = {
+			crmEntitlement: {
+				findUnique: jest.fn().mockResolvedValue(entitlement())
+			}
+		};
+		const service = new CrmEntitlementService(prisma as never);
+
+		await expect(service.get(WORKSPACE_ID)).resolves.toEqual({
+			schemaVersion: 1,
+			productCode: 'WINCRM',
+			status: CrmEntitlementStatus.ACTIVE,
+			entitlement: {
+				id: '33333333-3333-4333-8333-333333333333',
+				workspaceId: WORKSPACE_ID,
+				planCode: 'TRIAL',
+				seatLimit: null,
+				trialStartedAt: NOW.toISOString(),
+				effectiveFrom: NOW.toISOString(),
+				effectiveUntil: '2026-09-07T10:00:00.000Z',
+				provisioningCommandId: COMMAND_ID,
+				provisioningCommandType: PROVISIONING_COMMAND_TYPE,
+				activatedByUserId: 'user-1',
+				aggregateVersion: '1',
+				sourceSequence: '1'
 			}
 		});
 	});
@@ -123,7 +159,10 @@ describe('CrmEntitlementService', () => {
 			entitlement: {
 				workspaceId: WORKSPACE_ID,
 				trialStartedAt: NOW.toISOString(),
-				effectiveUntil: '2026-09-07T10:00:00.000Z'
+				effectiveUntil: '2026-09-07T10:00:00.000Z',
+				provisioningCommandId: COMMAND_ID,
+				provisioningCommandType: PROVISIONING_COMMAND_TYPE,
+				activatedByUserId: 'user-1'
 			}
 		});
 		expect(transaction.crmEntitlement.create).toHaveBeenCalledWith({
@@ -132,12 +171,32 @@ describe('CrmEntitlementService', () => {
 				productCode: 'WINCRM',
 				planCode: 'TRIAL',
 				trialStartedAt: NOW,
-				effectiveUntil: new Date('2026-09-07T10:00:00.000Z')
+				effectiveUntil: new Date('2026-09-07T10:00:00.000Z'),
+				provisioningCommandId: COMMAND_ID,
+				provisioningCommandType: PROVISIONING_COMMAND_TYPE,
+				activatedByUserId: 'user-1'
+			})
+		});
+		expect(transaction.billingCommandReceipt.create).toHaveBeenCalledWith({
+			data: expect.objectContaining({
+				commandId: COMMAND_ID,
+				commandType: PROVISIONING_COMMAND_TYPE,
+				requestHashVersion: 1,
+				result: expect.objectContaining({
+					activated: true,
+					entitlement: expect.objectContaining({
+						provisioningCommandId: COMMAND_ID,
+						provisioningCommandType: PROVISIONING_COMMAND_TYPE,
+						activatedByUserId: 'user-1'
+					})
+				})
 			})
 		});
 		const event =
 			transaction.outboxEvent.create.mock.calls[0][0].data.payload;
 		expect(event.state).not.toHaveProperty('activatedByUserId');
+		expect(event.state).not.toHaveProperty('provisioningCommandId');
+		expect(event.state).not.toHaveProperty('provisioningCommandType');
 		expect(JSON.stringify(event)).not.toContain('user-1');
 	});
 
@@ -164,16 +223,38 @@ describe('CrmEntitlementService', () => {
 		};
 		const service = new CrmEntitlementService(prisma as never);
 
-		await expect(service.activateTrial(command())).resolves.toMatchObject({
+		await expect(
+			service.activateTrial({
+				...command(),
+				commandId: REPLACEMENT_COMMAND_ID
+			})
+		).resolves.toMatchObject({
 			activated: false,
 			status: CrmEntitlementStatus.EXPIRED,
 			entitlement: {
 				trialStartedAt: NOW.toISOString(),
-				effectiveUntil: '2026-09-07T10:00:00.000Z'
+				effectiveUntil: '2026-09-07T10:00:00.000Z',
+				provisioningCommandId: COMMAND_ID,
+				provisioningCommandType: PROVISIONING_COMMAND_TYPE,
+				activatedByUserId: 'user-1'
 			}
 		});
 		expect(transaction.crmEntitlement.create).not.toHaveBeenCalled();
 		expect(transaction.outboxEvent.create).not.toHaveBeenCalled();
+		expect(transaction.billingCommandReceipt.create).toHaveBeenCalledWith({
+			data: expect.objectContaining({
+				commandId: REPLACEMENT_COMMAND_ID,
+				commandType: PROVISIONING_COMMAND_TYPE,
+				result: expect.objectContaining({
+					activated: false,
+					entitlement: expect.objectContaining({
+						provisioningCommandId: COMMAND_ID,
+						provisioningCommandType: PROVISIONING_COMMAND_TYPE,
+						activatedByUserId: 'user-1'
+					})
+				})
+			})
+		});
 	});
 
 	it('recomputes expiry when the original command is retried later', async () => {
@@ -213,8 +294,168 @@ describe('CrmEntitlementService', () => {
 			status: CrmEntitlementStatus.EXPIRED,
 			entitlement: {
 				trialStartedAt: NOW.toISOString(),
-				effectiveUntil: '2026-09-07T10:00:00.000Z'
+				effectiveUntil: '2026-09-07T10:00:00.000Z',
+				provisioningCommandId: COMMAND_ID,
+				provisioningCommandType: PROVISIONING_COMMAND_TYPE,
+				activatedByUserId: 'user-1'
 			}
 		});
+	});
+
+	it('keeps original provenance when retrying a command that did not provision the entitlement', async () => {
+		jest.useFakeTimers().setSystemTime(NOW);
+		const payload = {
+			...command(),
+			commandId: REPLACEMENT_COMMAND_ID
+		};
+		const transaction = {
+			$executeRaw: jest.fn().mockResolvedValue(1),
+			billingCommandReceipt: {
+				findUnique: jest.fn().mockResolvedValue({
+					commandType: PROVISIONING_COMMAND_TYPE,
+					requestHash: billingCommandRequestHash(
+						PROVISIONING_COMMAND_TYPE,
+						payload
+					),
+					requestHashVersion: 1,
+					result: { activated: false }
+				})
+			},
+			crmEntitlement: {
+				findUnique: jest.fn().mockResolvedValue(entitlement())
+			}
+		};
+		const prisma = {
+			$transaction: jest.fn(async callback => callback(transaction))
+		};
+		const service = new CrmEntitlementService(prisma as never);
+
+		await expect(service.activateTrial(payload)).resolves.toMatchObject({
+			activated: false,
+			entitlement: {
+				provisioningCommandId: COMMAND_ID,
+				provisioningCommandType: PROVISIONING_COMMAND_TYPE,
+				activatedByUserId: 'user-1'
+			}
+		});
+	});
+
+	it('fails closed when an activation receipt has no boolean result', async () => {
+		const payload = command();
+		const transaction = {
+			$executeRaw: jest.fn().mockResolvedValue(1),
+			billingCommandReceipt: {
+				findUnique: jest.fn().mockResolvedValue({
+					commandType: PROVISIONING_COMMAND_TYPE,
+					requestHash: billingCommandRequestHash(
+						PROVISIONING_COMMAND_TYPE,
+						payload
+					),
+					requestHashVersion: 1,
+					result: {}
+				})
+			},
+			crmEntitlement: {
+				findUnique: jest.fn().mockResolvedValue(entitlement())
+			}
+		};
+		const prisma = {
+			$transaction: jest.fn(async callback => callback(transaction))
+		};
+		const service = new CrmEntitlementService(prisma as never);
+
+		await expect(service.activateTrial(payload)).rejects.toThrow(
+			'WinCRM activation receipt has an invalid result'
+		);
+	});
+
+	it.each([
+		['command ID', { provisioningCommandId: REPLACEMENT_COMMAND_ID }],
+		[
+			'command type',
+			{ provisioningCommandType: 'ACTIVATE_ANOTHER_PRODUCT' }
+		],
+		['activating user', { activatedByUserId: 'another-user' }]
+	])(
+		'fails closed when an accepted receipt disagrees with the saved provisioning %s',
+		async (_case, entitlementOverrides) => {
+			const payload = command();
+			const transaction = {
+				$executeRaw: jest.fn().mockResolvedValue(1),
+				billingCommandReceipt: {
+					findUnique: jest.fn().mockResolvedValue({
+						commandType: PROVISIONING_COMMAND_TYPE,
+						requestHash: billingCommandRequestHash(
+							PROVISIONING_COMMAND_TYPE,
+							payload
+						),
+						requestHashVersion: 1,
+						result: { activated: true }
+					})
+				},
+				crmEntitlement: {
+					findUnique: jest
+						.fn()
+						.mockResolvedValue(entitlement(entitlementOverrides))
+				}
+			};
+			const prisma = {
+				$transaction: jest.fn(async callback => callback(transaction))
+			};
+			const service = new CrmEntitlementService(prisma as never);
+
+			await expect(service.activateTrial(payload)).rejects.toThrow(
+				'WinCRM entitlement provenance does not match its accepted activation receipt'
+			);
+		}
+	);
+});
+
+describe('WinCRM entitlement provisioning provenance migration', () => {
+	const migration = readFileSync(
+		join(
+			__dirname,
+			'../../prisma/migrations/20260904092000_add_crm_entitlement_provisioning_provenance/migration.sql'
+		),
+		'utf8'
+	);
+
+	it('backfills only from accepted Trial command receipts and fails closed', () => {
+		expect(migration).toContain(
+			`receipt."command_type" = 'ACTIVATE_WINCRM_TRIAL'`
+		);
+		expect(migration).toContain(
+			`receipt."result"->'activated' = 'true'::jsonb`
+		);
+		expect(migration).toContain(') IS NOT TRUE');
+		expect(migration).toContain(
+			`receipt."result"->'entitlement'->>'planCode' = 'TRIAL'`
+		);
+		expect(migration).toContain(
+			'Every WinCRM entitlement must have exactly one accepted provisioning command receipt'
+		);
+		expect(migration).toContain(
+			'Cannot backfill WinCRM provisioning provenance from an invalid accepted command receipt'
+		);
+		expect(migration).not.toMatch(/gen_random_uuid|uuid_generate/i);
+		expect(migration).toContain(
+			'FULL JOIN "accepted_provisioning_receipts" AS receipt'
+		);
+		expect(migration).not.toContain('CREATE TEMPORARY TABLE');
+	});
+
+	it('requires well-formed provenance that is unique by source command', () => {
+		expect(migration).toContain(
+			'ALTER COLUMN "provisioning_command_id" SET NOT NULL'
+		);
+		expect(migration).toContain(
+			'ALTER COLUMN "provisioning_command_type" SET NOT NULL'
+		);
+		expect(migration).toContain(
+			`"provisioning_command_type" ~ '^[A-Z][A-Z0-9_]{0,63}$'`
+		);
+		expect(migration).toContain(
+			'CREATE UNIQUE INDEX "crm_entitlements_provisioning_command_id_key"'
+		);
 	});
 });

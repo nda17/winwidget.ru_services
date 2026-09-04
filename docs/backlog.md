@@ -82,6 +82,13 @@ Read-only аудит production API и личного кабинета ЮKassa �
   semantics; не выводить из текущих тарифов Widgets цены WinCRM;
 - синхронно добавить отдельные production tokens Identity/Billing для
   `crm-access`, не ослабляя обязательную проверку токенов в runtime;
+- синхронно задать одну и ту же сильную пару
+  `CRM_SALES_CRM_ACCESS_TOKEN` в `crm-access` и `crm-sales`; несовпадение или
+  односторонняя ротация блокирует rollout и onboarding;
+- держать публичные CRM routes закрытыми до согласованного применения Billing
+  provenance migration/runtime и `crm-access` migration/runtime: новый exact
+  Billing-контракт несовместим со старым parser, а новые Billing `NOT NULL`
+  поля нельзя оставлять со старым Trial write-path;
 - добавить точные Gateway routes `/api/v1/crm/access` -> `crm-access` и
   `/api/v1/crm/templates` -> `crm-sales`, origin `https://crm.winwidget.ru` и
   обновить route-manifest только вместе с полной двусторонней синхронизацией
@@ -107,6 +114,32 @@ Read-only аудит production API и личного кабинета ЮKassa �
 
 До выполнения этих условий текущая CRM-ветка является локальной foundation,
 а не разрешением на production rollout или изменение VPS.
+
+### P1 — подключить изменяемые настройки WinCRM к существующей админке
+
+Локальная страница `/admin/crm` пока является безопасным read-only экраном:
+показывает зафиксированные продуктовые параметры, границы четырёх сервисов и
+публичный каталог шаблонов. Изменения не включать до согласования тарифов и
+post-Trial lifecycle.
+
+При реализации:
+
+- не создавать отдельную CRM-админку, admin-service или общую таблицу
+  настроек; каждый параметр изменяется через endpoint владельца домена
+  (коммерческие и Trial-политики — Billing, версии шаблонов — `crm-sales`);
+- разрешить безопасное чтение `ADMIN` и `DEV`, а изменяющие endpoints — только
+  `DEV` с независимой backend-проверкой прав;
+- каждую команду выполнять идемпотентно, с optimistic concurrency/version и
+  записью в Журнал событий; frontend-блокировка не считается защитой;
+- в MVP оставлять каталог шаблонов code-owned и публиковать новую immutable
+  версию только через Git/CI-релиз `crm-sales`; не добавлять редактор в админку
+  без отдельной модели `draft -> published`, version locking, fingerprint,
+  backup и аудита;
+- версионировать изменения, влияющие на действующих клиентов: уже начатый
+  Trial и установленный `templateKey@version` не должны переписываться задним
+  числом;
+- не копировать в операторскую админку контакты, сделки или другую клиентскую
+  PII; для наблюдения использовать только агрегированные read models.
 
 ## RabbitMQ и фоновые задачи
 

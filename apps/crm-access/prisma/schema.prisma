@@ -22,13 +22,21 @@ model ServiceIdentity {
 }
 
 model CrmWorkspaceAccess {
-  id                       String             @id @default(uuid()) @db.Uuid
-  workspaceId              String             @unique @map("workspace_id") @db.Uuid
-  lifecycle                CrmAccessLifecycle @default(ONBOARDING)
-  activatedBySubject       String             @map("activated_by_subject") @db.VarChar(256)
-  trialActivationCommandId String             @unique @map("trial_activation_command_id") @db.Uuid
-  createdAt                DateTime           @default(now()) @map("created_at")
-  updatedAt                DateTime           @updatedAt @map("updated_at")
+  id                            String             @id @default(uuid()) @db.Uuid
+  workspaceId                   String             @unique @map("workspace_id") @db.Uuid
+  lifecycle                     CrmAccessLifecycle @default(ONBOARDING)
+  activatedBySubject            String             @map("activated_by_subject") @db.VarChar(256)
+  billingEntitlementId          String             @unique @map("billing_entitlement_id") @db.Uuid
+  provisioningCommandId         String             @unique @map("provisioning_command_id") @db.Uuid
+  provisioningCommandType       String             @map("provisioning_command_type") @db.VarChar(64)
+  onboardingCommandId           String?            @unique @map("onboarding_command_id") @db.Uuid
+  onboardingTemplateKey         String?            @map("onboarding_template_key") @db.VarChar(64)
+  onboardingTemplateVersion     Int?               @map("onboarding_template_version") @db.SmallInt
+  onboardingTemplateFingerprint String?            @map("onboarding_template_fingerprint") @db.Char(64)
+  onboardingPipelineId          String?            @map("onboarding_pipeline_id") @db.Uuid
+  onboardingCompletedAt         DateTime?          @map("onboarding_completed_at")
+  createdAt                     DateTime           @default(now()) @map("created_at")
+  updatedAt                     DateTime           @updatedAt @map("updated_at")
 
   @@index([lifecycle, updatedAt])
   @@map("crm_workspace_access")

@@ -1,7 +1,6 @@
 import {
 	Equals,
 	IsInt,
-	IsOptional,
 	IsString,
 	IsUUID,
 	Matches,
@@ -10,25 +9,7 @@ import {
 	Min
 } from 'class-validator';
 
-export class CrmBootstrapQueryDto {
-	@IsOptional()
-	@IsUUID('4')
-	workspaceId?: string;
-}
-
-export class ActivateCrmTrialDto {
-	@IsInt()
-	@Equals(1)
-	schemaVersion!: 1;
-
-	@IsUUID('4')
-	commandId!: string;
-
-	@IsUUID('4')
-	workspaceId!: string;
-}
-
-export class InstallCrmPipelineTemplateDto {
+export class InstallPipelineTemplateDto {
 	@IsInt()
 	@Equals(1)
 	schemaVersion!: 1;
@@ -48,4 +29,9 @@ export class InstallCrmPipelineTemplateDto {
 	@Min(1)
 	@Max(32_767)
 	templateVersion!: number;
+
+	@IsString()
+	@MaxLength(256)
+	@Matches(/^[^\s\x00-\x1f\x7f]{1,256}$/)
+	installedBySubject!: string;
 }

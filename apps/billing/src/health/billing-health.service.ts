@@ -30,10 +30,18 @@ export class BillingHealthService {
 	async readiness() {
 		try {
 			await this.prisma.$queryRaw`SELECT 1`;
-			const identity = await this.prisma.serviceIdentity.findUnique({
-				where: { id: 'singleton' },
-				select: { serviceName: true, databaseId: true }
-			});
+			const [identity] = await Promise.all([
+				this.prisma.serviceIdentity.findUnique({
+					where: { id: 'singleton' },
+					select: { serviceName: true, databaseId: true }
+				}),
+				this.prisma.crmEntitlement.findFirst({
+					select: {
+						provisioningCommandId: true,
+						provisioningCommandType: true
+					}
+				})
+			]);
 			if (
 				identity?.serviceName !== 'billing-service' ||
 				!identity.databaseId

@@ -4,8 +4,11 @@ import { PipelineTemplateCatalogController } from './pipeline-template-catalog.c
 import { PipelineTemplateCatalogService } from './pipeline-template-catalog.service';
 import {
 	buildPipelineTemplateVersionIndex,
+	getPipelineTemplateFingerprint,
 	getPipelineTemplate,
 	getPipelineTemplateFromIndex,
+	MAX_PIPELINE_TEMPLATE_VERSION,
+	PIPELINE_TEMPLATE_FINGERPRINTS,
 	PIPELINE_TEMPLATE_VERSIONS,
 	PIPELINE_TEMPLATES_V1,
 	validatePipelineTemplateCatalog
@@ -23,6 +26,29 @@ const EXPECTED_TEMPLATE_KEYS = [
 	'logistics',
 	'blank'
 ];
+
+const EXPECTED_TEMPLATE_FINGERPRINTS = {
+	'universal-sales@1':
+		'3db975e233207eab18fb8a4c5675a3c9aa10341e3a30011b46da5072bd88a842',
+	'appointment-services@1':
+		'384e27ade3d71d6f1caa6d677486512840515e892093684b4461695f48c44442',
+	'retail-orders@1':
+		'4e7e04c181d23e6bc285bf9de7dc5732338c723dc4b379f60f7b0b9df20670e1',
+	'wholesale-manufacturing@1':
+		'b28ece4c5d893783822eaac8aceefcebaf43b9030c7342ab5c469f5422766512',
+	'custom-projects@1':
+		'b748c99ad5ee44ebdf0cbb7b5931a3b80c14de139e5dbf48ff4bea367cca325f',
+	'education-courses@1':
+		'10e22e2da4ac8e20f82294f5d7b306eb5a7405f043054784f27c9530a09dfa3e',
+	'memberships-fitness@1':
+		'1d0e86d7d1857f69ede19219fa6bf30b5116d0686436f88ed4b33e0f0dafa704',
+	'construction-repair@1':
+		'0d8baab45673133c99eba8ac5033f9297150c7c5803cb8c87fecffaf78d82c75',
+	'logistics@1':
+		'371f579d1778f1b742f2c0cb004c4bee885acc4a86b3cfcd5fd277ed3b3086a6',
+	'blank@1':
+		'f30349ec7b8b34c06eb09fd080646fccf07c6ab24d443d88e0a2483aac41d201'
+} as const;
 
 describe('pipeline template catalog v1', () => {
 	it('publishes exactly the agreed ten templates', () => {
@@ -106,6 +132,26 @@ describe('pipeline template catalog v1', () => {
 		);
 	});
 
+	it('pins every immutable template version independently', () => {
+		expect(PIPELINE_TEMPLATE_FINGERPRINTS).toEqual(
+			EXPECTED_TEMPLATE_FINGERPRINTS
+		);
+		expect(Object.isFrozen(PIPELINE_TEMPLATE_FINGERPRINTS)).toBe(true);
+		for (const [versionId, fingerprint] of Object.entries(
+			EXPECTED_TEMPLATE_FINGERPRINTS
+		)) {
+			const separator = versionId.lastIndexOf('@');
+			const key = versionId.slice(0, separator);
+			const version = Number(versionId.slice(separator + 1));
+			expect(getPipelineTemplateFingerprint(key, version)).toBe(
+				fingerprint
+			);
+		}
+		expect(
+			getPipelineTemplateFingerprint('universal-sales', 2)
+		).toBeUndefined();
+	});
+
 	it('rejects duplicate template versions and duplicate stage keys', () => {
 		expect(() =>
 			validatePipelineTemplateCatalog([
@@ -125,14 +171,14 @@ describe('pipeline template catalog v1', () => {
 		).toThrow('Duplicate stage key');
 	});
 
-	it('rejects a non-positive or unsafe template version', () => {
+	it('rejects a template version outside the PostgreSQL SMALLINT contract', () => {
 		const template = PIPELINE_TEMPLATES_V1[0];
 		expect(() =>
 			validatePipelineTemplateCatalog([{ ...template, version: 0 }])
 		).toThrow('Invalid template version');
 		expect(() =>
 			validatePipelineTemplateCatalog([
-				{ ...template, version: Number.MAX_SAFE_INTEGER + 1 }
+				{ ...template, version: MAX_PIPELINE_TEMPLATE_VERSION + 1 }
 			])
 		).toThrow('Invalid template version');
 	});

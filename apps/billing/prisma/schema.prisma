@@ -420,20 +420,22 @@ model BillingCommandReceipt {
 }
 
 model CrmEntitlement {
-  id                String               @id @default(uuid()) @db.Uuid
-  workspaceId       String               @unique(map: "crm_entitlements_workspace_id_key") @map("workspace_id") @db.Uuid
-  productCode       String               @default("WINCRM") @map("product_code") @db.VarChar(32)
-  planCode          String               @default("TRIAL") @map("plan_code") @db.VarChar(32)
-  status            CrmEntitlementStatus @default(ACTIVE)
-  seatLimit         Int?                 @map("seat_limit")
-  trialStartedAt    DateTime?            @map("trial_started_at")
-  effectiveFrom     DateTime             @map("effective_from")
-  effectiveUntil    DateTime             @map("effective_until")
-  activatedByUserId String               @map("activated_by_user_id")
-  aggregateVersion  BigInt               @default(1) @map("aggregate_version")
-  sourceSequence    BigInt               @map("source_sequence")
-  createdAt         DateTime             @default(now()) @map("created_at")
-  updatedAt         DateTime             @updatedAt @map("updated_at")
+  id                      String               @id @default(uuid()) @db.Uuid
+  workspaceId             String               @unique(map: "crm_entitlements_workspace_id_key") @map("workspace_id") @db.Uuid
+  productCode             String               @default("WINCRM") @map("product_code") @db.VarChar(32)
+  planCode                String               @default("TRIAL") @map("plan_code") @db.VarChar(32)
+  status                  CrmEntitlementStatus @default(ACTIVE)
+  seatLimit               Int?                 @map("seat_limit")
+  trialStartedAt          DateTime?            @map("trial_started_at")
+  effectiveFrom           DateTime             @map("effective_from")
+  effectiveUntil          DateTime             @map("effective_until")
+  provisioningCommandId   String               @unique(map: "crm_entitlements_provisioning_command_id_key") @map("provisioning_command_id") @db.Uuid
+  provisioningCommandType String               @map("provisioning_command_type") @db.VarChar(64)
+  activatedByUserId       String               @map("activated_by_user_id")
+  aggregateVersion        BigInt               @default(1) @map("aggregate_version")
+  sourceSequence          BigInt               @map("source_sequence")
+  createdAt               DateTime             @default(now()) @map("created_at")
+  updatedAt               DateTime             @updatedAt @map("updated_at")
 
   @@index([status, effectiveUntil], map: "crm_entitlements_status_effective_until_idx")
   @@map("crm_entitlements")

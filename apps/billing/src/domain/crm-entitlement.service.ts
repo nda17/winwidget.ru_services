@@ -19,6 +19,7 @@ import {
 
 const CRM_PRODUCT_CODE = 'WINCRM';
 const CRM_TRIAL_PLAN_CODE = 'TRIAL';
+const CRM_TRIAL_PROVISIONING_COMMAND_TYPE = 'ACTIVATE_WINCRM_TRIAL';
 const CRM_TRIAL_DAYS = 5;
 const CRM_TRIAL_DURATION_MS = CRM_TRIAL_DAYS * 24 * 60 * 60 * 1000;
 
@@ -38,6 +39,9 @@ export interface CrmEntitlementResponse {
 		trialStartedAt: string | null;
 		effectiveFrom: string;
 		effectiveUntil: string;
+		provisioningCommandId: string;
+		provisioningCommandType: string;
+		activatedByUserId: string;
 		aggregateVersion: string;
 		sourceSequence: string;
 	} | null;
@@ -59,7 +63,7 @@ export class CrmEntitlementService {
 	}
 
 	async activateTrial(dto: ActivateCrmTrialCommandDto) {
-		const commandType = 'ACTIVATE_WINCRM_TRIAL';
+		const commandType = CRM_TRIAL_PROVISIONING_COMMAND_TYPE;
 		const payload = {
 			schemaVersion: dto.schemaVersion,
 			commandId: dto.commandId,
@@ -78,7 +82,11 @@ export class CrmEntitlementService {
 								where: { commandId: dto.commandId }
 							});
 						if (prior) {
-							assertBillingCommandReceipt(prior, commandType, requestHash);
+							const priorResult = assertBillingCommandReceipt(
+								prior,
+								commandType,
+								requestHash
+							);
 							const current = await transaction.crmEntitlement.findUnique({
 								where: { workspaceId: dto.workspaceId }
 							});
@@ -87,6 +95,12 @@ export class CrmEntitlementService {
 									'WinCRM entitlement is missing for an accepted activation receipt'
 								);
 							}
+							this.assertAcceptedProvisioningProvenance(
+								priorResult,
+								current,
+								dto,
+								commandType
+							);
 							return {
 								...this.response(current, new Date()),
 								activated: false
@@ -122,6 +136,8 @@ export class CrmEntitlementService {
 									effectiveUntil: new Date(
 										now.getTime() + CRM_TRIAL_DURATION_MS
 									),
+									provisioningCommandId: dto.commandId,
+									provisioningCommandType: commandType,
 									activatedByUserId: dto.activatedByUserId,
 									sourceSequence
 								}
@@ -188,6 +204,9 @@ export class CrmEntitlementService {
 				trialStartedAt: entitlement.trialStartedAt?.toISOString() || null,
 				effectiveFrom: entitlement.effectiveFrom.toISOString(),
 				effectiveUntil: entitlement.effectiveUntil.toISOString(),
+				provisioningCommandId: entitlement.provisioningCommandId,
+				provisioningCommandType: entitlement.provisioningCommandType,
+				activatedByUserId: entitlement.activatedByUserId,
 				aggregateVersion: entitlement.aggregateVersion.toString(),
 				sourceSequence: entitlement.sourceSequence.toString()
 			}
@@ -240,6 +259,33 @@ export class CrmEntitlementService {
 			update: { nextValue: { increment: 1n } }
 		});
 		return state.nextValue - 1n;
+	}
+
+	private assertAcceptedProvisioningProvenance(
+		result: Prisma.JsonValue,
+		entitlement: CrmEntitlement,
+		dto: ActivateCrmTrialCommandDto,
+		commandType: string
+	): void {
+		if (
+			result === null ||
+			typeof result !== 'object' ||
+			Array.isArray(result) ||
+			typeof result.activated !== 'boolean'
+		) {
+			throw new Error('WinCRM activation receipt has an invalid result');
+		}
+		if (!result.activated) return;
+		if (
+			entitlement.provisioningCommandId.toLowerCase() !==
+				dto.commandId.toLowerCase() ||
+			entitlement.provisioningCommandType !== commandType ||
+			entitlement.activatedByUserId !== dto.activatedByUserId
+		) {
+			throw new Error(
+				'WinCRM entitlement provenance does not match its accepted activation receipt'
+			);
+		}
 	}
 
 	private retryableTransactionError(error: unknown): boolean {

@@ -36,4 +36,40 @@ describe('CrmAccessController', () => {
 			workspaceId: WORKSPACE_ID
 		});
 	});
+
+	it('requires the onboarding Idempotency-Key to match commandId', () => {
+		const access = { installTemplate: jest.fn() };
+		const controller = new CrmAccessController(access as never);
+		expect(() =>
+			controller.installTemplate('Bearer token', undefined, {
+				schemaVersion: 1,
+				commandId: COMMAND_ID,
+				workspaceId: WORKSPACE_ID,
+				templateKey: 'universal-sales',
+				templateVersion: 1
+			})
+		).toThrow(BadRequestException);
+		expect(access.installTemplate).not.toHaveBeenCalled();
+	});
+
+	it('passes the exact public onboarding command to the service', () => {
+		const access = {
+			installTemplate: jest.fn().mockReturnValue({ ok: true })
+		};
+		const controller = new CrmAccessController(access as never);
+		const command = {
+			schemaVersion: 1 as const,
+			commandId: COMMAND_ID,
+			workspaceId: WORKSPACE_ID,
+			templateKey: 'universal-sales',
+			templateVersion: 1
+		};
+		expect(
+			controller.installTemplate('Bearer token', COMMAND_ID, command)
+		).toEqual({ ok: true });
+		expect(access.installTemplate).toHaveBeenCalledWith(
+			'Bearer token',
+			command
+		);
+	});
 });

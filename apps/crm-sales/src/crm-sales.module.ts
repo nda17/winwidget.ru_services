@@ -3,6 +3,9 @@ import { ConfigModule } from '@nestjs/config';
 import { CrmSalesHealthController } from './health/crm-sales-health.controller';
 import { CrmSalesHealthService } from './health/crm-sales-health.service';
 import { CrmSalesPrismaModule } from './prisma/crm-sales-prisma.module';
+import { CrmSalesInternalGuard } from './internal/crm-sales-internal.guard';
+import { PipelineTemplateInstallationController } from './pipelines/pipeline-template-installation.controller';
+import { PipelineTemplateInstallationService } from './pipelines/pipeline-template-installation.service';
 import { PipelineTemplateCatalogController } from './templates/pipeline-template-catalog.controller';
 import { PipelineTemplateCatalogService } from './templates/pipeline-template-catalog.service';
 
@@ -13,8 +16,14 @@ import { PipelineTemplateCatalogService } from './templates/pipeline-template-ca
 	],
 	controllers: [
 		CrmSalesHealthController,
-		PipelineTemplateCatalogController
+		PipelineTemplateCatalogController,
+		PipelineTemplateInstallationController
 	],
-	providers: [CrmSalesHealthService, PipelineTemplateCatalogService]
+	providers: [
+		CrmSalesHealthService,
+		CrmSalesInternalGuard,
+		PipelineTemplateCatalogService,
+		PipelineTemplateInstallationService
+	]
 })
 export class CrmSalesModule {}

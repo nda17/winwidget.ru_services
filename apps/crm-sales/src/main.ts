@@ -1,4 +1,4 @@
-import { Logger, RequestMethod } from '@nestjs/common';
+import { Logger, RequestMethod, ValidationPipe } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import type { NestExpressApplication } from '@nestjs/platform-express';
 import { parseCrmSalesCorsAllowedOrigins } from './config/crm-sales-cors.config';
@@ -26,9 +26,25 @@ async function bootstrap(): Promise<void> {
 		exclude: [
 			{ path: 'health/live', method: RequestMethod.GET },
 			{ path: 'health/ready', method: RequestMethod.GET },
-			{ path: 'health/revision', method: RequestMethod.GET }
+			{ path: 'health/revision', method: RequestMethod.GET },
+			{
+				path: 'internal/v1/crm-access/pipelines/install-template',
+				method: RequestMethod.POST
+			},
+			{
+				path: 'internal/v1/crm-access/pipelines/workspaces/:workspaceId/installation',
+				method: RequestMethod.GET
+			}
 		]
 	});
+	app.useGlobalPipes(
+		new ValidationPipe({
+			whitelist: true,
+			forbidNonWhitelisted: true,
+			forbidUnknownValues: true,
+			transform: true
+		})
+	);
 	app.enableCors({
 		origin: origins,
 		credentials: true,

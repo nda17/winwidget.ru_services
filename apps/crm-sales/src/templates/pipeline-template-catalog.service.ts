@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import {
+	getPipelineTemplateFingerprint,
 	getPipelineTemplate,
 	PIPELINE_TEMPLATES_V1
 } from './pipeline-template.catalog';
@@ -26,5 +27,12 @@ export class PipelineTemplateCatalogService {
 		version: number
 	): PipelineTemplateDefinition | undefined {
 		return getPipelineTemplate(key, version);
+	}
+
+	getTemplateFingerprint(
+		key: string,
+		version: number
+	): string | undefined {
+		return getPipelineTemplateFingerprint(key, version);
 	}
 }

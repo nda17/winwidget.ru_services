@@ -26,10 +26,20 @@ export class CrmSalesHealthService {
 	async readiness() {
 		try {
 			await this.prisma.$queryRaw`SELECT 1`;
-			const identity = await this.prisma.serviceIdentity.findUnique({
-				where: { id: 'singleton' },
-				select: { serviceName: true, databaseId: true }
-			});
+			const [identity] = await Promise.all([
+				this.prisma.serviceIdentity.findUnique({
+					where: { id: 'singleton' },
+					select: { serviceName: true, databaseId: true }
+				}),
+				this.prisma.pipeline.findFirst({ select: { id: true } }),
+				this.prisma.pipelineStage.findFirst({ select: { id: true } }),
+				this.prisma.pipelineTemplateInstallation.findFirst({
+					select: { id: true }
+				}),
+				this.prisma.pipelineTemplateInstallationCommand.findFirst({
+					select: { commandId: true }
+				})
+			]);
 			if (
 				identity?.serviceName !== DATABASE_SERVICE_NAME ||
 				!identity.databaseId
