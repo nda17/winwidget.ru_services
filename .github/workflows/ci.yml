@@ -31,6 +31,8 @@ jobs:
         with:
           node-version: 20
       - run: bash .github/scripts/static-check-services-lifecycle.sh
+      - name: Verify isolated four-frontend browser harness
+        run: node --test apps/crm-access/test/integration/local-frontends.test.mjs
 
   service:
     name: ${{ matrix.app }}
@@ -256,6 +258,7 @@ jobs:
           - 5432:5432
         options: >-
           --label winwidget.operations-control-ledger=true
+          --label winwidget.operations-backlog-test=true
           --health-cmd "pg_isready -U operations_control_ledger_superuser -d operations_control_ledger"
           --health-interval 2s
           --health-timeout 2s
@@ -288,6 +291,12 @@ jobs:
         env:
           OPERATIONS_CONTROL_LEDGER_POSTGRES_CONTAINER_ID: ${{ job.services.postgres.id }}
         run: pnpm --dir apps/operations run test:integration:restore-control-ledger
+      - name: Prove exact admin Backlog deletion and transactional rollback
+        env:
+          OPERATIONS_BACKLOG_TEST_CONTAINER_ID: ${{ job.services.postgres.id }}
+          OPERATIONS_BACKLOG_TEST_POSTGRES_USER: operations_control_ledger_superuser
+          OPERATIONS_BACKLOG_TEST_ALLOW_MUTATION: 'true'
+        run: node apps/operations/test/integration/admin-backlog-removal-postgres18.integration.mjs
 
   service-integration:
     name: Service integration / ${{ matrix.app }}
@@ -743,11 +752,86 @@ jobs:
           docker exec "$POSTGRES_CONTAINER_ID" psql \
             -U billing_crm_policy_bootstrap_ci -d winwidget_billing_crm_policy_test \
             -v ON_ERROR_STOP=1 \
-            -c "GRANT USAGE ON SCHEMA billing TO winwidget_billing_policy_runtime_ci; GRANT SELECT ON billing.service_identity TO winwidget_billing_policy_runtime_ci; GRANT SELECT, INSERT ON billing.crm_commercial_policies, billing.command_receipts TO winwidget_billing_policy_runtime_ci; GRANT SELECT, INSERT, UPDATE ON billing.source_sequences TO winwidget_billing_policy_runtime_ci; GRANT SELECT, INSERT, UPDATE, DELETE ON billing.crm_entitlements, billing.outbox_events TO winwidget_billing_policy_runtime_ci; REVOKE ALL ON billing._prisma_migrations FROM winwidget_billing_policy_runtime_ci"
+            -c "GRANT USAGE ON SCHEMA billing TO winwidget_billing_policy_runtime_ci; GRANT SELECT ON billing.service_identity, billing.crm_paid_periods TO winwidget_billing_policy_runtime_ci; GRANT SELECT, INSERT ON billing.crm_commercial_policies, billing.command_receipts TO winwidget_billing_policy_runtime_ci; GRANT SELECT, INSERT, UPDATE ON billing.source_sequences TO winwidget_billing_policy_runtime_ci; GRANT SELECT, INSERT, UPDATE, DELETE ON billing.crm_entitlements, billing.outbox_events TO winwidget_billing_policy_runtime_ci; REVOKE ALL ON billing._prisma_migrations FROM winwidget_billing_policy_runtime_ci"
       - name: Build Billing
         run: pnpm --dir apps/billing run build
       - name: Test Billing CRM policy runtime and concurrency
         run: pnpm --dir apps/billing run test:integration:crm-policy
+
+  billing-wincrm-commerce-integration:
+    name: Billing WinCRM commerce PostgreSQL 18
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:18-bookworm@sha256:1961f96e6029a02c3812d7cb329a3b03a3ac2bb067058dec17b0f5596aca9296
+        env:
+          POSTGRES_USER: billing_wincrm_bootstrap_ci
+          POSTGRES_PASSWORD: billing_wincrm_bootstrap_ci
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U billing_wincrm_bootstrap_ci -d postgres"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 30
+    env:
+      BILLING_WINCRM_COMMERCE_TEST_ALLOW_MUTATION: 'true'
+      BILLING_WINCRM_COMMERCE_TEST_DATABASE_URL: 'postgresql://winwidget_billing_commerce_runtime_ci:billing_commerce_runtime_ci_password@127.0.0.1:5432/winwidget_billing_commerce_ci?schema=billing&sslmode=disable'
+      BILLING_WINCRM_COMMERCE_TEST_RUNTIME_ROLE: winwidget_billing_commerce_runtime_ci
+      BILLING_DATABASE_URL: 'postgresql://winwidget_billing_commerce_migration_ci:billing_commerce_migration_ci_password@127.0.0.1:5432/winwidget_billing_commerce_ci?schema=billing&sslmode=disable'
+      BILLING_COMMERCE_MIGRATION_ROLE_PASSWORD: billing_commerce_migration_ci_password
+      BILLING_COMMERCE_RUNTIME_ROLE_PASSWORD: billing_commerce_runtime_ci_password
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Verify immutable revision
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.9
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 20
+          cache: pnpm
+          cache-dependency-path: apps/billing/pnpm-lock.yaml
+      - name: Install Billing
+        run: pnpm --dir apps/billing install --frozen-lockfile
+      - name: Prepare isolated WinCRM commerce database and restricted roles
+        env:
+          POSTGRES_CONTAINER_ID: ${{ job.services.postgres.id }}
+        run: |
+          docker exec "$POSTGRES_CONTAINER_ID" psql -X \
+            -U billing_wincrm_bootstrap_ci -d postgres -v ON_ERROR_STOP=1 \
+            -c "CREATE ROLE winwidget_billing_commerce_migration_ci LOGIN PASSWORD '$BILLING_COMMERCE_MIGRATION_ROLE_PASSWORD' NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS"
+          docker exec "$POSTGRES_CONTAINER_ID" psql -X \
+            -U billing_wincrm_bootstrap_ci -d postgres -v ON_ERROR_STOP=1 \
+            -c "CREATE ROLE winwidget_billing_commerce_runtime_ci LOGIN PASSWORD '$BILLING_COMMERCE_RUNTIME_ROLE_PASSWORD' NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS"
+          docker exec "$POSTGRES_CONTAINER_ID" psql -X \
+            -U billing_wincrm_bootstrap_ci -d postgres -v ON_ERROR_STOP=1 \
+            -c 'CREATE DATABASE winwidget_billing_commerce_ci OWNER billing_wincrm_bootstrap_ci'
+          docker exec "$POSTGRES_CONTAINER_ID" psql -X \
+            -U billing_wincrm_bootstrap_ci -d winwidget_billing_commerce_ci -v ON_ERROR_STOP=1 \
+            -c "REVOKE ALL ON DATABASE winwidget_billing_commerce_ci FROM PUBLIC; GRANT CONNECT ON DATABASE winwidget_billing_commerce_ci TO winwidget_billing_commerce_migration_ci, winwidget_billing_commerce_runtime_ci; REVOKE ALL ON SCHEMA public FROM PUBLIC; CREATE SCHEMA billing AUTHORIZATION winwidget_billing_commerce_migration_ci; CREATE SCHEMA foreign_service_guard AUTHORIZATION billing_wincrm_bootstrap_ci; CREATE TABLE foreign_service_guard.sentinel (id INTEGER PRIMARY KEY); REVOKE ALL ON SCHEMA foreign_service_guard FROM PUBLIC; REVOKE ALL ON ALL TABLES IN SCHEMA foreign_service_guard FROM PUBLIC"
+      - name: Generate Billing Prisma client
+        run: pnpm --dir apps/billing run prisma:generate
+      - name: Apply Billing migrations as migration role
+        run: pnpm --dir apps/billing run prisma:migrate:deploy
+      - name: Grant exact WinCRM commerce runtime privileges
+        env:
+          POSTGRES_CONTAINER_ID: ${{ job.services.postgres.id }}
+        run: |
+          docker exec "$POSTGRES_CONTAINER_ID" psql -X \
+            -U billing_wincrm_bootstrap_ci -d winwidget_billing_commerce_ci -v ON_ERROR_STOP=1 \
+            -c "GRANT USAGE ON SCHEMA billing TO winwidget_billing_commerce_runtime_ci; GRANT SELECT ON billing.service_identity, billing.crm_commercial_policies TO winwidget_billing_commerce_runtime_ci; GRANT SELECT, INSERT ON billing.command_receipts, billing.crm_auto_renewal_consents, billing.identity_contact_projections TO winwidget_billing_commerce_runtime_ci; GRANT SELECT, INSERT, UPDATE ON billing.source_sequences, billing.crm_entitlements, billing.crm_commerce_accounts, billing.crm_commerce_commands, billing.crm_orders, billing.crm_paid_periods, billing.crm_auto_renewals, billing.crm_provider_operations, billing.crm_provider_deliveries, billing.crm_payment_receipts TO winwidget_billing_commerce_runtime_ci; GRANT SELECT, INSERT, UPDATE, DELETE ON billing.outbox_events TO winwidget_billing_commerce_runtime_ci; REVOKE ALL ON billing._prisma_migrations FROM winwidget_billing_commerce_runtime_ci; REVOKE ALL ON FUNCTION billing.protect_wincrm_commerce_evidence() FROM PUBLIC, winwidget_billing_commerce_runtime_ci"
+      - name: Build Billing
+        run: pnpm --dir apps/billing run build
+      - name: Prove isolated WinCRM commerce transactions, snapshots and runtime ACL
+        run: pnpm --dir apps/billing run test:integration:wincrm-commerce
 
   crm-sales-integration:
     name: CRM Sales PostgreSQL 18 atomic installation
@@ -943,10 +1027,11 @@ jobs:
           case "$DOMAIN_APP" in
             identity)
               docker exec "$POSTGRES_CONTAINER_ID" psql -U crm_domain_bootstrap_ci -d "$DOMAIN_DATABASE" -v ON_ERROR_STOP=1 -c 'GRANT USAGE ON SCHEMA identity TO crm_domain_runtime_ci; GRANT SELECT ON identity.service_identity TO crm_domain_runtime_ci; GRANT SELECT, INSERT, UPDATE ON identity.users, identity.workspaces, identity.workspace_members TO crm_domain_runtime_ci; REVOKE ALL ON identity._prisma_migrations FROM crm_domain_runtime_ci'
+              docker exec "$POSTGRES_CONTAINER_ID" psql -U crm_domain_bootstrap_ci -d "$DOMAIN_DATABASE" -v ON_ERROR_STOP=1 -c 'GRANT SELECT ON identity.auth_identities, identity.telegram_notification_channels TO crm_domain_runtime_ci; GRANT UPDATE (id) ON identity.auth_identities TO crm_domain_runtime_ci; GRANT SELECT, INSERT ON identity.user_sessions TO crm_domain_runtime_ci; GRANT SELECT, INSERT, UPDATE, DELETE ON identity.login_otp_challenges, identity.login_otp_rate_limits TO crm_domain_runtime_ci'
               exit 0
               ;;
             crm-access)
-              mutable_tables='crm_access.crm_workspace_access, crm_access.crm_workspace_members, crm_access.crm_teams, crm_access.crm_invitation_intents, crm_access.crm_admissions, crm_access.crm_team_outbox, crm_access.crm_team_deliveries'
+              mutable_tables='crm_access.crm_workspace_access, crm_access.crm_workspace_members, crm_access.crm_teams, crm_access.crm_invitation_intents, crm_access.crm_admissions, crm_access.crm_team_outbox, crm_access.crm_team_deliveries, crm_access.crm_billing_capacity, crm_access.crm_billing_operations'
               receipt_tables='crm_access.crm_team_command_receipts, crm_access.crm_team_audit'
               docker exec "$POSTGRES_CONTAINER_ID" psql -U crm_domain_bootstrap_ci -d "$DOMAIN_DATABASE" -v ON_ERROR_STOP=1 -c 'GRANT SELECT, INSERT, UPDATE, DELETE ON crm_access.crm_member_teams TO crm_domain_runtime_ci; GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA crm_access TO crm_domain_runtime_ci'
               ;;
@@ -996,6 +1081,20 @@ jobs:
             "${domain_prefix}_TEST_SKIP_MIGRATIONS=true" \
             "${domain_prefix}_INTEGRATION_ALLOW_MUTATION=true" \
             pnpm --dir "apps/$DOMAIN_APP" run "$DOMAIN_TEST_SCRIPT"
+      - name: Prove commerce capacity fencing on PostgreSQL 18
+        if: matrix.app == 'crm-access'
+        env:
+          CRM_ACCESS_TEST_DATABASE_URL: ${{ env.DOMAIN_RUNTIME_URL }}
+          CRM_ACCESS_TEST_RUNTIME_ROLE: crm_domain_runtime_ci
+          CRM_ACCESS_INTEGRATION_ALLOW_MUTATION: 'true'
+        run: pnpm --dir apps/crm-access run test:integration:billing
+      - name: Prove passwordless login challenge and durable rate limits on PostgreSQL 18
+        if: matrix.app == 'identity'
+        env:
+          IDENTITY_INTEGRATION_ALLOW_MUTATION: 'true'
+          IDENTITY_TEST_DATABASE_URL: ${{ env.DOMAIN_RUNTIME_URL }}
+          IDENTITY_TEST_MIGRATION_DATABASE_URL: ${{ env.DOMAIN_MIGRATION_URL }}
+        run: node apps/identity/test/integration/login-otp-postgres18.integration.mjs
       - name: Prove bounded read-only export on PostgreSQL 18
         if: matrix.app == 'crm-customers' || matrix.app == 'crm-sales' || matrix.app == 'crm-intake'
         run: |
@@ -1121,6 +1220,7 @@ jobs:
     name: Deploy production
     needs:
       - billing-crm-policy-integration
+      - billing-wincrm-commerce-integration
       - billing-crm-provenance-migration
       - crm-migration-smoke
       - crm-domain-integration

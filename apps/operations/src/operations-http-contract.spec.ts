@@ -14,7 +14,6 @@ import { AdminAlertsController } from './admin-alerts/admin-alerts.controller';
 import { AdminAlertsService } from './admin-alerts/admin-alerts.service';
 import { OperationsIdentityGuard } from './internal/operations-identity.guard';
 import { OperationsHealthController } from './health/operations-health.controller';
-import { NotesController } from './notes/notes.controller';
 import { getOperationsRoleScopedProviders } from './operations.module';
 import { ReportingPolicyGuard } from './reporting-policy/reporting-policy.guard';
 import { ReportingPolicyController } from './reporting-policy/reporting-policy.controller';
@@ -209,39 +208,6 @@ describe('Operations HTTP access contract', () => {
 			'OPERATIONS_DATABASE_BACKUP',
 			'admin-42'
 		);
-	});
-
-	it('keeps every Notes endpoint ADMIN-only', () => {
-		expect(
-			Reflect.getMetadata(OPERATIONS_REQUIRED_ROLES, NotesController)
-		).toEqual(['ADMIN']);
-		expect(Reflect.getMetadata(PATH_METADATA, NotesController)).toBe(
-			'notes'
-		);
-		expect(
-			Reflect.getMetadata(
-				METHOD_METADATA,
-				NotesController.prototype.getAll
-			)
-		).toBe(RequestMethod.GET);
-		expect(
-			Reflect.getMetadata(
-				METHOD_METADATA,
-				NotesController.prototype.create
-			)
-		).toBe(RequestMethod.POST);
-		expect(
-			Reflect.getMetadata(
-				METHOD_METADATA,
-				NotesController.prototype.update
-			)
-		).toBe(RequestMethod.PATCH);
-		expect(
-			Reflect.getMetadata(
-				METHOD_METADATA,
-				NotesController.prototype.delete
-			)
-		).toBe(RequestMethod.DELETE);
 	});
 
 	it('keeps AdminEventLog GET ADMIN-only', () => {

@@ -69,7 +69,7 @@ HTTP(S) origin без credentials, query и fragment. Конфигурация �
 | Widget CRUD, public config/lead/telemetry                      | Widgets    |
 | Site content, settings и legal pages                           | Platform   |
 | Support Telegram webhook и operator messaging                  | Support    |
-| Notes, audit, queues, backup/restore control                   | Operations |
+| Audit, queues, backup/restore control                          | Operations |
 
 Notification Delivery предоставляет только внутренние delivery contracts и не
 получает публичный catch-all.

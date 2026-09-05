@@ -760,7 +760,6 @@ const expectedGatewayRoutes = [
 		10000
 	),
 	route('support-admin', '/api/v1/support/admin', 5100, 'required', 60000),
-	route('operations-notes', '/api/v1/notes', 5200, 'required', 30000),
 	route(
 		'operations-admin-event-log',
 		'/api/v1/admin-event-log',
@@ -964,14 +963,14 @@ assert(
 	'apps/api-gateway/.env.example Gateway route manifest drifted'
 );
 assert(
-	gatewayRoutes.length === 43,
-	'Gateway must expose exactly 43 routes'
+	gatewayRoutes.length === 42,
+	'Gateway must expose exactly 42 routes'
 );
 assert(
 	gatewayRoutes.filter(
 		item => item.upstreamUrl === 'http://127.0.0.1:5200'
-	).length === 8,
-	'Gateway must expose exactly eight Operations route families'
+	).length === 7,
+	'Gateway must expose exactly seven Operations route families'
 );
 assert(
 	gatewayRoutes.every(

@@ -7,7 +7,7 @@
 
 ## Ответственность
 
-- Notes и агрегированный журнал событий администратора.
+- Агрегированный журнал событий администратора.
 - Объединённые admin alerts из Billing и Widgets, а также собственные alerts
   Operations.
 - Объединение обзора сообщений, ошибок, retry и close.
@@ -70,6 +70,24 @@
 `/internal/v1/operations/billing/*`, а Widgets —
 `/api/v1/internal/v1/operations/widgets/*`. URL сервисов должны быть точными
 закрытыми HTTP origins без встроенных путей или учётных данных.
+
+## Удаление административного Backlog
+
+Миграция `20260910110000_remove_admin_backlog` удаляет только
+`operations.notes` и копии задач в `operations.admin_event_logs`, отмеченные
+разделом `BACKLOG`, типом `backlog_task` или одним из трёх действий
+`BACKLOG_TASK_CREATE/UPDATE/DELETE`. Общий журнал, RabbitMQ receipts/Outbox,
+данные CRM и технический `docs/backlog.md` не удаляются. Notes API больше
+не регистрируется. Миграция не расширяет права runtime и не меняет защитные
+функции восстановления.
+
+Перед применением нужен service-owned safety backup Operations и остановка
+старого API writer. Миграцию выполняет только migration role, затем запускается
+новая ревизия; Gateway route `/api/v1/notes` удаляется согласованным rollout.
+`DROP ... RESTRICT` блокирует удаление при неожиданной зависимости, timeout
+откатывает всю транзакцию. Возврат к Notes-capable runtime без отдельно
+согласованного восстановления не поддерживается. Исторические резервные копии
+подчиняются прежнему retention; эта миграция их не удаляет.
 
 ## Контракты RabbitMQ
 

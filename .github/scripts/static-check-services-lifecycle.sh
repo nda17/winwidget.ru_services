@@ -149,15 +149,15 @@ const routeManifest = path => {
 const rootRoutes = routeManifest('.env.example');
 const gatewayRoutes = routeManifest('apps/api-gateway/.env.example');
 for (const routes of [rootRoutes, gatewayRoutes]) {
-	if (routes.length !== 43) {
-		throw new Error('Gateway route count must be 43');
+	if (routes.length !== 42) {
+		throw new Error('Gateway route count must be 42');
 	}
 	if (
 		routes.filter(
 			route => route.upstreamUrl === 'http://127.0.0.1:5200'
-		).length !== 8
+		).length !== 7
 	) {
-		throw new Error('Operations route count must be 8');
+		throw new Error('Operations route count must be 7');
 	}
 	if (
 		routes.some(
