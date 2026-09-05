@@ -18,6 +18,10 @@ import { createServer } from 'node:net';
 import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+	NATIVE_WIDGET_HTTP_TYPES,
+	nativeWidgetHttpCase
+} from './local-native-widget-http.integration.mjs';
 
 // Local integration harness only. The normal login, JWT, Identity introspection,
 // CRM access checks and service-owned databases run without runtime overrides.
@@ -75,7 +79,7 @@ if (process.argv[2] === '--refresh-frontends') {
 
 const args = new Set(process.argv.slice(2));
 if (args.has('--help')) {
-	console.log(`Usage: WINCRM_LOCAL_STACK_ALLOW_MUTATION=true node apps/crm-access/test/integration/local-wincrm-stack.mjs [--backend-only] [--activate-owner] [--with-widgets] [--verify-native-widget-http] [--verify-domain] [--verify-billing] [--verify-billing-http] [--verify-acceptance-http] [--smoke-and-stop]
+	console.log(`Usage: WINCRM_LOCAL_STACK_ALLOW_MUTATION=true node apps/crm-access/test/integration/local-wincrm-stack.mjs [--backend-only] [--activate-owner] [--with-widgets] [--verify-native-widget-http | --verify-native-widget-http-all] [--verify-domain] [--verify-billing] [--verify-billing-http] [--verify-acceptance-http] [--smoke-and-stop]
 
 Requires local Colima container wincrm-mvp-postgres18, PostgreSQL 18 on
 127.0.0.1:55440 with local test-only trust and bootstrap role crm_bootstrap_ci.
@@ -94,6 +98,9 @@ No payment, lead transfer, publisher or RabbitMQ transport is exercised by this 
 --verify-native-widget-http requires --with-widgets and four scoped local broker principals.
 It additionally proves public Quiz submit -> real Widgets Outbox publisher -> RabbitMQ
 -> real Intake worker/HTTP dependencies -> Inbox, without external provider delivery.
+--verify-native-widget-http-all preserves that profile and adds five synthetic widgets,
+proving the same path for QUIZ/WHEEL/CALLBACK/TIMER/STOP_OFFER/CALCULATOR in sequence.
+Both profiles use built dist classes, not release images; Reporting is a test sink only.
 --verify-domain runs Customers, Intake and Sales PostgreSQL 18 integration scenarios.
 It includes the service-owned native Widget transfer PostgreSQL gate.
 --verify-billing proves Billing commerce transactions and Access admission fences on PostgreSQL 18.
@@ -118,6 +125,7 @@ for (const arg of args) {
 			'--activate-owner',
 			'--with-widgets',
 			'--verify-native-widget-http',
+			'--verify-native-widget-http-all',
 			'--verify-domain',
 			'--verify-billing',
 			'--verify-billing-http',
@@ -128,7 +136,13 @@ for (const arg of args) {
 	);
 }
 const withWidgets = args.has('--with-widgets');
-const withNativeWidgetHttp = args.has('--verify-native-widget-http');
+const withAllNativeWidgets = args.has('--verify-native-widget-http-all');
+const withNativeWidgetHttp =
+	args.has('--verify-native-widget-http') || withAllNativeWidgets;
+assert.ok(
+	!withAllNativeWidgets || !args.has('--verify-native-widget-http'),
+	'Choose one native Widget HTTP profile'
+);
 const withBillingHttp = args.has('--verify-billing-http');
 const withBillingCommerce =
 	withBillingHttp || args.has('--verify-billing');
@@ -555,7 +569,24 @@ async function grantRuntime(service) {
 				'stop_offer_leads',
 				'calculator_leads'
 			],
-			INSERT: ['quizzes', ...(withNativeWidgetHttp ? ['quiz_leads'] : [])],
+			INSERT: [
+				'quizzes',
+				...(withNativeWidgetHttp ? ['quiz_leads'] : []),
+				...(withAllNativeWidgets
+					? [
+							'widgets',
+							'callbacks',
+							'countdown_timers',
+							'stop_offers',
+							'calculators',
+							'leads',
+							'callback_leads',
+							'countdown_timer_leads',
+							'stop_offer_leads',
+							'calculator_leads'
+						]
+					: [])
+			],
 			...(withNativeWidgetHttp ? { UPDATE: ['outbox_events'] } : {}),
 			'SELECT, INSERT': [
 				'owner_projections',
@@ -1461,9 +1492,10 @@ async function seedWidgets(account) {
 		const { getWidgetDefinition, WidgetType } = widgetsRequire(
 			join(widgets.root, 'dist/src/domain/widgets-domain.types.js')
 		);
-		const config = getWidgetDefinition(WidgetType.QUIZ).defaultConfig();
-		const publicKey = randomBytes(6).toString('hex');
-		const quiz = await widgetsDb.$transaction(async tx => {
+		const cases = (
+			withAllNativeWidgets ? NATIVE_WIDGET_HTTP_TYPES : ['QUIZ']
+		).map(nativeWidgetHttpCase);
+		const seeded = await widgetsDb.$transaction(async tx => {
 			await tx.widgetOwnerProjection.create({
 				data: {
 					userId: account.userId,
@@ -1498,7 +1530,7 @@ async function seedWidgets(account) {
 				await tx.widgetUsageCounter.create({
 					data: {
 						userId: account.userId,
-						widgetCount: 1,
+						widgetCount: cases.length,
 						leadCount: 0,
 						leadPeriodKey: expiresAt.toISOString(),
 						leadPeriodStartsAt: startsAt,
@@ -1506,34 +1538,56 @@ async function seedWidgets(account) {
 						entitlementVersion: subscription.aggregateVersion
 					}
 				});
-			return tx.quiz.create({
-				data: {
-					userId: account.userId,
-					publicKey,
-					name: 'WinCRM local QA Quiz',
-					isActive: true,
-					installDomain: 'localhost',
-					config,
-					draftRevision: 1,
-					publishedVersion: 1,
-					publishedFromDraftRevision: 1,
-					publishedAt: now
-				}
-			});
+			const records = [];
+			for (const fixtureCase of cases) {
+				const definition = getWidgetDefinition(
+					WidgetType[fixtureCase.type]
+				);
+				assert.equal(definition.publicApi, fixtureCase.publicApi);
+				const config = definition.defaultConfig();
+				if (['TIMER', 'CALCULATOR'].includes(fixtureCase.type))
+					config.dataType = 'PHONE';
+				config.filterDuplicates = false;
+				const record = await tx[fixtureCase.model].create({
+					data: {
+						userId: account.userId,
+						publicKey: randomBytes(6).toString('hex'),
+						name:
+							fixtureCase.type === 'QUIZ'
+								? 'WinCRM local QA Quiz'
+								: `WinCRM local QA ${fixtureCase.type}`,
+						isActive: true,
+						installDomain: 'localhost',
+						config,
+						draftRevision: 1,
+						publishedVersion: 1,
+						publishedFromDraftRevision: 1,
+						publishedAt: now
+					}
+				});
+				records.push({ type: fixtureCase.type, record });
+			}
+			return records;
 		});
 		log(
-			'Seeded one synthetic published Quiz and matching Billing EASY/Widgets projection; no payment or historical lead import'
+			`Seeded ${seeded.length} synthetic published widget(s) and matching Billing EASY/Widgets projection; no payment or historical lead import`
 		);
-		return {
-			widgetType: 'QUIZ',
-			widgetId: quiz.id,
-			publicKey,
+		const fixtures = seeded.map(({ type, record }) => ({
+			widgetType: type,
+			widgetId: record.id,
+			publicKey: record.publicKey,
 			workspaceId: account.workspaceId,
 			ownerSubject: account.userId,
 			subscriptionId: subscription.id,
 			subscriptionVersion: subscription.aggregateVersion.toString(),
 			startsAt: startsAt.toISOString(),
 			expiresAt: expiresAt.toISOString()
+		}));
+		return {
+			...fixtures[0],
+			...(withAllNativeWidgets
+				? { additionalWidgets: fixtures.slice(1) }
+				: {})
 		};
 	} catch {
 		throw new Error(
@@ -1547,7 +1601,9 @@ async function seedWidgets(account) {
 async function verifyWidgetsControlHttp(
 	account,
 	widget,
-	environmentValues
+	environmentValues,
+	expectedWidgetCount = 1,
+	authSession
 ) {
 	const intake = byApp['crm-intake'];
 	const intakeEnvironment = ownedEnvironment(
@@ -1591,16 +1647,19 @@ async function verifyWidgetsControlHttp(
 		return response.json();
 	};
 	try {
-		const session = await request('/auth/login', {
-			method: 'POST',
-			body: { email: account.email, password: account.password }
-		});
+		const session =
+			authSession?.value ||
+			(await request('/auth/login', {
+				method: 'POST',
+				body: { email: account.email, password: account.password }
+			}));
 		assert.equal(session.user.id, account.userId);
 		assert.ok(
 			typeof session.accessToken === 'string' &&
 				session.accessToken.length > 100
 		);
 		secrets.add(session.accessToken);
+		if (authSession) authSession.value = session;
 		const token = session.accessToken;
 		const candidatesPath = `/crm/intake/widget-sources/candidates?workspaceId=${account.workspaceId}&page=1&pageSize=25`;
 		const candidates = await request(candidatesPath, { token });
@@ -1608,16 +1667,23 @@ async function verifyWidgetsControlHttp(
 		assert.equal(candidates.workspaceId, account.workspaceId);
 		assert.equal(candidates.eligibility.eligible, true);
 		assert.equal(candidates.eligibility.plan, 'EASY');
-		assert.equal(candidates.items.length, 1);
-		assert.equal(candidates.items[0].widgetId, widget.widgetId);
-		assert.equal(candidates.items[0].widgetType, 'QUIZ');
-		assert.equal(candidates.items[0].connection, 'NONE');
+		assert.equal(candidates.items.length, expectedWidgetCount);
+		const candidate = candidates.items.find(
+			item =>
+				item.widgetId === widget.widgetId &&
+				item.widgetType === widget.widgetType
+		);
+		assert.ok(candidate);
+		assert.equal(candidate.connection, 'NONE');
 		const command = {
 			schemaVersion: 1,
 			workspaceId: account.workspaceId,
 			commandId: randomUUID(),
-			name: 'Local Quiz control proof',
-			widgetType: 'QUIZ',
+			name:
+				widget.widgetType === 'QUIZ'
+					? 'Local Quiz control proof'
+					: `Local ${widget.widgetType} control proof`,
+			widgetType: widget.widgetType,
 			widgetId: widget.widgetId,
 			teamId: null
 		};
@@ -1691,8 +1757,13 @@ async function verifyWidgetsControlHttp(
 		assert.equal(applied.source.appliedGeneration, 1);
 		assert.equal(applied.source.widgetId, widget.widgetId);
 		const connected = await request(candidatesPath, { token });
-		assert.equal(connected.items[0].connection, 'THIS_WORKSPACE');
-		assert.equal(connected.items[0].sourceId, sourceId);
+		const connectedCandidate = connected.items.find(
+			item =>
+				item.widgetId === widget.widgetId &&
+				item.widgetType === widget.widgetType
+		);
+		assert.equal(connectedCandidate?.connection, 'THIS_WORKSPACE');
+		assert.equal(connectedCandidate?.sourceId, sourceId);
 		const retained = await prisma.widgetControlOutbox.findUniqueOrThrow({
 			where: { id: outbox.id }
 		});
@@ -2019,29 +2090,103 @@ async function smoke(accounts) {
 		200
 	);
 	const commandId = randomUUID();
+	const policyCommand = {
+		schemaVersion: 1,
+		commandId,
+		expectedVersion: pricing.version,
+		monthlyPriceMinor: pricing.monthlyPriceMinor,
+		yearlyPriceMinor: pricing.yearlyPriceMinor,
+		additionalSeatMonthlyPriceMinor:
+			pricing.additionalSeatMonthlyPriceMinor,
+		additionalSeatYearlyPriceMinor: pricing.additionalSeatYearlyPriceMinor,
+		includedSeats: pricing.includedSeats,
+		trialSeatLimit: pricing.trialSeatLimit
+	};
+	const updatePolicy = (headers, body) =>
+		fetch(`${publicApi}/billing-settings/admin/crm`, {
+			method: 'PUT',
+			headers: {
+				...headers,
+				'content-type': 'application/json',
+				'Idempotency-Key': body.commandId
+			},
+			body: JSON.stringify(body)
+		});
 	assert.equal(
 		(
-			await fetch(`${publicApi}/billing-settings/admin/crm`, {
-				method: 'PUT',
-				headers: { ...adminHeaders, 'Idempotency-Key': commandId },
-				body: JSON.stringify({
-					schemaVersion: 1,
-					commandId,
-					expectedVersion: pricing.version,
-					monthlyPriceMinor: pricing.monthlyPriceMinor,
-					yearlyPriceMinor: pricing.yearlyPriceMinor,
-					additionalSeatMonthlyPriceMinor:
-						pricing.additionalSeatMonthlyPriceMinor,
-					additionalSeatYearlyPriceMinor:
-						pricing.additionalSeatYearlyPriceMinor,
-					includedSeats: pricing.includedSeats,
-					trialSeatLimit: pricing.trialSeatLimit
-				})
-			})
+			await updatePolicy(
+				{ authorization: `Bearer ${customerToken}` },
+				{ ...policyCommand, commandId: randomUUID() }
+			)
 		).status,
 		403,
-		'ADMIN must not change commercial policy'
+		'Customer pricing must not confer commercial policy write access'
 	);
+	const updateResponse = await updatePolicy(adminHeaders, policyCommand);
+	assert.equal(
+		updateResponse.status,
+		200,
+		'ADMIN can manage WinCRM pricing'
+	);
+	const updatedPricing = await updateResponse.json();
+	assert.equal(updatedPricing.version, pricing.version + 1);
+	const {
+		version: oldVersion,
+		createdAt: oldCreatedAt,
+		...oldValues
+	} = pricing;
+	const {
+		version: newVersion,
+		createdAt: newCreatedAt,
+		...newValues
+	} = updatedPricing;
+	assert.deepEqual(
+		newValues,
+		oldValues,
+		'Smoke must keep every price and limit unchanged'
+	);
+	const replayResponse = await updatePolicy(adminHeaders, policyCommand);
+	assert.equal(replayResponse.status, 200);
+	assert.deepEqual(await replayResponse.json(), updatedPricing);
+	const staleResponse = await updatePolicy(adminHeaders, {
+		...policyCommand,
+		commandId: randomUUID()
+	});
+	assert.equal(
+		staleResponse.status,
+		409,
+		'A stale policy version must fail CAS'
+	);
+	assert.equal(
+		(await staleResponse.json()).code,
+		'crm_commercial_policy_version_conflict'
+	);
+	const finalPricing = await fetch(
+		`${publicApi}/billing-settings/admin/crm`,
+		{
+			headers: adminHeaders
+		}
+	);
+	assert.equal(finalPricing.status, 200);
+	assert.deepEqual(await finalPricing.json(), updatedPricing);
+	const auditEvents = JSON.parse(
+		await sql(
+			byApp.billing.database,
+			`SELECT coalesce(json_agg(payload), '[]'::json) FROM billing.outbox_events
+WHERE event_type = 'admin.audit.event.v1' AND payload->'metadata'->>'commandId' = '${commandId}';`,
+			byApp.billing.runtimeRole
+		)
+	);
+	assert.equal(
+		auditEvents.length,
+		1,
+		'Command replay must not duplicate the durable audit'
+	);
+	assert.equal(auditEvents[0].actorId, accounts.admin.userId);
+	assert.equal(auditEvents[0].metadata.actorRole, 'ADMIN');
+	assert.equal(auditEvents[0].action, 'SITE_SETTINGS_UPDATE');
+	assert.deepEqual(auditEvents[0].metadata.before, pricing);
+	assert.deepEqual(auditEvents[0].metadata.after, updatedPricing);
 	if (args.has('--activate-owner')) {
 		const activationId = randomUUID();
 		const activation = await fetch(`${publicApi}/crm/access/trial`, {
@@ -2072,7 +2217,7 @@ async function smoke(accounts) {
 		assert.equal(installation.status, 200);
 	}
 	log(
-		'Normal login, JWT Gateway, anonymous access and ADMIN read-only HTTP smoke passed'
+		'Normal login, JWT Gateway, customer/ADMIN pricing permissions, CAS and durable audit HTTP smoke passed'
 	);
 }
 
@@ -2229,35 +2374,69 @@ try {
 			log
 		});
 	}
-	if (withWidgets)
-		widgetsFixture = await verifyWidgetsControlHttp(
-			accounts.owner,
+	// The all-six profile reuses one real login in process memory; it never
+	// bypasses or resets Identity's existing 10-login/IP/10-minute limit.
+	const nativeAuthSession = withAllNativeWidgets ? {} : undefined;
+	if (withWidgets) {
+		const fixtures = [
 			widgetsFixture,
-			common
-		);
+			...(widgetsFixture.additionalWidgets || [])
+		];
+		const connected = [];
+		for (const fixture of fixtures)
+			connected.push(
+				await verifyWidgetsControlHttp(
+					accounts.owner,
+					fixture,
+					common,
+					fixtures.length,
+					nativeAuthSession
+				)
+			);
+		widgetsFixture = {
+			...connected[0],
+			...(withAllNativeWidgets
+				? { additionalWidgets: connected.slice(1) }
+				: {})
+		};
+	}
 	if (withNativeWidgetHttp) {
 		const { verifyNativeWidgetHttp } =
 			await import('./local-native-widget-http.integration.mjs');
 		const widgets = byApp.widgets;
 		const intake = byApp['crm-intake'];
-		const evidence = await verifyNativeWidgetHttp({
-			servicesRoot,
-			runId,
-			apiUrl: publicApi,
-			widgetsApiUrl: 'http://127.0.0.1:4700/api/v1',
-			account: accounts.owner,
-			widget: widgetsFixture,
-			widgetsDatabaseUrl: databaseUrl(widgets, widgets.runtimeRole),
-			intakeDatabaseUrl: databaseUrl(intake, intake.runtimeRole),
-			intakeEnvironment: ownedEnvironment('crm-intake', common),
-			broker: nativeWidgetBroker,
-			registerSecret: value => secrets.add(value),
-			log
-		});
+		const fixtures = [
+			widgetsFixture,
+			...(widgetsFixture.additionalWidgets || [])
+		];
+		const allEvidence = [];
+		for (const fixture of fixtures) {
+			const evidence = await verifyNativeWidgetHttp({
+				servicesRoot,
+				runId,
+				apiUrl: publicApi,
+				widgetsApiUrl: 'http://127.0.0.1:4700/api/v1',
+				account: accounts.owner,
+				widget: fixture,
+				expectedWidgetCount: fixtures.length,
+				previousEvidence: allEvidence,
+				authSession: nativeAuthSession,
+				widgetsDatabaseUrl: databaseUrl(widgets, widgets.runtimeRole),
+				intakeDatabaseUrl: databaseUrl(intake, intake.runtimeRole),
+				intakeEnvironment: ownedEnvironment('crm-intake', common),
+				broker: nativeWidgetBroker,
+				registerSecret: value => secrets.add(value),
+				log
+			});
+			allEvidence.push(evidence);
+		}
 		widgetsFixture = {
 			...widgetsFixture,
 			leadTransfersVerified: true,
-			nativeLeadHttpBroker: evidence
+			nativeLeadHttpBroker: allEvidence[0],
+			...(withAllNativeWidgets
+				? { allTypesNativeHttpBroker: allEvidence }
+				: {})
 		};
 	}
 	if (args.has('--verify-acceptance-http')) {

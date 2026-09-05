@@ -908,8 +908,40 @@ details/metadata и повторная доставка того же событ
 native/reporting routing keys. Reporting принимает отдельная test sink queue;
 это не проверка рабочего Reporting consumer.
 
-Доказательство ограничено Quiz happy-path/duplicate, не всеми шестью типами и
-не transport control-plane HTTP driver. Совместимый browser reader, остальные
-типовые сценарии и согласованные rollout checks остаются обязательными gates
-перед включением flag. Local/PG/broker evidence не означает production rollout;
-новый CRM backend VPS пока не развёрнут.
+На свежем локальном стенде также прошёл отдельный opt-in профиль
+`--activate-owner --with-widgets
+--verify-native-widget-http-all`: тот же driver последовательно проверяет
+QUIZ, WHEEL, CALLBACK, TIMER, STOP_OFFER и CALCULATOR. Прежний
+`--verify-native-widget-http` и его Quiz fixture сохранены. Новые случаи
+создаются только в свежих собственных test DB для того же synthetic owner;
+для Timer/Calculator включается PHONE, Callback использует штатный OFF без
+OTP-отправки, внешние интеграции остаются пустыми. AI-консультант заявок не
+создаёт и в эту шестёрку не входит.
+All-six использует один настоящий Identity login и хранит его access token
+только в памяти test process: production rate limits не отключаются, токен
+не записывается в fixture. Общий HTTP smoke проверяет CUSTOMER403 и ADMIN200
+для изменения цен, CAS/version, idempotent replay и единственный durable
+audit; значения цен и лимитов остаются неизменными.
+
+Каждый случай имеет отдельные widget/source/connector/lead/event IDs. Driver
+требует ровно два новых Outbox события (native и Reporting), проверяет typed
+snapshot, quota increment, Inbox/detail/metadata, duplicate delivery без второй
+заявки и сохранность предыдущих PUBLISHED/receipt/snapshot evidence. Общая
+изолированная Reporting sink queue дренируется между случаями и проверяет
+точные event/lead/widget bindings. Она не заменяет настоящий Reporting
+consumer; отсутствие `lead.integration.requested.v2` доказывает только то, что
+этот профиль не вызывает внешние интеграции, не их функциональную совместимость.
+Итог всех шести проверок появляется в `widgets.allTypesNativeHttpBroker`
+приватной fixture только после успешного завершения. Проверены все шесть
+сценариев на семи отдельных PostgreSQL 18 БД, восьми настоящих API включая
+Gateway и четырёх scoped RabbitMQ principals. Собственные контейнер RabbitMQ,
+его anonymous volume, семь БД и четырнадцать ролей после прогона удалены;
+ранее существовавшие БД сохранены.
+
+Оба профиля используют реальные HTTP API, PostgreSQL/RabbitMQ и собранные
+`dist` классы publishers/workers внутри test process, **не release images**.
+Это также не доказательство transport control-plane, crash recovery, expiry/
+revocation на полном стеке или браузерного OWN/TEAM scope. Совместимый browser
+reader и согласованные rollout checks остаются обязательными gates перед
+включением flag. Local/PG/broker evidence не означает production rollout;
+CRM backend пока не развёрнут.

@@ -3,6 +3,78 @@ import { randomUUID } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { join } from 'node:path';
 
+// Fixed test matrix, not a replacement for the production widget definitions.
+// Quiz remains first so the original one-widget browser fixture stays unchanged.
+export const NATIVE_WIDGET_HTTP_TYPES = Object.freeze([
+	'QUIZ',
+	'WHEEL',
+	'CALLBACK',
+	'TIMER',
+	'STOP_OFFER',
+	'CALCULATOR'
+]);
+export function nativeWidgetHttpCase(type) {
+	assert.ok(NATIVE_WIDGET_HTTP_TYPES.includes(type));
+	const [model, leadModel, foreignKey, publicApi, lead] = {
+		QUIZ: [
+			'quiz',
+			'quizLead',
+			'quizId',
+			'quiz',
+			{
+				answers: [{ questionId: 'q1', optionIds: ['q1o1'] }]
+			}
+		],
+		WHEEL: ['widget', 'lead', 'widgetId', 'widget', { bonus: '10%' }],
+		CALLBACK: [
+			'callback',
+			'callbackLead',
+			'callbackId',
+			'callback',
+			{
+				timeSlot: '9:00–11:00',
+				timezone: 'Europe/Moscow'
+			}
+		],
+		TIMER: [
+			'countdownTimer',
+			'countdownTimerLead',
+			'countdownTimerId',
+			'countdown-timer',
+			{}
+		],
+		STOP_OFFER: [
+			'stopOffer',
+			'stopOfferLead',
+			'stopOfferId',
+			'stop-offer',
+			{}
+		],
+		CALCULATOR: [
+			'calculator',
+			'calculatorLead',
+			'calculatorId',
+			'calculator',
+			{
+				answers: [
+					{ fieldId: 'service', value: 'standard' },
+					{ fieldId: 'quantity', value: 2 },
+					{ fieldId: 'extras', value: ['delivery'] }
+				]
+			}
+		]
+	}[type];
+	return {
+		type,
+		model,
+		leadModel,
+		foreignKey,
+		publicApi,
+		reportingType: type === 'WHEEL' ? 'wheel' : model,
+		lead
+	};
+}
+
 // Test-only composition of real service-owned classes. Runtime services retain
 // their own databases and call Identity/Billing/Widgets/Access through real HTTP.
 // Configuration is passed by the fresh harness, never loaded from private files.
@@ -13,6 +85,9 @@ export async function verifyNativeWidgetHttp({
 	widgetsApiUrl,
 	account,
 	widget,
+	expectedWidgetCount = 1,
+	previousEvidence = [],
+	authSession,
 	widgetsDatabaseUrl,
 	intakeDatabaseUrl,
 	intakeEnvironment,
@@ -98,7 +173,13 @@ export async function verifyNativeWidgetHttp({
 		assert.equal(account.userId, `wincrm-local-owner-${runId}`);
 		assert.equal(widget.ownerSubject, account.userId);
 		assert.equal(widget.workspaceId, account.workspaceId);
-		assert.equal(widget.widgetType, 'QUIZ');
+		const fixtureCase = nativeWidgetHttpCase(widget.widgetType);
+		assert.ok([1, 6].includes(expectedWidgetCount));
+		assert.ok(previousEvidence.length < expectedWidgetCount);
+		assert.equal(
+			widget.widgetType,
+			NATIVE_WIDGET_HTTP_TYPES[previousEvidence.length]
+		);
 		assert.equal(widget.controlHttpVerified, true);
 		for (const value of [
 			widget.workspaceId,
@@ -244,25 +325,73 @@ export async function verifyNativeWidgetHttp({
 		});
 
 		phase = 'fresh-owned-fixture';
-		const quiz = await widgetsDb.quiz.findUniqueOrThrow({
+		const sourceWidget = await widgetsDb[
+			fixtureCase.model
+		].findUniqueOrThrow({
 			where: { id: widget.widgetId }
 		});
-		assert.equal(quiz.userId, account.userId);
-		assert.equal(quiz.publicKey, widget.publicKey);
-		assert.equal(quiz.isActive, true);
-		assert.equal(quiz.publishedVersion, 1);
-		assert.equal(quiz.config.dataType, 'PHONE');
-		assert.equal(quiz.config.filterDuplicates, false);
+		assert.equal(sourceWidget.userId, account.userId);
+		assert.equal(sourceWidget.publicKey, widget.publicKey);
+		assert.equal(sourceWidget.isActive, true);
+		assert.equal(sourceWidget.publishedVersion, 1);
+		if (widget.widgetType === 'CALLBACK')
+			assert.equal(sourceWidget.config.verificationMode, 'OFF');
+		else assert.equal(sourceWidget.config.dataType, 'PHONE');
+		assert.equal(sourceWidget.config.filterDuplicates, false);
 		assert.ok(
-			Object.values(quiz.config.integrations).every(
+			Object.values(sourceWidget.config.integrations).every(
 				value => value === '' || value === false
 			)
 		);
 		assert.equal(
-			await widgetsDb.quizLead.count({ where: { quizId: quiz.id } }),
+			await widgetsDb[fixtureCase.leadModel].count({
+				where: { [fixtureCase.foreignKey]: sourceWidget.id }
+			}),
 			0
 		);
-		assert.equal(await widgetsDb.widgetsOutboxEvent.count(), 0);
+		const previousOutboxIds = previousEvidence.flatMap(
+			item => item.widgetsOutboxIds
+		);
+		assert.equal(
+			new Set(previousOutboxIds).size,
+			previousEvidence.length * 2
+		);
+		assert.equal(
+			await widgetsDb.widgetsOutboxEvent.count(),
+			previousOutboxIds.length
+		);
+		assert.equal(
+			await widgetsDb.widgetsOutboxEvent.count({
+				where: {
+					id: { in: previousOutboxIds },
+					status: 'PUBLISHED',
+					publishedAt: { not: null }
+				}
+			}),
+			previousOutboxIds.length
+		);
+		for (const previous of previousEvidence) {
+			assert.equal(
+				await intakeDb.widgetTransferReceipt.count({
+					where: {
+						eventId: previous.eventId,
+						entryId: previous.entryId,
+						status: 'DELIVERED'
+					}
+				}),
+				1
+			);
+			assert.equal(
+				await intakeDb.widgetEntrySnapshot.count({
+					where: {
+						transferId: previous.transferId,
+						entryId: previous.entryId,
+						eventId: previous.eventId
+					}
+				}),
+				1
+			);
+		}
 		assert.equal(
 			await widgetsDb.wincrmTransferIntent.count({
 				where: { connectorId: widget.connectorId }
@@ -272,8 +401,8 @@ export async function verifyNativeWidgetHttp({
 		const usage = await widgetsDb.widgetUsageCounter.findUniqueOrThrow({
 			where: { userId: account.userId }
 		});
-		assert.equal(usage.widgetCount, 1);
-		assert.equal(usage.leadCount, 0);
+		assert.equal(usage.widgetCount, expectedWidgetCount);
+		assert.equal(usage.leadCount, previousEvidence.length);
 		assert.equal(
 			usage.entitlementVersion.toString(),
 			widget.subscriptionVersion
@@ -286,8 +415,8 @@ export async function verifyNativeWidgetHttp({
 		assert.equal(source.connectorId, widget.connectorId);
 		assert.equal(source.ownerSubject, account.userId);
 		assert.equal(source.createdBySubject, account.userId);
-		assert.equal(source.widgetId, quiz.id);
-		assert.equal(source.widgetType, 'QUIZ');
+		assert.equal(source.widgetId, sourceWidget.id);
+		assert.equal(source.widgetType, widget.widgetType);
 		assert.equal(source.enabled, true);
 		assert.equal(source.generation, 1);
 		assert.equal(source.syncState, 'SYNCED');
@@ -363,7 +492,8 @@ export async function verifyNativeWidgetHttp({
 					const event = JSON.parse(message.content.toString('utf8'));
 					assert.equal(event.eventType, 'widgets.lead.changed.v1');
 					assert.equal(event.eventId, message.properties.messageId);
-					assert.equal(event.state.widgetId, quiz.id);
+					assert.equal(event.state.widgetId, sourceWidget.id);
+					assert.equal(event.state.widgetType, fixtureCase.reportingType);
 					assert.deepEqual(Object.keys(event.state).sort(), [
 						'createdAt',
 						'id',
@@ -437,12 +567,12 @@ export async function verifyNativeWidgetHttp({
 		);
 		widgetsPublisher.logger = quietLogger;
 
-		phase = 'public-quiz-submit';
+		phase = `public-${widget.widgetType.toLowerCase()}-submit`;
 		const correlationId = randomUUID();
-		const phone = '+79000000001';
+		const phone = `+7900000000${previousEvidence.length + 1}`;
 		const submitted = await request(
 			widgetsApiUrl,
-			`/quiz/${widget.publicKey}/lead`,
+			`/${fixtureCase.publicApi}/${widget.publicKey}/lead`,
 			{
 				expected: 201,
 				headers: {
@@ -451,7 +581,7 @@ export async function verifyNativeWidgetHttp({
 				},
 				body: {
 					phone,
-					answers: [{ questionId: 'q1', optionIds: ['q1o1'] }],
+					...fixtureCase.lead,
 					url: 'http://localhost:3000/native-qa?test=synthetic#fragment'
 				}
 			}
@@ -474,7 +604,9 @@ export async function verifyNativeWidgetHttp({
 			widget.startsAt
 		);
 		assert.equal(intent.originalDeadline.toISOString(), widget.expiresAt);
-		const rows = await widgetsDb.widgetsOutboxEvent.findMany();
+		const rows = await widgetsDb.widgetsOutboxEvent.findMany({
+			where: { id: { notIn: previousOutboxIds } }
+		});
 		assert.equal(
 			rows.length,
 			2,
@@ -491,6 +623,15 @@ export async function verifyNativeWidgetHttp({
 		);
 		const native = rows.find(row => row.messageId === intent.eventId);
 		assert.ok(native);
+		const reporting = rows.find(
+			row => row.eventType === 'widgets.lead.changed.v1'
+		);
+		assert.equal(reporting.payload.state.id, leadId);
+		assert.equal(reporting.payload.state.widgetId, widget.widgetId);
+		assert.equal(
+			reporting.payload.state.widgetType,
+			fixtureCase.reportingType
+		);
 		const event = parseWidgetTransferEvent(
 			native.payload,
 			native.messageId
@@ -511,7 +652,7 @@ export async function verifyNativeWidgetHttp({
 					where: { userId: account.userId }
 				})
 			).leadCount,
-			1
+			previousEvidence.length + 1
 		);
 
 		phase = 'real-outbox-to-inbox';
@@ -537,7 +678,11 @@ export async function verifyNativeWidgetHttp({
 						publishedAt: { not: null }
 					}
 				})) === 2 &&
-				reportingMessages.some(message => message.state.id === leadId) &&
+				reportingMessages.some(
+					message =>
+						message.state.id === leadId &&
+						message.eventId === reporting.messageId
+				) &&
 				(acknowledgements.get(event.eventId) || 0) >= 1
 		);
 		assert.equal(receipt.actorSubject, account.userId);
@@ -564,9 +709,11 @@ export async function verifyNativeWidgetHttp({
 		);
 
 		phase = 'public-inbox-reader';
-		const session = await request(apiUrl, '/auth/login', {
-			body: { email: account.email, password: account.password }
-		});
+		const session =
+			authSession?.value ||
+			(await request(apiUrl, '/auth/login', {
+				body: { email: account.email, password: account.password }
+			}));
 		assert.equal(session.user.id, account.userId);
 		assert.ok(
 			typeof session.accessToken === 'string' &&
@@ -592,6 +739,44 @@ export async function verifyNativeWidgetHttp({
 		assert.equal(full.workspaceId, widget.workspaceId);
 		assert.equal(full.sourceId, widget.sourceId);
 		assert.deepEqual(full.payload, stored.payload);
+		assert.equal(full.payload.widget.type, widget.widgetType);
+		assert.equal(full.payload.widget.id, widget.widgetId);
+		assert.equal(full.payload.details.type, widget.widgetType);
+		if (widget.widgetType === 'WHEEL')
+			assert.equal(full.payload.details.bonus, fixtureCase.lead.bonus);
+		if (widget.widgetType === 'CALLBACK') {
+			assert.equal(
+				full.payload.details.timeSlot,
+				fixtureCase.lead.timeSlot
+			);
+			assert.equal(
+				full.payload.details.timezone,
+				fixtureCase.lead.timezone
+			);
+		}
+		if (widget.widgetType === 'QUIZ') {
+			assert.equal(full.payload.details.answers[0].questionId, 'q1');
+			assert.equal(full.payload.details.answers[0].options[0].id, 'q1o1');
+			assert.equal(
+				full.payload.details.answers[0].questionText,
+				sourceWidget.config.questions[0].text
+			);
+			assert.equal(
+				full.payload.details.answers[0].options[0].text,
+				sourceWidget.config.questions[0].options[0].text
+			);
+		}
+		if (widget.widgetType === 'CALCULATOR') {
+			assert.equal(full.payload.details.calculatedPrice, '1700.00');
+			assert.equal(full.payload.details.currency, 'RUB');
+			assert.deepEqual(
+				full.payload.details.answers.map(({ fieldId, value }) => ({
+					fieldId,
+					value
+				})),
+				fixtureCase.lead.answers
+			);
+		}
 		assert.equal(full.payload.lead.contactName, null);
 		assert.equal(full.payload.lead.phoneE164, phone);
 		assert.equal(
@@ -671,11 +856,25 @@ export async function verifyNativeWidgetHttp({
 			0
 		);
 		assert.equal(invalidReporting, false);
+		assert.equal(
+			await widgetsDb.widgetsOutboxEvent.count(),
+			previousOutboxIds.length + 2
+		);
+		assert.equal(
+			await widgetsDb.widgetsOutboxEvent.count({
+				where: { eventType: 'lead.integration.requested.v2' }
+			}),
+			0
+		);
+		assert.equal(
+			(await inspectorChannel.checkQueue(sinkQueue)).messageCount,
+			0
+		);
 		log(
-			'Native Quiz HTTP proof passed: public submit, real Widgets Outbox/confirm, scoped Rabbit push, fresh HTTP authorization/context, atomic Inbox and duplicate-safe replay; no external providers'
+			`Native ${widget.widgetType} HTTP proof passed: public submit, real Widgets Outbox/confirm, scoped Rabbit push, fresh HTTP authorization/context, atomic Inbox and duplicate-safe replay; dist classes, no external providers or release-image proof`
 		);
 		return {
-			widgetType: 'QUIZ',
+			widgetType: widget.widgetType,
 			leadId,
 			transferId: event.transferId,
 			eventId: event.eventId,
