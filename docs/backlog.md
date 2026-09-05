@@ -142,7 +142,7 @@ Read-only аудит production API и личного кабинета ЮKassa �
   таблицам;
 - проверить возможность размещения четырёх CRM-сервисов на текущем backend
   VPS: пользователь разрешил этот вариант 06.09.2026 при достаточном запасе
-  ресурсов. До размещения устранить текущие unhealthy workers, измерить
+  ресурсов. До размещения подтвердить стабильность workers, измерить
   CPU/RAM/disk/connection budget и зарезервировать ресурсы для четырёх
   независимых БД, API, publishers/workers, migrations и backup/restore.
   Не объединять базы или runtime ради экономии. Если безопасного запаса нет,
@@ -305,7 +305,7 @@ runtime сохраняет только SELECT/INSERT; UPDATE/DELETE/TRUNCATE н
 - Quorum queues вводить только вместе с кластером минимум из трёх RabbitMQ
   узлов или managed broker; тип существующей очереди in-place не менять.
 
-### P1 — завершение неудачного запуска и холодный старт сервисов
+### P1 — проверить холодный старт остальных сервисов
 
 Production-инцидент 06.09.2026 показал, что `process.exitCode = 1` после
 ошибки bootstrap не завершает процесс, если AMQP reconnect, пул БД или таймеры
@@ -313,17 +313,14 @@ Production-инцидент 06.09.2026 показал, что `process.exitCode 
 не открыт и Docker считает контейнер unhealthy. Одного порядка запуска
 Compose недостаточно при автоматическом старте контейнеров после reboot VPS.
 
-Выпустить проверенное исправление Billing/Operations/Support: ограниченное
-по времени закрытие частично созданного context и гарантированный nonzero
-exit; подтвердить на exact images сценарий поздней готовности RabbitMQ,
-автоматический restart, новые health-check и сохранность durable сообщений.
-Не считать ручное восстановление прежних контейнеров постоянным исправлением.
-
-Отдельно проверить аналогичные entrypoints Identity, Platform, Reporting,
+Проверить аналогичные entrypoints Identity, Platform, Reporting,
 Widgets, Gateway и будущих `crm-*`: наличие того же catch в коде — риск,
 но не доказательство текущего отказа этих healthy сервисов. Перед их
 выборочным выпуском воспроизвести зависшие handles, проверить successful
 startup/обычный graceful shutdown и отсутствие преждевременной обработки.
+Для каждого исправления доказать ограниченное по времени закрытие частично
+созданного context, гарантированный nonzero exit и автоматический restart
+после поздней готовности RabbitMQ на exact image.
 Не менять миграции, платёжную семантику, queue ACL или удалять сообщения.
 Этот startup fix не заменяет отдельную гарантию восстановления активной
 бизнес-операции после crash и не закрывает Operations busy-lease ACK риск.
@@ -653,6 +650,18 @@ destructive migration. Проверить скачанный backup по hash и
 в изолированную БД; одного `pg_restore --list` недостаточно. Operations не
 входит в собственный allowlist автоматического restore: не пытаться
 восстановить её control ledger через тот же работающий control ledger.
+Штатный Telegram backup с `--no-privileges` не доказывает сохранение writer
+fence: после такого restore у runtime может не быть прав независимо от
+состояния исходной БД. Для destructive phase B нужен отдельный проверенный
+ACL-preserving safety dump из maintenance-worker boundary, только через
+Operations backup role, и root-bound acquisition receipt: phase-A hash,
+database UUID, точный container/image/revision, SHA/размер файла и время
+получения после fence. Одного `restoredAt >= fencedAt` недостаточно.
+Закрепить эти проверки в producer/consumer evidence до удаления таблицы;
+не подменять их JWT mint, ручным API bypass или запуском `pg_dump` в API.
+Локальный isolated PostgreSQL 18 proof требует собственного resource preflight;
+он не является production rehearsal семи signed restore targets и не снимает
+его отдельный gate 6 GiB.
 Синхронизировать новый immutable infra pin с удалением route; прежний pin
 `b602ae5` ожидает 43 маршрута и несовместим с новым контрактом 42.
 
