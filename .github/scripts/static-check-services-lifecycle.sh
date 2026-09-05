@@ -74,6 +74,8 @@ const {
 	readFileSync,
 	readdirSync
 } = require('node:fs');
+const { execFileSync } = require('node:child_process');
+const { throws } = require('node:assert/strict');
 
 const exactFiles = (directory, expected) => {
 	const actual = readdirSync(directory, { withFileTypes: true })
@@ -484,26 +486,81 @@ if (
 	infraReleaseReferences.length !== 1 ||
 	infraReleaseReferences.some(reference => reference[1] !== pinnedInfraRevision)
 ) {
-	throw new Error('the Operations phase-A production job must use the exact reviewed infra SHA');
+	throw new Error('the Operations backup production job must use the exact reviewed infra SHA');
 }
-const operationsJob = servicesWorkflow.split('  deploy-production:\n')[1];
-if (!operationsJob || (servicesWorkflow.match(/release_scope:/g) ?? []).length !== 1 || servicesWorkflow.includes('operations-federation-config') || servicesWorkflow.includes('workers-bootstrap-recovery') || servicesWorkflow.includes('identity-with-operations-manifest') || servicesWorkflow.includes('deploy-worker-recovery:') || servicesWorkflow.includes('expected_support_env_sha256:') || /expected_operations_(?:revision|api_revision|env_sha256):|operations_runtime_revision:|operations_evidence_sha256:/.test(servicesWorkflow)) {
-	throw new Error('production must contain only the reviewed Operations phase-A scope; completed releases and finalization cannot repeat');
+// This file-only caller must capture the already verified phase-A runtime;
+// it must not deploy new application code or repeat the writer fence.
+const operationsRuntimeRevision = '65025008d4aa993adb96df435a744a29c4f021d3';
+const phaseAApplicationsTree = '00565b98b442da9820f1dde663a917223efee016';
+const expectedBackupJob = [
+	'    name: Capture Operations ACL-preserving safety backup',
+	'    needs:',
+	'      - lifecycle-contract',
+	'      - operations-control-ledger',
+	'      - operations-restore-rehearsal',
+	'      - production-image',
+	'      - service',
+	'      - service-integration',
+	'      - widgets-integration',
+	"    if: github.event_name == 'push' && github.ref == 'refs/heads/prod'",
+	`    uses: nda17/winwidget.ru_infra/.github/workflows/deploy-production.yml@${pinnedInfraRevision}`,
+	'    with:',
+	'      services_revision: ${{ github.sha }}',
+	'      release_scope: operations-backlog-backup',
+	`      expected_live_revision: '${operationsRuntimeRevision}'`,
+	`      expected_service_env_sha256: '${operationsEnvSha256}'`,
+	`      operations_runtime_revision: '${operationsRuntimeRevision}'`,
+	'    secrets:',
+	'      BACKEND_PRODUCTION_SSH_HOST: ${{ secrets.PRODUCTION_SSH_HOST }}',
+	'      BACKEND_PRODUCTION_SSH_PORT: ${{ secrets.PRODUCTION_SSH_PORT }}',
+	'      BACKEND_PRODUCTION_SSH_USER: ${{ secrets.PRODUCTION_SSH_USER }}',
+	'      BACKEND_PRODUCTION_SSH_PRIVATE_KEY: ${{ secrets.PRODUCTION_SSH_PRIVATE_KEY }}',
+	'      BACKEND_PRODUCTION_SSH_KNOWN_HOSTS: ${{ secrets.BACKEND_PRODUCTION_SSH_KNOWN_HOSTS }}',
+	'      BACKEND_PRODUCTION_ENV_SHA256: ${{ secrets.BACKEND_PRODUCTION_ENV_SHA256 }}',
+	''
+].join('\n');
+const assertOperationsBackupCaller = (workflow, applicationsTree) => {
+	const jobParts = workflow.split('  deploy-production:\n');
+	if (
+		jobParts.length !== 2 || jobParts[1] !== expectedBackupJob ||
+		(workflow.match(/release_scope:/g) ?? []).length !== 1 ||
+		applicationsTree !== phaseAApplicationsTree
+	) {
+		throw new Error('Operations backup caller must preserve exact phase-A code, identities and capture-only authority');
+	}
+};
+// HEAD's own tree exists in actions/checkout's depth-1 clone; no ancestor fetch
+// or mutable branch lookup is needed to prove application-source equivalence.
+const applicationsTree = execFileSync('git', ['rev-parse', 'HEAD:apps'], {
+	encoding: 'utf8'
+}).trim();
+assertOperationsBackupCaller(servicesWorkflow, applicationsTree);
+const backupCallerMutations = [
+	['release_scope: operations-backlog-backup', 'release_scope: operations-runtime'],
+	['release_scope: operations-backlog-backup', 'release_scope: operations-backlog-finalize'],
+	['release_scope: operations-backlog-backup', 'release_scope: all'],
+	[`expected_live_revision: '${operationsRuntimeRevision}'`, `expected_live_revision: '${'a'.repeat(40)}'`],
+	[`operations_runtime_revision: '${operationsRuntimeRevision}'`, `operations_runtime_revision: '${'b'.repeat(40)}'`],
+	[`expected_service_env_sha256: '${operationsEnvSha256}'`, `expected_service_env_sha256: '${'c'.repeat(64)}'`],
+	[`deploy-production.yml@${pinnedInfraRevision}`, 'deploy-production.yml@prod'],
+	['      - operations-restore-rehearsal\n', ''],
+	["if: github.event_name == 'push' && github.ref == 'refs/heads/prod'", 'if: always()'],
+	['services_revision: ${{ github.sha }}', `services_revision: '${operationsRuntimeRevision}'`],
+	['    secrets:\n', `      operations_evidence_sha256: '${'d'.repeat(64)}'\n    secrets:\n`],
+	['    secrets:\n', `      expected_operations_revision: '${operationsRuntimeRevision}'\n    secrets:\n`],
+	['    secrets:\n', '      release_scope: operations-runtime\n    secrets:\n'],
+	['    secrets:\n', '    secrets: inherit\n'],
+	['BACKEND_PRODUCTION_ENV_SHA256:', 'FRONTEND_PRODUCTION_ENV_SHA256:']
+];
+for (const [before, after] of backupCallerMutations) {
+	const changedJob = expectedBackupJob.replace(before, after);
+	if (changedJob === expectedBackupJob) throw new Error('backup caller negative fixture did not mutate');
+	throws(() => assertOperationsBackupCaller(`  deploy-production:\n${changedJob}`, phaseAApplicationsTree));
 }
-for (const [job, evidence] of [
-	[operationsJob, 'needs:\n      - lifecycle-contract\n      - operations-control-ledger\n      - operations-restore-rehearsal\n      - production-image\n      - service\n      - service-integration\n      - widgets-integration\n'],
-	[operationsJob, 'release_scope: operations-runtime'],
-	[operationsJob, `expected_service_env_sha256: '${operationsEnvSha256}'`]
-]) {
-	if (!job.includes(evidence)) throw new Error(`scoped release boundary drifted: ${evidence}`);
-}
-for (const job of [operationsJob]) {
-	for (const evidence of [
-		"if: github.event_name == 'push' && github.ref == 'refs/heads/prod'",
-		"expected_live_revision: 'a10fd2d2bac9cc3f825193d03b065570cfcf9c53'",
-		'services_revision: ${{ github.sha }}'
-	]) if (!job.includes(evidence)) throw new Error(`scoped release identity drifted: ${evidence}`);
-}
+throws(() => assertOperationsBackupCaller(servicesWorkflow, 'e'.repeat(40)));
+throws(() => assertOperationsBackupCaller(servicesWorkflow, ''));
+throws(() => assertOperationsBackupCaller(`${servicesWorkflow}  deploy-production:\n${expectedBackupJob}`, phaseAApplicationsTree));
+process.stdout.write(`operations_backup_caller_negative_cases=${backupCallerMutations.length + 3}\n`);
 
 const rootReadme = readFileSync('README.md', 'utf8');
 if (

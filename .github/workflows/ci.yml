@@ -449,7 +449,7 @@ jobs:
           "apps/${{ matrix.app }}"
 
   deploy-production:
-    name: Deploy Operations Notes-free runtime and writer fence
+    name: Capture Operations ACL-preserving safety backup
     needs:
       - lifecycle-contract
       - operations-control-ledger
@@ -462,9 +462,10 @@ jobs:
     uses: nda17/winwidget.ru_infra/.github/workflows/deploy-production.yml@2e83c5bb7b9bdf7bcbfb1039a5c645547cdf2272
     with:
       services_revision: ${{ github.sha }}
-      release_scope: operations-runtime
-      expected_live_revision: 'a10fd2d2bac9cc3f825193d03b065570cfcf9c53'
+      release_scope: operations-backlog-backup
+      expected_live_revision: '65025008d4aa993adb96df435a744a29c4f021d3'
       expected_service_env_sha256: '06f1affe7b715a3c2d96d2a00975fab168e2060623a8af72d33c62bb4055799e'
+      operations_runtime_revision: '65025008d4aa993adb96df435a744a29c4f021d3'
     secrets:
       BACKEND_PRODUCTION_SSH_HOST: ${{ secrets.PRODUCTION_SSH_HOST }}
       BACKEND_PRODUCTION_SSH_PORT: ${{ secrets.PRODUCTION_SSH_PORT }}
