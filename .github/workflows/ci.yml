@@ -411,7 +411,7 @@ jobs:
           "apps/${{ matrix.app }}"
 
   deploy-production:
-    name: Deploy production
+    name: Correct Operations federation configuration
     needs:
       - lifecycle-contract
       - operations-control-ledger
@@ -421,9 +421,34 @@ jobs:
       - service-integration
       - widgets-integration
     if: github.event_name == 'push' && github.ref == 'refs/heads/prod'
-    uses: nda17/winwidget.ru_infra/.github/workflows/deploy-production.yml@b602ae559223c5fc20de0c319d9d8250ab5aa5d3
+    uses: nda17/winwidget.ru_infra/.github/workflows/deploy-production.yml@6700763501accdd6e04cf52d18762d9a50271028
     with:
       services_revision: ${{ github.sha }}
+      release_scope: operations-federation-config
+      expected_live_revision: '484e546451088671e23ae37ae4026b9b3fe500c5'
+      expected_service_env_sha256: '06f1affe7b715a3c2d96d2a00975fab168e2060623a8af72d33c62bb4055799e'
+    secrets:
+      BACKEND_PRODUCTION_SSH_HOST: ${{ secrets.PRODUCTION_SSH_HOST }}
+      BACKEND_PRODUCTION_SSH_PORT: ${{ secrets.PRODUCTION_SSH_PORT }}
+      BACKEND_PRODUCTION_SSH_USER: ${{ secrets.PRODUCTION_SSH_USER }}
+      BACKEND_PRODUCTION_SSH_PRIVATE_KEY: ${{ secrets.PRODUCTION_SSH_PRIVATE_KEY }}
+      BACKEND_PRODUCTION_SSH_KNOWN_HOSTS: ${{ secrets.BACKEND_PRODUCTION_SSH_KNOWN_HOSTS }}
+      BACKEND_PRODUCTION_ENV_SHA256: ${{ secrets.BACKEND_PRODUCTION_ENV_SHA256 }}
+
+  deploy-worker-recovery:
+    name: Deploy seven worker bootstrap recovery roles
+    needs:
+      - deploy-production
+    if: github.event_name == 'push' && github.ref == 'refs/heads/prod'
+    uses: nda17/winwidget.ru_infra/.github/workflows/deploy-production.yml@6700763501accdd6e04cf52d18762d9a50271028
+    with:
+      services_revision: ${{ github.sha }}
+      release_scope: workers-bootstrap-recovery
+      expected_live_revision: '484e546451088671e23ae37ae4026b9b3fe500c5'
+      expected_service_env_sha256: '649c987a3c9ea2cba281f801482a5e98a73e53739885e4f9a7eaff17994bb6f7'
+      expected_operations_revision: '484e546451088671e23ae37ae4026b9b3fe500c5'
+      expected_operations_env_sha256: '06f1affe7b715a3c2d96d2a00975fab168e2060623a8af72d33c62bb4055799e'
+      expected_support_env_sha256: 'df539741905bc3c5dc925accce98334de37e33cde5c6021db98806c691ba678d'
     secrets:
       BACKEND_PRODUCTION_SSH_HOST: ${{ secrets.PRODUCTION_SSH_HOST }}
       BACKEND_PRODUCTION_SSH_PORT: ${{ secrets.PRODUCTION_SSH_PORT }}

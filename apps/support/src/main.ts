@@ -3,6 +3,7 @@ import { NestFactory } from '@nestjs/core';
 import type { NestExpressApplication } from '@nestjs/platform-express';
 import { SupportHttpExceptionFilter } from './common/support-http-exception.filter';
 import { supportRequestContextMiddleware } from './common/support-request-context';
+import { terminateFailedBootstrap } from './runtime/bootstrap-failure';
 import {
 	getSupportCorsAllowedOrigins,
 	getSupportListenHost,
@@ -15,6 +16,8 @@ import {
 import { SupportModule } from './support.module';
 import { SUPPORT_WEBHOOK_MAX_BYTES } from './telegram/support-telegram.types';
 
+let application: NestExpressApplication | undefined;
+
 async function bootstrap(): Promise<void> {
 	const role = parseSupportProcessRole(process.env.SUPPORT_PROCESS_ROLE);
 	const app = await NestFactory.create<NestExpressApplication>(
@@ -24,6 +27,7 @@ async function bootstrap(): Promise<void> {
 			rawBody: true
 		}
 	);
+	application = app;
 	app.useBodyParser('json', { limit: SUPPORT_WEBHOOK_MAX_BYTES });
 	const instance = app.getHttpAdapter().getInstance();
 	if (typeof instance?.set === 'function') {
@@ -63,11 +67,7 @@ async function bootstrap(): Promise<void> {
 	Logger.log(`Support service started role=${role}`, 'Bootstrap');
 }
 
-void bootstrap().catch(error => {
-	Logger.error(
-		error instanceof Error ? error.message : 'Support bootstrap failed',
-		undefined,
-		'Bootstrap'
-	);
-	process.exitCode = 1;
+void bootstrap().catch(() => {
+	Logger.error('Support bootstrap failed', undefined, 'Bootstrap');
+	return terminateFailedBootstrap(application);
 });

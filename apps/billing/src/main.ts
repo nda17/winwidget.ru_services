@@ -1,8 +1,10 @@
 import { Logger, RequestMethod } from '@nestjs/common';
+import type { INestApplication } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { BillingModule } from './billing.module';
 import { BillingHttpExceptionFilter } from './common/billing-http-exception.filter';
 import { billingRequestContextMiddleware } from './common/billing-request-context';
+import { terminateFailedBootstrap } from './runtime/bootstrap-failure';
 import {
 	parseBillingPort,
 	parseBillingProcessRole
@@ -13,12 +15,15 @@ import {
 	getBillingTrustProxyConfig
 } from './runtime/billing-http.config';
 
+let application: INestApplication | undefined;
+
 async function bootstrap(): Promise<void> {
 	const role = parseBillingProcessRole(process.env.BILLING_PROCESS_ROLE);
 	const port = parseBillingPort(role);
 	const app = await NestFactory.create(BillingModule, {
 		forceCloseConnections: true
 	});
+	application = app;
 	const instance = app.getHttpAdapter().getInstance();
 	if (typeof instance?.set === 'function') {
 		instance.set(
@@ -96,11 +101,7 @@ async function bootstrap(): Promise<void> {
 	);
 }
 
-void bootstrap().catch(error => {
-	Logger.error(
-		error instanceof Error ? error.message : 'Billing bootstrap failed',
-		undefined,
-		'Bootstrap'
-	);
-	process.exitCode = 1;
+void bootstrap().catch(() => {
+	Logger.error('Billing bootstrap failed', undefined, 'Bootstrap');
+	return terminateFailedBootstrap(application);
 });

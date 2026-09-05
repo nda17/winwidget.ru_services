@@ -93,6 +93,59 @@ bash .github/scripts/static-check-services-lifecycle.sh
 CI выполняет матрицу `install → prisma:generate → lint → typecheck → test →
 build` для всех десяти приложений.
 
+### Восстановление фоновых процессов после ошибки запуска
+
+Billing, Operations и Support при ошибке bootstrap выполняют best-effort
+`app.close()` с пределом 5 секунд и завершаются с кодом 1. Это позволяет
+существующей Docker restart policy повторить запуск, если RabbitMQ появился
+позже первоначального connect timeout. Успешный запуск, бизнес-транзакции,
+Outbox, правила ACK/retry и миграции не меняются. Сырые ошибки bootstrap и
+cleanup не выводятся: они могут содержать параметры подключения.
+
+Изолированная проверка семи ролей использует настоящие образы этих трёх
+сервисов, собственные PostgreSQL 18/RabbitMQ и внутреннюю Docker-сеть без
+внешних провайдеров. Сначала соберите приложения и образы:
+
+```bash
+docker build -t winwidget-bootstrap-proof-billing:local apps/billing
+docker build -t winwidget-bootstrap-proof-operations:local apps/operations
+docker build -t winwidget-bootstrap-proof-support:local apps/support
+WORKER_BOOTSTRAP_PROOF_ALLOW_LOCAL_DOCKER=true node scripts/test-workers-bootstrap-recovery.mjs
+```
+
+Перед запуском нужны локальные `dist` после `pnpm run build` во всех трёх
+приложениях. Проверка допускает только локальный context `colima`, сохраняет
+заранее опубликованное durable audit-сообщение, держит брокер недоступным
+дольше 30 секунд и проверяет автоматические перезапуски и фактический
+role/revision readiness. Собственные контейнеры, анонимные volumes и сеть
+удаляются в `finally`; образы/cache очищаются отдельно после остальных
+локальных проверок.
+
+Operations получает внутри тестовых контейнеров отдельную временную пару
+Ed25519 и тестовый trusted public keyring, а также пустые staging/sealed
+каталоги. Production-ключи и env не читаются; миграционный restore catalog и
+скомпилированный bootstrap не подменяются. Это не проверка privileged
+production entrypoint копирования ключа. Отрицательный контроль меняет
+только вызов termination на прежний `process.exitCode = 1` в памяти
+отдельного тестового Billing-процесса и подтверждает отсутствие readiness.
+
+Это проверка восстановления при ошибке старта, а не обещание безопасного
+прерывания любого уже выполняющегося внешнего действия. Известные lease/ACK
+ограничения Operations требуют отдельного решения. Worker recovery scope
+допускает только семь согласованных worker/outbox/restore процессов; API,
+scheduler Billing, CRM, env и схемы БД не входят в этот релиз. Перед заменой
+нужны проверенное окно без активных финансовых/backup/restore заданий,
+неподтверждённых сообщений/публикаций и безопасное завершение старых
+процессов; rollback возвращает прежние образы без отката данных. Остальные
+сервисы с аналогичными catch-обработчиками в этот фикс не включены.
+
+Production CI сначала меняет только legacy origin Notification Delivery в
+существующем образе Operations API, затем отдельным зависимым job выпускает
+семь worker-ролей. Оба job используют один проверенный immutable infra SHA,
+точные ревизии и hashes подготовленных owner env; широкого `all` rollout
+нет. Если первый шаг успешен, а второй упал, повторяется только failed job:
+повторно применять legacy-to-origin guard первого шага нельзя.
+
 ## Данные и RabbitMQ
 
 Каждый сервис с состоянием владеет собственной базой и схемой PostgreSQL,
@@ -116,9 +169,10 @@ lifecycle gate и полной CI-матрицы release-job автоматич�
 workflow `winwidget.ru_infra`, закреплённый неизменяемым 40-символьным SHA;
 ручного ввода ревизии и прямого запуска controller нет. На production действует
 единый deploy lock. Обязательны побайтово идентичный hash env, метки OCI
-revision, миграции баз всех сервисов, точные
-permissions/topology RabbitMQ, прямые проверки readiness, smoke-проверки
-Gateway/публичного API и revision каждого контейнера.
+revision, точные owner env и неизменность соседних контейнеров. В этой
+recovery-ветке разрешены только два описанных выше scope. Worker release
+сверяет полные service-owned migration ledgers Billing/Operations/Support
+до и после обновления, не применяет DDL и проверяет readiness семи ролей.
 
 Notes, Admin Event Log и плоскость управления Telegram/Reporting принадлежат
 Operations. Обычный deploy проверяет актуальные границы service-owned баз,

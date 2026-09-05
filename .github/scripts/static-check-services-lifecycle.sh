@@ -406,7 +406,7 @@ for (const path of [
 	}
 }
 
-exactFiles('scripts', ['generate-jwt-keyset.mjs']);
+exactFiles('scripts', ['generate-jwt-keyset.mjs', 'test-workers-bootstrap-recovery.mjs']);
 exactFiles('.github/workflows', ['ci.yml']);
 exactFiles('.github/scripts', [
 	'static-check-services-lifecycle.sh',
@@ -418,7 +418,7 @@ exactFiles('deploy', ['docker-compose.prod.yml']);
 
 const servicesWorkflow = readFileSync('.github/workflows/ci.yml', 'utf8');
 const pinnedInfraRevision =
-	'b602ae559223c5fc20de0c319d9d8250ab5aa5d3';
+	'6700763501accdd6e04cf52d18762d9a50271028';
 for (const evidence of [
 	"cancel-in-progress: ${{ github.ref != 'refs/heads/prod' }}",
 	'operations-control-ledger:',
@@ -473,10 +473,34 @@ const infraReleaseReferences = [
 	)
 ];
 if (
-	infraReleaseReferences.length !== 1 ||
-	infraReleaseReferences[0][1] !== pinnedInfraRevision
+	infraReleaseReferences.length !== 2 ||
+	infraReleaseReferences.some(reference => reference[1] !== pinnedInfraRevision)
 ) {
-	throw new Error('production release workflow is not pinned to one exact infra SHA');
+	throw new Error('both scoped production jobs must use the same exact reviewed infra SHA');
+}
+const federationJob = servicesWorkflow.split('  deploy-production:\n')[1]?.split('  deploy-worker-recovery:\n')[0];
+const workersJob = servicesWorkflow.split('  deploy-worker-recovery:\n')[1];
+if (!federationJob || !workersJob || (servicesWorkflow.match(/release_scope:/g) ?? []).length !== 2) {
+	throw new Error('production must contain exactly the two reviewed ordered scopes');
+}
+for (const [job, evidence] of [
+	[federationJob, 'release_scope: operations-federation-config'],
+	[federationJob, "expected_service_env_sha256: '06f1affe7b715a3c2d96d2a00975fab168e2060623a8af72d33c62bb4055799e'"],
+	[workersJob, 'needs:\n      - deploy-production\n'],
+	[workersJob, 'release_scope: workers-bootstrap-recovery'],
+	[workersJob, "expected_service_env_sha256: '649c987a3c9ea2cba281f801482a5e98a73e53739885e4f9a7eaff17994bb6f7'"],
+	[workersJob, "expected_operations_revision: '484e546451088671e23ae37ae4026b9b3fe500c5'"],
+	[workersJob, "expected_operations_env_sha256: '06f1affe7b715a3c2d96d2a00975fab168e2060623a8af72d33c62bb4055799e'"],
+	[workersJob, "expected_support_env_sha256: 'df539741905bc3c5dc925accce98334de37e33cde5c6021db98806c691ba678d'"]
+]) {
+	if (!job.includes(evidence)) throw new Error(`scoped release boundary drifted: ${evidence}`);
+}
+for (const job of [federationJob, workersJob]) {
+	for (const evidence of [
+		"if: github.event_name == 'push' && github.ref == 'refs/heads/prod'",
+		"expected_live_revision: '484e546451088671e23ae37ae4026b9b3fe500c5'",
+		'services_revision: ${{ github.sha }}'
+	]) if (!job.includes(evidence)) throw new Error(`scoped release identity drifted: ${evidence}`);
 }
 
 const rootReadme = readFileSync('README.md', 'utf8');
