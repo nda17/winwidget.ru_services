@@ -382,6 +382,20 @@ recovery evidence не вынесены из восстанавливаемой 
 - подтвердить на production rehearsal заданный retention restore artifacts и
   alerts на зависшие job/fence.
 
+### P1 — durable redelivery после аварии Operations backup worker
+
+При остановке worker после захвата `PROCESSING` повторная доставка до
+окончания lease может получить `claim = null` и быть подтверждена без
+повторного durable trigger. Это риск по результатам анализа кода, а не
+подтверждённый production-инцидент.
+
+До закрытия crash-recovery гарантий различать terminal/no-op и занятый lease;
+для второго случая обеспечить durable delayed retry через Outbox либо
+service-owned CAS recovery. Не перехватывать действующий lease и не очищать
+очередь. Обязательны тесты crash-after-claim, redelivery-before-expiry,
+повторного запуска и восстановления без параллельных внешних действий.
+Исправление не входит в узкий rollout OTP и удаления пользовательского Backlog.
+
 ### P2 — выделенная recovery session boundary перед расширением control plane
 
 Текущий restore-контракт сознательно доверяет единственному bootstrap-admin и
