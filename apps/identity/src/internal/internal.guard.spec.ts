@@ -12,12 +12,15 @@ function credential(service: IdentityInternalService): string {
 }
 
 function environment(): Record<string, string> {
-	return Object.fromEntries(
-		IDENTITY_INTERNAL_SERVICES.map(service => [
-			`IDENTITY_${service.replace(/-/g, '_').toUpperCase()}_TOKEN`,
-			credential(service)
-		])
-	);
+	return {
+		WINCRM_INVITATION_EMAIL_ENABLED: 'true',
+		...Object.fromEntries(
+			IDENTITY_INTERNAL_SERVICES.map(service => [
+				`IDENTITY_${service.replace(/-/g, '_').toUpperCase()}_TOKEN`,
+				credential(service)
+			])
+		)
+	};
 }
 
 function config(values: Record<string, string>): ConfigService {
@@ -54,6 +57,26 @@ function guard(allowed: IdentityInternalService[]) {
 }
 
 describe('IdentityInternalGuard', () => {
+	it('keeps the optional notification caller disabled without requiring a new token', () => {
+		const values = environment();
+		values.WINCRM_INVITATION_EMAIL_ENABLED = 'false';
+		delete values.IDENTITY_NOTIFICATION_DELIVERY_TOKEN;
+		const instance = new IdentityInternalGuard(config(values), {
+			getAllAndOverride: () => ['notification-delivery']
+		} as never);
+		expect(() =>
+			instance.canActivate(
+				context(
+					'notification-delivery',
+					credential('notification-delivery')
+				)
+			)
+		).toThrow(ForbiddenException);
+		values.WINCRM_INVITATION_EMAIL_ENABLED = 'true';
+		expect(
+			() => new IdentityInternalGuard(config(values), new Reflector())
+		).toThrow('IDENTITY_NOTIFICATION_DELIVERY_TOKEN');
+	});
 	it.each(IDENTITY_INTERNAL_SERVICES)(
 		'allows the matching scoped %s credential from loopback',
 		service => {

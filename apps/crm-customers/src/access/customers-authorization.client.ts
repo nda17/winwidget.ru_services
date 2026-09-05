@@ -153,25 +153,51 @@ export class CustomersAuthorizationClient {
 			!/^Bearer [^\s\x00-\x1f\x7f]{1,8192}$/.test(authorization)
 		)
 			throw new UnauthorizedException('Bearer authentication is required');
+		return this.request(workspaceId, authorization);
+	}
+
+	async authorizeWorkflow(
+		workspaceId: string,
+		subject: string
+	): Promise<CustomersAuthorization> {
+		const context = await this.request(workspaceId, undefined, subject);
+		if (context.subject !== subject)
+			throw new ServiceUnavailableException(
+				'Workflow authority is unavailable'
+			);
+		assertCustomersPermission(context, 'customers:write', true);
+		assertCustomersPermission(context, 'customers:read');
+		return context;
+	}
+
+	private async request(
+		workspaceId: string,
+		authorization?: string,
+		subject?: string
+	): Promise<CustomersAuthorization> {
 		const abort = new AbortController();
 		const timer = setTimeout(() => abort.abort(), this.timeout);
 		try {
 			const response = await fetch(
-				`${this.origin}/internal/v1/crm-access/authorize`,
+				`${this.origin}/internal/v1/crm-access/${subject ? 'authorize-workflow' : 'authorize'}`,
 				{
 					method: 'POST',
 					redirect: 'error',
 					signal: abort.signal,
 					headers: {
-						authorization,
+						...(authorization ? { authorization } : {}),
 						'content-type': 'application/json',
 						'x-winwidget-service': 'crm-customers',
 						'x-winwidget-internal-token': this.token
 					},
-					body: JSON.stringify({ schemaVersion: 1, workspaceId })
+					body: JSON.stringify({
+						schemaVersion: 1,
+						workspaceId,
+						...(subject ? { subject, purpose: 'INTAKE_ACCEPT' } : {})
+					})
 				}
 			);
-			if (response.status === 401) {
+			if (response.status === 401 && !subject) {
 				await response.body?.cancel();
 				throw new UnauthorizedException('CRM session is not active');
 			}

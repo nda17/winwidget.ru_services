@@ -383,8 +383,14 @@ jobs:
         run: |
           fixture="$(mktemp -d)"
           trap 'rm -rf "$fixture"' EXIT
-          cp -R apps/identity/prisma/. "$fixture/"
-          rm -rf "$fixture/migrations/20260902080000_add_workspaces_and_refresh_rotation"
+          mkdir "$fixture/migrations"
+          cp apps/identity/prisma/schema.prisma "$fixture/schema.prisma"
+          cp apps/identity/prisma/migrations/migration_lock.toml "$fixture/migrations/migration_lock.toml"
+          for migration in apps/identity/prisma/migrations/*; do
+            if [ -d "$migration" ] && [[ "${migration##*/}" < '20260902080000_add_workspaces_and_refresh_rotation' ]]; then
+              cp -R "$migration" "$fixture/migrations/"
+            fi
+          done
           pnpm --dir apps/identity exec prisma migrate deploy --schema "$fixture/schema.prisma"
           docker exec "$POSTGRES_CONTAINER_ID" psql \
             -U services_ci -d services_ci -v ON_ERROR_STOP=1 \
@@ -781,13 +787,16 @@ jobs:
         run: pnpm --dir apps/crm-sales run test:integration
 
   crm-domain-integration:
-    name: CRM domain PostgreSQL 18 / ${{ matrix.app }}
+    name: CRM workflow PostgreSQL 18 / ${{ matrix.app }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
         include:
+          - app: crm-access
+            schema: crm_access
+            script: test:integration:team
           - app: crm-customers
             schema: crm_customers
             script: test:integration:postgres18
@@ -797,6 +806,10 @@ jobs:
           - app: crm-sales
             schema: crm_sales
             script: test:workflow
+          - app: notification-delivery
+            schema: notification_delivery
+            database_key: notification_invitation
+            script: test:integration:wincrm-invitation
     services:
       postgres:
         image: postgres:18-bookworm@sha256:1961f96e6029a02c3812d7cb329a3b03a3ac2bb067058dec17b0f5596aca9296
@@ -811,12 +824,25 @@ jobs:
           --health-interval 2s
           --health-timeout 2s
           --health-retries 30
+      rabbitmq:
+        image: rabbitmq:4.2.9-management-alpine@sha256:0ab90fc05c41e9d2d8f11af5036e466c364adf5085ed83c477ab41aec0bdde86
+        env:
+          RABBITMQ_DEFAULT_USER: crm_workflow_ci
+          RABBITMQ_DEFAULT_PASS: crm_workflow_ci
+          RABBITMQ_DEFAULT_VHOST: winwidget_crm_acceptance_ci
+        ports:
+          - 5672:5672
+        options: >-
+          --health-cmd "rabbitmq-diagnostics -q ping"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 30
     env:
       DOMAIN_APP: ${{ matrix.app }}
       DOMAIN_SCHEMA: ${{ matrix.schema }}
-      DOMAIN_DATABASE: winwidget_${{ matrix.schema }}_test_ci
-      DOMAIN_MIGRATION_URL: 'postgresql://crm_domain_migration_ci:crm_domain_migration_ci_password@127.0.0.1:5432/winwidget_${{ matrix.schema }}_test_ci?schema=${{ matrix.schema }}&sslmode=disable'
-      DOMAIN_RUNTIME_URL: 'postgresql://crm_domain_runtime_ci:crm_domain_runtime_ci_password@127.0.0.1:5432/winwidget_${{ matrix.schema }}_test_ci?schema=${{ matrix.schema }}&sslmode=disable'
+      DOMAIN_DATABASE: winwidget_${{ matrix.database_key || matrix.schema }}_test_ci
+      DOMAIN_MIGRATION_URL: 'postgresql://crm_domain_migration_ci:crm_domain_migration_ci_password@127.0.0.1:5432/winwidget_${{ matrix.database_key || matrix.schema }}_test_ci?schema=${{ matrix.schema }}'
+      DOMAIN_RUNTIME_URL: 'postgresql://crm_domain_runtime_ci:crm_domain_runtime_ci_password@127.0.0.1:5432/winwidget_${{ matrix.database_key || matrix.schema }}_test_ci?schema=${{ matrix.schema }}'
     steps:
       - uses: actions/checkout@v6
         with:
@@ -839,8 +865,12 @@ jobs:
         env:
           POSTGRES_CONTAINER_ID: ${{ job.services.postgres.id }}
         run: |
-          [[ "$DOMAIN_SCHEMA" =~ ^crm_(customers|intake|sales)$ ]]
-          [[ "$DOMAIN_DATABASE" = "winwidget_${DOMAIN_SCHEMA}_test_ci" ]]
+          [[ "$DOMAIN_SCHEMA" =~ ^(crm_(access|customers|intake|sales)|notification_delivery)$ ]]
+          if [ "$DOMAIN_SCHEMA" = notification_delivery ]; then
+            test "$DOMAIN_DATABASE" = winwidget_notification_invitation_test_ci
+          else
+            test "$DOMAIN_DATABASE" = "winwidget_${DOMAIN_SCHEMA}_test_ci"
+          fi
           docker exec -i "$POSTGRES_CONTAINER_ID" psql -U crm_domain_bootstrap_ci -d postgres -v ON_ERROR_STOP=1 <<SQL
           CREATE ROLE crm_domain_migration_ci LOGIN PASSWORD 'crm_domain_migration_ci_password' NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
           CREATE ROLE crm_domain_runtime_ci LOGIN PASSWORD 'crm_domain_runtime_ci_password' NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
@@ -868,12 +898,17 @@ jobs:
           POSTGRES_CONTAINER_ID: ${{ job.services.postgres.id }}
         run: |
           case "$DOMAIN_APP" in
+            crm-access)
+              mutable_tables='crm_access.crm_workspace_access, crm_access.crm_workspace_members, crm_access.crm_teams, crm_access.crm_invitation_intents, crm_access.crm_admissions, crm_access.crm_team_outbox, crm_access.crm_team_deliveries'
+              receipt_tables='crm_access.crm_team_command_receipts, crm_access.crm_team_audit'
+              docker exec "$POSTGRES_CONTAINER_ID" psql -U crm_domain_bootstrap_ci -d "$DOMAIN_DATABASE" -v ON_ERROR_STOP=1 -c 'GRANT SELECT, INSERT, UPDATE, DELETE ON crm_access.crm_member_teams TO crm_domain_runtime_ci; GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA crm_access TO crm_domain_runtime_ci'
+              ;;
             crm-customers)
               mutable_tables='crm_customers.contacts, crm_customers.companies'
-              receipt_tables='crm_customers.customer_commands, crm_customers.customer_activities'
+              receipt_tables='crm_customers.customer_commands, crm_customers.customer_activities, crm_customers.intake_operation_slots, crm_customers.intake_operation_commands'
               ;;
             crm-intake)
-              mutable_tables='crm_intake.inbox_entries, crm_intake.intake_sources'
+              mutable_tables='crm_intake.inbox_entries, crm_intake.intake_sources, crm_intake.acceptances, crm_intake.acceptance_outbox, crm_intake.acceptance_receipts'
               receipt_tables='crm_intake.intake_commands, crm_intake.intake_activities, crm_intake.inbound_receipts'
               docker exec "$POSTGRES_CONTAINER_ID" psql -U crm_domain_bootstrap_ci -d "$DOMAIN_DATABASE" -v ON_ERROR_STOP=1 -c 'GRANT SELECT, INSERT, UPDATE, DELETE ON crm_intake.ingestion_rate_buckets TO crm_domain_runtime_ci'
               ;;
@@ -881,6 +916,10 @@ jobs:
               mutable_tables='crm_sales.deals, crm_sales.tasks'
               receipt_tables='crm_sales.deal_timeline, crm_sales.command_receipts, crm_sales.pipeline_template_installations, crm_sales.pipeline_template_installation_commands, crm_sales.intake_operation_slots, crm_sales.intake_operation_commands'
               docker exec "$POSTGRES_CONTAINER_ID" psql -U crm_domain_bootstrap_ci -d "$DOMAIN_DATABASE" -v ON_ERROR_STOP=1 -c 'GRANT SELECT, INSERT, UPDATE, DELETE ON crm_sales.pipelines, crm_sales.pipeline_stages TO crm_domain_runtime_ci'
+              ;;
+            notification-delivery)
+              docker exec "$POSTGRES_CONTAINER_ID" psql -U crm_domain_bootstrap_ci -d "$DOMAIN_DATABASE" -v ON_ERROR_STOP=1 -c 'GRANT USAGE ON SCHEMA notification_delivery TO crm_domain_runtime_ci; GRANT SELECT, INSERT, UPDATE, DELETE ON notification_delivery.delivery_receipts, notification_delivery.delivery_failures, notification_delivery.outbox_events, notification_delivery.control_actions, notification_delivery.heartbeats TO crm_domain_runtime_ci'
+              exit 0
               ;;
             *) exit 1 ;;
           esac
@@ -895,6 +934,13 @@ jobs:
         env:
           DOMAIN_TEST_SCRIPT: ${{ matrix.script }}
         run: |
+          if [ "$DOMAIN_APP" = notification-delivery ]; then
+            env NOTIFICATION_INVITATION_TEST_ALLOW_MUTATION=true \
+              "NOTIFICATION_INVITATION_TEST_DATABASE_URL=$DOMAIN_RUNTIME_URL" \
+              NOTIFICATION_INVITATION_TEST_RUNTIME_ROLE=crm_domain_runtime_ci \
+              pnpm --dir "apps/$DOMAIN_APP" run "$DOMAIN_TEST_SCRIPT"
+            exit 0
+          fi
           domain_prefix="$(printf '%s' "$DOMAIN_SCHEMA" | tr '[:lower:]' '[:upper:]')"
           env "${domain_prefix}_DATABASE_URL=$DOMAIN_MIGRATION_URL" \
             "${domain_prefix}_TEST_DATABASE_URL=$DOMAIN_RUNTIME_URL" \
@@ -903,6 +949,23 @@ jobs:
             "${domain_prefix}_TEST_SKIP_MIGRATIONS=true" \
             "${domain_prefix}_INTEGRATION_ALLOW_MUTATION=true" \
             pnpm --dir "apps/$DOMAIN_APP" run "$DOMAIN_TEST_SCRIPT"
+      - name: Prove Customers operation fencing on PostgreSQL 18
+        if: matrix.app == 'crm-customers'
+        env:
+          CRM_CUSTOMERS_INTEGRATION_ALLOW_MUTATION: 'true'
+          CRM_CUSTOMERS_TEST_DATABASE_URL: ${{ env.DOMAIN_RUNTIME_URL }}
+          CRM_CUSTOMERS_TEST_MIGRATION_DATABASE_URL: ${{ env.DOMAIN_MIGRATION_URL }}
+          CRM_CUSTOMERS_TEST_RUNTIME_ROLE: crm_domain_runtime_ci
+        run: pnpm --dir apps/crm-customers run test:integration:intake
+      - name: Prove Intake acceptance on PostgreSQL 18 and RabbitMQ
+        if: matrix.app == 'crm-intake'
+        env:
+          CRM_INTAKE_INTEGRATION_ALLOW_MUTATION: 'true'
+          CRM_INTAKE_TEST_DATABASE_URL: ${{ env.DOMAIN_RUNTIME_URL }}
+          CRM_INTAKE_TEST_MIGRATION_DATABASE_URL: ${{ env.DOMAIN_MIGRATION_URL }}
+          CRM_INTAKE_TEST_RUNTIME_ROLE: crm_domain_runtime_ci
+          CRM_INTAKE_ACCEPTANCE_TEST_RABBITMQ_URL: amqp://crm_workflow_ci:crm_workflow_ci@127.0.0.1:5672/winwidget_crm_acceptance_ci
+        run: pnpm --dir apps/crm-intake run test:integration:acceptance
 
   production-image:
     name: Production image / ${{ matrix.app }}

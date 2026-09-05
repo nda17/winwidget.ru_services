@@ -12,7 +12,8 @@ import {
 	REPORTING_NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE,
 	SUBSCRIPTION_EXPIRY_EMAIL_NOTIFICATION_EVENT_TYPE,
 	SUBSCRIPTION_EXPIRY_TELEGRAM_NOTIFICATION_EVENT_TYPE,
-	TELEGRAM_DESTINATION_UNAVAILABLE_EVENT_TYPE
+	TELEGRAM_DESTINATION_UNAVAILABLE_EVENT_TYPE,
+	WINCRM_INVITATION_EMAIL_EVENT_TYPE
 } from './messaging.constants';
 
 export const PLAN_VALUES = ['TRIAL', 'EASY', 'HARD'] as const;
@@ -312,7 +313,22 @@ export interface CampaignNotificationDeliveryOutcomeEventPayload {
 	} | null;
 }
 
+export interface WincrmInvitationEmailRequestedEventPayload {
+	schemaVersion: 1;
+	eventId: string;
+	eventType: typeof WINCRM_INVITATION_EMAIL_EVENT_TYPE;
+	occurredAt: string;
+	reference: {
+		type: 'wincrm-invitation';
+		id: string;
+		workspaceId: string;
+	};
+	destination: { email: string };
+	content: { invitationId: string; expiresAt: string };
+}
+
 export type NotificationDeliveryEventPayload =
+	| WincrmInvitationEmailRequestedEventPayload
 	| LeadIntegrationEventPayloadV2
 	| PaymentSucceededEventPayload
 	| PaymentTelegramNotificationEventPayload

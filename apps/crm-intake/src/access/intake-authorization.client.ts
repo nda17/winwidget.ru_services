@@ -180,8 +180,26 @@ export class IntakeAuthorizationClient {
 		return context;
 	}
 
+	async authorizeWorkflow(
+		workspaceId: string,
+		subject: string
+	): Promise<IntakeAuthorization> {
+		const context = await this.request(
+			'authorize-workflow',
+			workspaceId,
+			undefined,
+			subject
+		);
+		if (context.subject !== subject)
+			throw new ServiceUnavailableException(
+				'Workflow authority is unavailable'
+			);
+		assertIntakePermission(context, 'intake:write', true);
+		return context;
+	}
+
 	private async request(
-		path: 'authorize' | 'authorize-source',
+		path: 'authorize' | 'authorize-source' | 'authorize-workflow',
 		workspaceId: string,
 		authorization?: string,
 		subject?: string
@@ -204,7 +222,10 @@ export class IntakeAuthorizationClient {
 					body: JSON.stringify({
 						schemaVersion: 1,
 						workspaceId,
-						...(subject ? { subject } : {})
+						...(subject ? { subject } : {}),
+						...(path === 'authorize-workflow'
+							? { purpose: 'INTAKE_ACCEPT' }
+							: {})
 					})
 				}
 			);

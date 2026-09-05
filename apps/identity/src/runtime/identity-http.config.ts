@@ -1,6 +1,26 @@
 import { RequestMethod } from '@nestjs/common';
 
 export const IDENTITY_GLOBAL_PREFIX_EXCLUDES = [
+	{
+		path: 'internal/v1/notification-delivery/wincrm-invitations/:id/delivery-context',
+		method: RequestMethod.POST
+	},
+	{
+		path: 'internal/v1/crm-access/workspaces/:workspaceId/member-directory',
+		method: RequestMethod.POST
+	},
+	{
+		path: 'internal/v1/crm-access/invitations',
+		method: RequestMethod.POST
+	},
+	{
+		path: 'internal/v1/crm-access/invitations/:id/revoke',
+		method: RequestMethod.POST
+	},
+	{
+		path: 'internal/v1/crm-access/invitations/:id/acceptance-context',
+		method: RequestMethod.POST
+	},
 	{ path: 'health/live', method: RequestMethod.ALL },
 	{ path: 'health/ready', method: RequestMethod.ALL },
 	{ path: 'health/revision', method: RequestMethod.ALL },

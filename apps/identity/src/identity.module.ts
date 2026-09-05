@@ -43,6 +43,13 @@ import { VerificationTransportService } from './transports/verification-transpor
 import { UsersController } from './users/users.controller';
 import { UsersService } from './users/users.service';
 import { WorkspaceProvisioningService } from './workspaces/workspace-provisioning.service';
+import {
+	WorkspaceInvitationController,
+	WorkspaceInvitationInternalController,
+	WorkspaceInvitationDeliveryController
+} from './workspaces/workspace-invitation.controller';
+import { WorkspaceInvitationService } from './workspaces/workspace-invitation.service';
+import { WorkspaceDirectoryController } from './workspaces/workspace-directory.controller';
 
 const PROCESS_ROLE = parseIdentityProcessRole(
 	process.env.IDENTITY_PROCESS_ROLE
@@ -58,7 +65,11 @@ const API_CONTROLLERS =
 				TelegramController,
 				TelegramAdminController,
 				IdentityInternalController,
-				IdentityMessagingAdminController
+				IdentityMessagingAdminController,
+				WorkspaceInvitationController,
+				WorkspaceInvitationInternalController,
+				WorkspaceInvitationDeliveryController,
+				WorkspaceDirectoryController
 			]
 		: [];
 
@@ -84,7 +95,8 @@ const API_PROVIDERS =
 				TelegramService,
 				UsersService,
 				VerificationTransportService,
-				WorkspaceProvisioningService
+				WorkspaceProvisioningService,
+				WorkspaceInvitationService
 			]
 		: [];
 

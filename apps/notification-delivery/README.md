@@ -31,7 +31,8 @@ DLQ. До внешнего вызова consumers захватывают кви�
 публикуют результаты через локальный Outbox.
 
 `NOTIFICATION_DELIVERY_KINDS` может ограничить набор consumers, принадлежащих
-процессу. Полный поддерживаемый набор указан в `.env.example`. Конфигурация
+процессу. `.env.example` сохраняет прежний default набор; доставка приглашений
+WinCRM включается отдельно, как описано ниже. Конфигурация
 SMTP общая для видов email; `TELEGRAM_INFO_BOT_TOKEN` принадлежит только этому
 сервису. Production-трафик Telegram должен использовать
 `TELEGRAM_API_BASE_URL=https://tg.winwidget.ru/telegram-api`.
@@ -40,6 +41,87 @@ SMTP общая для видов email; `TELEGRAM_INFO_BOT_TOKEN` принад�
 Delivery только публичный базовый URL сайта для ссылок в email. Сервис не
 выполняет через неё reCAPTCHA-проверки; имя сохранено, чтобы production deploy
 использовал уже существующий env-контракт без отдельной миграции.
+
+## Приглашения WinCRM — отдельный opt-in
+
+Kind `wincrm-invitation-email` не входит в default consumers. Для включения
+сначала применить additive migration `20260907000000_add_wincrm_invitation_email`,
+подготовить service-owned RabbitMQ topology/ACLs и Identity, затем явно добавить
+kind в `NOTIFICATION_DELIVERY_KINDS`. Имена:
+
+- event type / main routing: `notification.wincrm.invitation.email.requested.v1`;
+- main queue: `winwidget.notification.wincrm.invitation.email`;
+- retry routing: `wincrm-invitation-email`, manual: `manual.wincrm-invitation-email`,
+  DLQ routing: `wincrm-invitation-email.dead-letter`; существующие retry delays,
+  publisher confirms, lease/CAS и отдельный Operations retry действуют и здесь.
+
+Identity публикует через собственный transactional Outbox ровно следующий
+контракт (UUID/ISO ниже обозначают значения, не literal-строки):
+
+```text
+{ schemaVersion: 1, eventId: UUID,
+  eventType: "notification.wincrm.invitation.email.requested.v1", occurredAt: ISO,
+  reference: { type: "wincrm-invitation", id: invitationUUID, workspaceId: UUID },
+  destination: { email: normalizedEmail },
+  content: { invitationId: invitationUUID, expiresAt: ISO } }
+```
+
+AMQP `messageId` равен `eventId`; timestamps — canonical UTC ISO с
+миллисекундами, expiry строго позже occurredAt. Нельзя передавать HTML, URL,
+JWT, роль или секреты. Ссылка письма формируется только как
+`https://crm.winwidget.ru/invitations/:UUID`, тема — «Приглашение в WinCRM».
+UUID ссылки не предоставляет доступ: Identity и CRM Access проверяют
+подтверждённый email, acceptance и admission отдельно. SMTP получает стабильный
+`Message-ID`, но провайдер не обязан дедуплицировать его.
+
+Для opt-in обязательны `IDENTITY_INTERNAL_BASE_URL` (точный HTTPS origin или
+loopback HTTP origin) и отдельный `IDENTITY_NOTIFICATION_DELIVERY_TOKEN`.
+Не использовать Operations token. После durable receipt claim, перед SMTP,
+worker делает scoped POST
+`/internal/v1/notification-delivery/wincrm-invitations/:id/delivery-context` с
+headers `x-winwidget-service: notification-delivery` и
+`x-winwidget-internal-token`, body `{schemaVersion:1,eventId,workspaceId}`.
+Identity feature `WINCRM_INVITATION_EMAIL_ENABLED` по умолчанию `false`;
+источник включается только после подготовки receiving topology/ACLs.
+
+Ответ должен содержать только
+`{schemaVersion:1,invitationId,workspaceId,eventId,deliver,email,expiresAt}`
+с точными bindings исходного события. При `deliver:true` нормализованный адрес
+совпадает с destination; при известном cancelled/accepted/expired/inactive
+состоянии возвращается `deliver:false,email:null`. HTTP errors (включая 404
+unknown binding), redirects, timeout, malformed/oversized response и mismatch
+не разрешают SMTP: применяются обычные retry/DLQ. Timeout 5 секунд, response
+не более 4096 байт; тело и credentials не попадают в ошибки/логи.
+
+Просроченный envelope не требует внешнего вызова. No-send фиксируется CAS как
+`CLOSED_NO_RETRY` с безопасным checkpoint
+`{schemaVersion:1,outcome:"SKIPPED",reason,skippedAt}`; `reason` —
+`INVITATION_EXPIRED` или `INVITATION_UNAVAILABLE`. Это постоянный dedup tombstone,
+не `DELIVERED`. Предыдущая unresolved failure закрывается в той же транзакции
+внутренним actor `service:notification-delivery`, без выдуманного пользователя.
+Delivery outcome для этого kind не публикуется: активного consumer нет.
+
+Eligibility не является распределённой блокировкой: отмена сразу после HTTP
+проверки может пересечься с SMTP. Такое письмо всё равно не позволяет принять
+отменённое приглашение. Crash после принятия SMTP, но до receipt commit,
+может дать редкий дубль — сохраняется at-least-once семантика транспорта.
+Тесты используют только fake SMTP; production SMTP не нужен для локальной QA.
+
+Изолированный PG18 тест: `pnpm run test:integration:wincrm-invitation`.
+Требуются `NOTIFICATION_INVITATION_TEST_ALLOW_MUTATION=true`,
+`NOTIFICATION_INVITATION_TEST_DATABASE_URL` (loopback,
+`winwidget_notification_invitation_test` или `_ci`, schema
+`notification_delivery`) и `NOTIFICATION_INVITATION_TEST_RUNTIME_ROLE`.
+Миграции применяются отдельно migration-ролью в принадлежащую ей схему;
+runtime — LOGIN/NOSUPERUSER/NOINHERIT/NOCREATEDB/NOCREATEROLE/NOREPLICATION/
+NOBYPASSRLS, только CONNECT, schema USAGE и SELECT/INSERT/UPDATE/DELETE на
+`delivery_receipts`, `delivery_failures`, `outbox_events`, `control_actions`,
+`heartbeats`. DELETE нужен service-owned retention, не управлению пользователями.
+Не выдавать доступ к `_prisma_migrations`, CREATE в schema/database или к
+контрольной чужой таблице `foreign_service_guard.sentinel`; тест проверяет отказ.
+Он не читает env-файлы, не запускает миграции/брокер, не вызывает SMTP и удаляет
+только собственные случайные fixture event IDs. Lifecycle disposable DB и
+контейнера остаётся у запускающего окружения.
 
 ## Retention и readiness
 

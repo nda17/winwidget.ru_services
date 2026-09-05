@@ -30,13 +30,24 @@ import { NotificationDeliveryPrismaService } from './prisma/notification-deliver
 import { TelegramInfoTransportService } from '../telegram/telegram-info-transport.service';
 import { Injectable } from '@nestjs/common';
 import { NotificationDeliveryReceiptStatus } from '@prisma/notification-delivery-client';
+import { WincrmInvitationContextService } from './wincrm-invitation-context.service';
+import { assertWincrmInvitationEvent } from '../messaging/wincrm-invitation.contract';
+
+export type NotificationDeliverySkipReason =
+	| 'INVITATION_EXPIRED'
+	| 'INVITATION_UNAVAILABLE';
+export type NotificationDeliveryResult = void | {
+	status: 'SKIPPED';
+	reason: NotificationDeliverySkipReason;
+};
 
 @Injectable()
 export class NotificationDeliveryAdapterService {
 	constructor(
 		private readonly emailService: EmailService,
 		private readonly telegram: TelegramInfoTransportService,
-		private readonly prisma: NotificationDeliveryPrismaService
+		private readonly prisma: NotificationDeliveryPrismaService,
+		private readonly invitationContext: WincrmInvitationContextService
 	) {}
 
 	async deliver(
@@ -44,8 +55,29 @@ export class NotificationDeliveryAdapterService {
 		event: NotificationDeliveryEventPayload,
 		eventId: string,
 		lockToken?: string
-	): Promise<void> {
+	): Promise<NotificationDeliveryResult> {
 		switch (kind) {
+			case 'wincrm-invitation-email': {
+				assertWincrmInvitationEvent(event);
+				if (!lockToken || event.eventId !== eventId)
+					throw new Error(
+						'WinCRM invitation delivery requires a matching active claim'
+					);
+				if (Date.parse(event.content.expiresAt) <= Date.now())
+					return { status: 'SKIPPED', reason: 'INVITATION_EXPIRED' };
+				if (!(await this.invitationContext.canDeliver(event)))
+					return { status: 'SKIPPED', reason: 'INVITATION_UNAVAILABLE' };
+				// Eligibility can expire while its HTTP response is in flight.
+				if (Date.parse(event.content.expiresAt) <= Date.now())
+					return { status: 'SKIPPED', reason: 'INVITATION_EXPIRED' };
+				await this.emailService.sendWincrmInvitation(
+					event.destination.email,
+					event.reference.id,
+					event.content.expiresAt,
+					eventId
+				);
+				return;
+			}
 			case 'email':
 				await this.sendLeadEmail(this.getLeadEvent(event, kind), eventId);
 				return;

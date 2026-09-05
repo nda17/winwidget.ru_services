@@ -14,6 +14,7 @@
 		"lint": "eslint \"src/**/*.ts\" --max-warnings=0",
 		"test": "jest --runInBand",
 		"test:integration:postgres18": "node test/integration/customers-postgres18.integration.mjs",
+		"test:integration:intake": "node test/integration/intake-operations-postgres18.integration.mjs",
 		"typecheck": "tsc -p tsconfig.json --noEmit",
 		"prisma:generate": "prisma generate --schema prisma/schema.prisma",
 		"prisma:validate": "prisma validate --schema prisma/schema.prisma",

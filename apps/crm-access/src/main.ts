@@ -32,6 +32,10 @@ async function bootstrap(): Promise<void> {
 			{
 				path: 'internal/v1/crm-access/authorize-source',
 				method: RequestMethod.POST
+			},
+			{
+				path: 'internal/v1/crm-access/authorize-workflow',
+				method: RequestMethod.POST
 			}
 		]
 	});

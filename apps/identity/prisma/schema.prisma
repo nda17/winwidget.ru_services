@@ -70,20 +70,47 @@ model Workspace {
 }
 
 model WorkspaceMember {
-  id          String                @id @default(uuid()) @db.Uuid
-  workspaceId String                @map("workspace_id") @db.Uuid
-  userId      String                @map("user_id")
-  role        WorkspaceMemberRole   @default(MEMBER)
-  status      WorkspaceMemberStatus @default(ACTIVE)
-  workspace   Workspace             @relation(fields: [workspaceId], references: [id], onDelete: Cascade, onUpdate: Cascade)
-  user        User                  @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: Cascade)
-  createdAt   DateTime              @default(now()) @map("created_at")
-  updatedAt   DateTime              @updatedAt @map("updated_at")
+  id                    String                @id @default(uuid()) @db.Uuid
+  workspaceId           String                @map("workspace_id") @db.Uuid
+  userId                String                @map("user_id")
+  role                  WorkspaceMemberRole   @default(MEMBER)
+  status                WorkspaceMemberStatus @default(ACTIVE)
+  version               Int                   @default(1)
+  createdByProduct      String?               @map("created_by_product") @db.VarChar(32)
+  createdByInvitationId String?               @unique @map("created_by_invitation_id") @db.Uuid
+  workspace             Workspace             @relation(fields: [workspaceId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  user                  User                  @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  createdAt             DateTime              @default(now()) @map("created_at")
+  updatedAt             DateTime              @updatedAt @map("updated_at")
 
   @@unique([workspaceId, userId])
   @@index([userId, status])
   @@index([workspaceId, status])
   @@map("workspace_members")
+  @@schema("identity")
+}
+
+model WorkspaceInvitation {
+  id                   String    @id @db.Uuid
+  workspaceId          String    @map("workspace_id") @db.Uuid
+  productCode          String    @default("WINCRM") @map("product_code") @db.VarChar(32)
+  inviterSubject       String    @map("inviter_subject") @db.VarChar(256)
+  email                String    @db.VarChar(254)
+  status               String    @default("PENDING") @db.VarChar(16)
+  version              Int       @default(1)
+  expiresAt            DateTime  @map("expires_at")
+  acceptedAt           DateTime? @map("accepted_at")
+  acceptedSubject      String?   @map("accepted_subject") @db.VarChar(256)
+  acceptanceId         String?   @unique @map("acceptance_id") @db.Uuid
+  acceptedMembershipId String?   @map("accepted_membership_id") @db.Uuid
+  emailVerifiedAt      DateTime? @map("email_verified_at")
+  notificationEventId  String?   @unique @map("notification_event_id") @db.Uuid
+  revokedAt            DateTime? @map("revoked_at")
+  createdAt            DateTime  @default(now()) @map("created_at")
+  updatedAt            DateTime  @updatedAt @map("updated_at")
+
+  @@index([workspaceId, status, createdAt])
+  @@map("workspace_invitations")
   @@schema("identity")
 }
 

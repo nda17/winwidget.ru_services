@@ -15,6 +15,7 @@
 		"lint": "eslint \"{src,emails}/**/*.{ts,tsx}\" --max-warnings=0",
 		"test": "jest --runInBand",
 		"test:integration": "node test/integration/notification-delivery.integration.mjs",
+		"test:integration:wincrm-invitation": "node test/integration/wincrm-invitation-postgres18.integration.mjs",
 		"typecheck": "tsc -p tsconfig.json --noEmit",
 		"prisma:generate": "prisma generate --schema prisma/schema.prisma",
 		"prisma:validate": "prisma validate --schema prisma/schema.prisma",

@@ -75,6 +75,7 @@ const command = {
 describe('IntakeService', () => {
 	const setup = () => {
 		const tx = {
+			acceptance: { findFirst: jest.fn().mockResolvedValue(null) },
 			$executeRaw: jest.fn(),
 			inboxEntry: {
 				create: jest.fn().mockResolvedValue(entry),

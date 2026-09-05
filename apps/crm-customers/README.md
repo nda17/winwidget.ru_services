@@ -105,6 +105,49 @@ Runtime PostgreSQL-роли выдаются только `USAGE` схемы, `S
 
 ## Локальные проверки
 
+### Внутренние операции принятия Inbox
+
+Prefix `/internal/v1/crm-customers/intake-operations`, только POST. Endpoint
+`execute`/`close` доступен только `crm-intake`, `read` — `crm-intake|crm-sales`,
+`verify` — только `crm-sales`. Guard проверяет transport loopback и отдельные
+пары `CRM_CUSTOMERS_CRM_INTAKE_TOKEN`, `CRM_CUSTOMERS_CRM_SALES_TOKEN` через
+`x-winwidget-service`/`x-winwidget-internal-token`. Для другого VPS используется
+приватный HTTPS ingress, который проксирует на loopback; в public Gateway эти
+маршруты не публикуются. Пользовательский JWT не сохраняется и не требуется.
+
+Точное binding тело: `{schemaVersion:1,workspaceId,workflowId,operationId,
+actorSubject,payloadHash}`. IDs — UUIDv4; hash — SHA-256 JSON с рекурсивно
+отсортированными ключами и сохранённым порядком массивов. `execute` добавляет
+`commandId`, `payload`; `close` — `commandId`, `recoverySubject`; обе команды
+требуют совпадение `Idempotency-Key`. Payload: `{mode:CREATE,name,phone,email,
+teamId}` (nullable поля), либо только `{mode:EXISTING,contactId}`. Неизвестные
+поля и неканонический actor отвергаются.
+
+Ответ: binding плюс `state:ABSENT|COMMITTED|CANCELLED`, `result:null|{contactId,
+contactName,contactVersion}`, `committedAt:null|ISO`. Имя — минимальный snapshot
+доказательства, не свежая карточка; phone/email/notes не выдаются. `read`
+возвращает только доказательство точно совпавшей операции и может работать
+после expiry; произвольный поиск контакта через этот endpoint невозможен.
+Перед новым Sales write `verify` заново проверяет delegated actor через Access
+`authorize-workflow` (`purpose:INTAKE_ACCEPT`), текущую доступность контакта и
+отсутствие архива. `execute` тоже всегда требует fresh writable authority;
+`close` дополнительно требует текущего OWNER/CRM_ADMIN recovery actor.
+
+COMMITTED/CANCELLED slot и command receipt неизменяемы. Контакт, slot, receipt
+и audit атомарны; close конкурирует с execute под одним operation-lock, поздняя
+команда не может пройти CANCELLED tombstone. Компенсационного удаления нет.
+SQL lock/statement timeout ограничивает конкуренцию; неизвестный результат
+повторяется с тем же ключом. Новые `intake_operation_slots` и
+`intake_operation_commands` имеют только SELECT/INSERT для runtime, входят в
+readiness и отдельную service-owned backup/restore схему.
+
+`node test/integration/intake-operations-postgres18.integration.mjs` использует
+ту же явную isolated PG18 test-конфигурацию, что CRUD suite, но миграции должны
+быть применены заранее; скрипт не читает `.env`. Проверяет parallel replay,
+close/late-write race, точные proof bindings, expiry/archive, rollback и ACL.
+
+### Сборка и CRUD
+
 ```bash
 cp .env.example .env
 pnpm install --frozen-lockfile

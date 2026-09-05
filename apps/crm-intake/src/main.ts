@@ -3,6 +3,7 @@ import { NestFactory } from '@nestjs/core';
 import type { NestExpressApplication } from '@nestjs/platform-express';
 import { parseCrmIntakeCorsAllowedOrigins } from './config/crm-intake-cors.config';
 import { CrmIntakeModule } from './crm-intake.module';
+import { intakeProcessRole } from './acceptance/acceptance.messaging';
 import {
 	parseCrmIntakeListenHost,
 	parseCrmIntakePort
@@ -13,7 +14,10 @@ async function bootstrap(): Promise<void> {
 		process.env.CRM_INTAKE_LISTEN_HOST,
 		process.env.MODE
 	);
-	const port = parseCrmIntakePort(process.env.CRM_INTAKE_PORT);
+	const port = parseCrmIntakePort(
+		process.env.CRM_INTAKE_PORT,
+		intakeProcessRole()
+	);
 	const origins = parseCrmIntakeCorsAllowedOrigins(
 		process.env.CORS_ALLOWED_ORIGINS
 	);

@@ -275,6 +275,179 @@ describe('NotificationDeliveryWorkerService', () => {
 		jest.restoreAllMocks();
 	});
 
+	const createInvitationMessage = (): ConsumeMessage => {
+		const message = createPaymentMessage(
+			'notification.wincrm.invitation.email.requested.v1'
+		);
+		message.properties.type =
+			'notification.wincrm.invitation.email.requested.v1';
+		message.content = Buffer.from(
+			JSON.stringify({
+				schemaVersion: 1,
+				eventId,
+				eventType: message.properties.type,
+				occurredAt: '2026-09-05T00:00:00.000Z',
+				reference: {
+					type: 'wincrm-invitation',
+					id: '22222222-2222-4222-8222-222222222222',
+					workspaceId: '33333333-3333-4333-8333-333333333333'
+				},
+				destination: { email: 'invited@example.test' },
+				content: {
+					invitationId: '22222222-2222-4222-8222-222222222222',
+					expiresAt: '2026-09-12T00:00:00.000Z'
+				}
+			})
+		);
+		return message;
+	};
+
+	it.each(['INVITATION_EXPIRED', 'INVITATION_UNAVAILABLE'])(
+		'records %s as a terminal skip, not provider delivery, before ack',
+		async reason => {
+			const { service, rabbitMq, adapter, transaction } = createService(
+				'wincrm-invitation-email'
+			);
+			jest.mocked(adapter.deliver).mockResolvedValue({
+				status: 'SKIPPED',
+				reason: reason as 'INVITATION_EXPIRED'
+			});
+			await (service as any).handle(
+				'wincrm-invitation-email',
+				createInvitationMessage()
+			);
+			expect(
+				transaction.notificationDeliveryReceipt.updateMany
+			).toHaveBeenCalledWith({
+				where: expect.objectContaining({
+					eventId,
+					consumer: 'wincrm-invitation-email',
+					status: NotificationDeliveryReceiptStatus.PROCESSING,
+					lockedBy: expect.any(String),
+					lockToken: expect.any(String)
+				}),
+				data: {
+					status: NotificationDeliveryReceiptStatus.CLOSED_NO_RETRY,
+					checkpoint: {
+						schemaVersion: 1,
+						outcome: 'SKIPPED',
+						reason,
+						skippedAt: expect.any(String)
+					},
+					lockedAt: null,
+					lockedBy: null,
+					lockToken: null,
+					leaseExpiresAt: null,
+					deliveredAt: null,
+					retryAttempt: null,
+					retryAvailableAt: null,
+					retryToken: null
+				}
+			});
+			expect(
+				transaction.notificationDeliveryFailure.updateMany
+			).toHaveBeenCalledWith(
+				expect.objectContaining({
+					data: expect.objectContaining({
+						resolution: 'CLOSED_NO_RETRY',
+						resolvedById: 'service:notification-delivery',
+						resolutionComment: `SKIPPED: ${reason}`
+					})
+				})
+			);
+			expect(
+				transaction.notificationDeliveryOutboxEvent.create
+			).not.toHaveBeenCalled();
+			expect(rabbitMq.ack).toHaveBeenCalledTimes(1);
+			expect(rabbitMq.nack).not.toHaveBeenCalled();
+			expect(
+				transaction.notificationDeliveryReceipt.updateMany.mock
+					.invocationCallOrder[0]
+			).toBeLessThan(
+				jest.mocked(rabbitMq.ack).mock.invocationCallOrder[0]
+			);
+		}
+	);
+	it('never acknowledges or closes a failure when the terminal skip CAS is lost', async () => {
+		const { service, rabbitMq, adapter, transaction } = createService(
+			'wincrm-invitation-email'
+		);
+		jest.mocked(adapter.deliver).mockResolvedValue({
+			status: 'SKIPPED',
+			reason: 'INVITATION_EXPIRED'
+		});
+		transaction.notificationDeliveryReceipt.updateMany.mockResolvedValue({
+			count: 0
+		});
+		await (service as any).handle(
+			'wincrm-invitation-email',
+			createInvitationMessage()
+		);
+		expect(rabbitMq.ack).not.toHaveBeenCalled();
+		expect(rabbitMq.nack).toHaveBeenCalledWith(expect.anything(), true);
+		expect(
+			transaction.notificationDeliveryFailure.updateMany
+		).not.toHaveBeenCalled();
+	});
+	it('deduplicates a previously skipped invitation without calling its adapter', async () => {
+		const { service, rabbitMq, adapter, prisma } = createService(
+			'wincrm-invitation-email'
+		);
+		jest
+			.mocked(prisma.notificationDeliveryReceipt.create)
+			.mockRejectedValue(
+				new Prisma.PrismaClientKnownRequestError('duplicate', {
+					code: 'P2002',
+					clientVersion: '5.22.0'
+				})
+			);
+		jest
+			.mocked(prisma.notificationDeliveryReceipt.findUnique)
+			.mockResolvedValue({
+				status: NotificationDeliveryReceiptStatus.CLOSED_NO_RETRY
+			} as never);
+		await (service as any).handle(
+			'wincrm-invitation-email',
+			createInvitationMessage()
+		);
+		expect(adapter.deliver).not.toHaveBeenCalled();
+		expect(rabbitMq.ack).toHaveBeenCalledTimes(1);
+	});
+	it('uses the invitation-only retry route after eligibility or SMTP failure', async () => {
+		const { service, adapter, transaction, rabbitMq } = createService(
+			'wincrm-invitation-email'
+		);
+		jest
+			.mocked(adapter.deliver)
+			.mockRejectedValue(
+				new Error('WinCRM invitation eligibility is unavailable')
+			);
+		await (service as any).handle(
+			'wincrm-invitation-email',
+			createInvitationMessage()
+		);
+		expect(
+			transaction.notificationDeliveryOutboxEvent.create
+		).toHaveBeenCalledWith(
+			expect.objectContaining({
+				data: expect.objectContaining({
+					routingKey: 'manual.wincrm-invitation-email',
+					eventType: 'notification.wincrm.invitation.email.requested.v1'
+				})
+			})
+		);
+		expect(
+			transaction.notificationDeliveryReceipt.updateMany
+		).toHaveBeenCalledWith(
+			expect.objectContaining({
+				data: expect.objectContaining({
+					status: NotificationDeliveryReceiptStatus.RETRY_SCHEDULED
+				})
+			})
+		);
+		expect(rabbitMq.ack).toHaveBeenCalledTimes(1);
+	});
+
 	it.each([
 		{
 			kind: 'daily-summary-delivery-telegram',

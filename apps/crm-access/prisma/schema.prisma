@@ -44,21 +44,173 @@ model CrmWorkspaceAccess {
 }
 
 model CrmWorkspaceMember {
-  id           String        @id @default(uuid()) @db.Uuid
-  workspaceId  String        @map("workspace_id") @db.Uuid
-  subject      String        @db.VarChar(256)
-  membershipId String        @map("membership_id") @db.Uuid
+  id           String          @id @default(uuid()) @db.Uuid
+  workspaceId  String          @map("workspace_id") @db.Uuid
+  subject      String          @db.VarChar(256)
+  membershipId String          @map("membership_id") @db.Uuid
   role         CrmMemberRole
-  teamIds      String[]      @default([]) @map("team_ids") @db.Uuid
-  disabledAt   DateTime?     @map("disabled_at")
-  version      Int           @default(1)
-  createdAt    DateTime      @default(now()) @map("created_at")
-  updatedAt    DateTime      @updatedAt @map("updated_at")
+  teams        CrmMemberTeam[]
+  disabledAt   DateTime?       @map("disabled_at")
+  version      Int             @default(1)
+  createdAt    DateTime        @default(now()) @map("created_at")
+  updatedAt    DateTime        @updatedAt @map("updated_at")
 
   @@unique([workspaceId, subject])
   @@unique([workspaceId, membershipId])
+  @@unique([id, workspaceId])
   @@index([workspaceId, disabledAt])
   @@map("crm_workspace_members")
+  @@schema("crm_access")
+}
+
+model CrmTeam {
+  id          String          @id @default(uuid()) @db.Uuid
+  workspaceId String          @map("workspace_id") @db.Uuid
+  name        String          @db.VarChar(100)
+  version     Int             @default(1)
+  archivedAt  DateTime?       @map("archived_at")
+  createdAt   DateTime        @default(now()) @map("created_at")
+  updatedAt   DateTime        @updatedAt @map("updated_at")
+  members     CrmMemberTeam[]
+
+  @@unique([id, workspaceId])
+  @@index([workspaceId, archivedAt])
+  @@map("crm_teams")
+  @@schema("crm_access")
+}
+
+model CrmMemberTeam {
+  workspaceId String             @map("workspace_id") @db.Uuid
+  memberId    String             @map("member_id") @db.Uuid
+  teamId      String             @map("team_id") @db.Uuid
+  member      CrmWorkspaceMember @relation(fields: [memberId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
+  team        CrmTeam            @relation(fields: [teamId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
+
+  @@id([memberId, teamId])
+  @@index([workspaceId, teamId])
+  @@map("crm_member_teams")
+  @@schema("crm_access")
+}
+
+model CrmInvitationIntent {
+  id                    String        @id @default(uuid()) @db.Uuid
+  workspaceId           String        @map("workspace_id") @db.Uuid
+  email                 String        @db.VarChar(254)
+  role                  CrmMemberRole
+  teamIds               String[]      @default([]) @map("team_ids") @db.Uuid
+  inviterSubject        String        @map("inviter_subject") @db.VarChar(256)
+  status                String        @default("REGISTERING") @db.VarChar(24)
+  version               Int           @default(1)
+  expiresAt             DateTime      @map("expires_at")
+  revokedAt             DateTime?     @map("revoked_at")
+  identityVersion       Int?          @map("identity_version")
+  provisioningCommandId String        @unique @map("provisioning_command_id") @db.Uuid
+  revokeCommandId       String?       @unique @map("revoke_command_id") @db.Uuid
+  createdAt             DateTime      @default(now()) @map("created_at")
+  updatedAt             DateTime      @updatedAt @map("updated_at")
+
+  @@unique([id, workspaceId])
+  @@index([workspaceId, status, createdAt])
+  @@map("crm_invitation_intents")
+  @@schema("crm_access")
+}
+
+model CrmAdmission {
+  id                    String    @id @default(uuid()) @db.Uuid
+  workspaceId           String    @map("workspace_id") @db.Uuid
+  intentId              String?   @unique @map("intent_id") @db.Uuid
+  sourceAcceptanceId    String?   @unique @map("source_acceptance_id") @db.Uuid
+  memberId              String?   @map("member_id") @db.Uuid
+  expectedMemberVersion Int?      @map("expected_member_version")
+  subject               String    @db.VarChar(256)
+  membershipId          String    @map("membership_id") @db.Uuid
+  requestedBySubject    String    @map("requested_by_subject") @db.VarChar(256)
+  position              BigInt    @unique @default(autoincrement())
+  status                String    @default("WAITING") @db.VarChar(16)
+  activatedAt           DateTime? @map("activated_at")
+  cancellationCode      String?   @map("cancellation_code") @db.VarChar(64)
+  createdAt             DateTime  @default(now()) @map("created_at")
+  updatedAt             DateTime  @updatedAt @map("updated_at")
+
+  @@index([workspaceId, status, position])
+  @@map("crm_admissions")
+  @@schema("crm_access")
+}
+
+model CrmTeamCommandReceipt {
+  commandId    String   @id @map("command_id") @db.Uuid
+  workspaceId  String   @map("workspace_id") @db.Uuid
+  actorSubject String   @map("actor_subject") @db.VarChar(256)
+  commandType  String   @map("command_type") @db.VarChar(64)
+  requestHash  String   @map("request_hash") @db.Char(64)
+  result       Json
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  @@map("crm_team_command_receipts")
+  @@schema("crm_access")
+}
+
+model CrmTeamAudit {
+  id           String   @id @default(uuid()) @db.Uuid
+  workspaceId  String   @map("workspace_id") @db.Uuid
+  actorSubject String   @map("actor_subject") @db.VarChar(256)
+  commandId    String   @unique @map("command_id") @db.Uuid
+  action       String   @db.VarChar(64)
+  targetId     String   @map("target_id") @db.Uuid
+  before       Json?
+  after        Json?
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  @@index([workspaceId, createdAt])
+  @@map("crm_team_audit")
+  @@schema("crm_access")
+}
+
+model CrmTeamOutbox {
+  id               String    @id @default(uuid()) @db.Uuid
+  messageId        String    @map("message_id") @db.Uuid
+  deduplicationKey String    @unique @map("deduplication_key") @db.VarChar(256)
+  exchange         String    @default("winwidget.events") @db.VarChar(64)
+  eventType        String    @map("event_type") @db.VarChar(100)
+  routingKey       String    @map("routing_key") @db.VarChar(150)
+  payload          Json
+  headers          Json      @default("{}")
+  status           String    @default("PENDING") @db.VarChar(16)
+  attempts         Int       @default(0)
+  availableAt      DateTime  @default(now()) @map("available_at")
+  leaseToken       String?   @map("lease_token") @db.Uuid
+  leaseExpiresAt   DateTime? @map("lease_expires_at")
+  publishedAt      DateTime? @map("published_at")
+  lastError        String?   @map("last_error") @db.VarChar(64)
+  createdAt        DateTime  @default(now()) @map("created_at")
+  updatedAt        DateTime  @updatedAt @map("updated_at")
+
+  @@index([status, availableAt, createdAt])
+  @@map("crm_team_outbox")
+  @@schema("crm_access")
+}
+
+model CrmTeamDelivery {
+  id               String    @id @default(uuid()) @db.Uuid
+  eventId          String    @map("event_id") @db.Uuid
+  consumer         String    @db.VarChar(64)
+  workspaceId      String?   @map("workspace_id") @db.Uuid
+  payloadHash      String    @map("payload_hash") @db.Char(64)
+  payload          Json
+  status           String    @default("PROCESSING") @db.VarChar(24)
+  version          Int       @default(1)
+  leaseToken       String?   @map("lease_token") @db.Uuid
+  leaseExpiresAt   DateTime? @map("lease_expires_at")
+  retryAttempt     Int       @default(0) @map("retry_attempt")
+  manualRetryCycle Int       @default(0) @map("manual_retry_cycle")
+  deliveredAt      DateTime? @map("delivered_at")
+  lastError        String?   @map("last_error") @db.VarChar(64)
+  createdAt        DateTime  @default(now()) @map("created_at")
+  updatedAt        DateTime  @updatedAt @map("updated_at")
+
+  @@unique([eventId, consumer])
+  @@index([workspaceId, status, updatedAt])
+  @@map("crm_team_deliveries")
   @@schema("crm_access")
 }
 

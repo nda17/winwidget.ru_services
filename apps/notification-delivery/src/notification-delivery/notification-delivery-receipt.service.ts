@@ -20,6 +20,7 @@ import {
 import { NotificationDeliveryMessageMetadataService } from './notification-delivery-message-metadata.service';
 import { NotificationDeliveryOutcomeService } from './notification-delivery-outcome.service';
 import { NotificationDeliveryPrismaService } from './prisma/notification-delivery-prisma.service';
+import type { NotificationDeliverySkipReason } from './notification-delivery-adapter.service';
 
 const DELIVERY_RECEIPT_LEASE_MS = 10 * 60 * 1000;
 const DELIVERY_RECOVERY_GRACE_MS = 5_000;
@@ -180,6 +181,63 @@ export class NotificationDeliveryReceiptService {
 		return reclaimed.count === 1
 			? { state: 'claimed', lockToken }
 			: { state: 'deferred' };
+	}
+
+	async markSkipped(
+		eventId: string,
+		consumer: NotificationDeliveryKind,
+		lockToken: string,
+		reason: NotificationDeliverySkipReason
+	): Promise<void> {
+		if (
+			consumer !== 'wincrm-invitation-email' ||
+			!['INVITATION_EXPIRED', 'INVITATION_UNAVAILABLE'].includes(reason)
+		)
+			throw new Error('Unsupported notification skip');
+		await this.prisma.$transaction(async transaction => {
+			const now = new Date();
+			const closed =
+				await transaction.notificationDeliveryReceipt.updateMany({
+					where: {
+						eventId,
+						consumer,
+						status: NotificationDeliveryReceiptStatus.PROCESSING,
+						lockedBy: this.workerId,
+						lockToken
+					},
+					data: {
+						status: NotificationDeliveryReceiptStatus.CLOSED_NO_RETRY,
+						checkpoint: {
+							schemaVersion: 1,
+							outcome: 'SKIPPED',
+							reason,
+							skippedAt: now.toISOString()
+						},
+						lockedAt: null,
+						lockedBy: null,
+						lockToken: null,
+						leaseExpiresAt: null,
+						deliveredAt: null,
+						retryAttempt: null,
+						retryAvailableAt: null,
+						retryToken: null
+					}
+				});
+			if (closed.count !== 1)
+				throw new Error('Notification skip claim was lost');
+			await transaction.notificationDeliveryFailure.updateMany({
+				where: { eventId, consumer, resolvedAt: null },
+				data: {
+					resolvedAt: now,
+					resolution:
+						NotificationDeliveryFailureResolution.CLOSED_NO_RETRY,
+					resolutionComment: `SKIPPED: ${reason}`,
+					resolvedById: 'service:notification-delivery',
+					retryingAt: null,
+					activeRetryToken: null
+				}
+			});
+		});
 	}
 
 	async markDelivered(

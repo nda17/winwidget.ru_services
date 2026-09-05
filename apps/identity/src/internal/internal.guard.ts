@@ -16,6 +16,7 @@ export const IDENTITY_INTERNAL_SERVICES = [
 	'widgets',
 	'billing',
 	'crm-access',
+	'notification-delivery',
 	'platform',
 	'support',
 	'operations'
@@ -59,9 +60,24 @@ export class IdentityInternalGuard implements CanActivate {
 		private readonly reflector: Reflector
 	) {
 		for (const service of IDENTITY_INTERNAL_SERVICES) {
+			if (service === 'notification-delivery') {
+				const enabled =
+					config.get<string>('WINCRM_INVITATION_EMAIL_ENABLED')?.trim() ||
+					'false';
+				if (!['true', 'false'].includes(enabled))
+					throw new Error(
+						'WINCRM_INVITATION_EMAIL_ENABLED must be true or false'
+					);
+				if (enabled === 'false') continue;
+			}
 			const name = `IDENTITY_${service.replace(/-/g, '_').toUpperCase()}_TOKEN`;
 			const value = config.get<string>(name)?.trim() || '';
-			if (value.length < 32 || PLACEHOLDERS.has(value)) {
+			if (
+				value.length < 32 ||
+				PLACEHOLDERS.has(value) ||
+				(service === 'notification-delivery' &&
+					/^(?:change[_-]?me|ci_|identity_)/i.test(value))
+			) {
 				throw new Error(
 					`${name} must be a non-placeholder secret with at least 32 characters`
 				);
@@ -71,7 +87,7 @@ export class IdentityInternalGuard implements CanActivate {
 		const distinct = new Set(
 			[...this.tokens.values()].map(value => value.toString('base64'))
 		);
-		if (distinct.size !== IDENTITY_INTERNAL_SERVICES.length) {
+		if (distinct.size !== this.tokens.size) {
 			throw new Error(
 				'Identity internal service credentials must be pairwise distinct'
 			);
@@ -95,7 +111,9 @@ export class IdentityInternalGuard implements CanActivate {
 		) {
 			throw new ForbiddenException('Invalid internal credentials');
 		}
-		const expected = this.tokens.get(service)!;
+		const expected = this.tokens.get(service);
+		if (!expected)
+			throw new ForbiddenException('Invalid internal credentials');
 		const candidate = Buffer.from(
 			request.header('x-winwidget-internal-token') || ''
 		);

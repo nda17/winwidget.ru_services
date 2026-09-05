@@ -16,6 +16,16 @@ import {
 } from './authorization/crm-authorization.controller';
 import { CrmAuthorizationService } from './authorization/crm-authorization.service';
 import { CrmInternalGuard } from './authorization/crm-internal.guard';
+import { CrmTeamController } from './team/team.controller';
+import { CrmTeamService } from './team/team.service';
+import { IdentityInvitationClient } from './internal/identity-invitation.client';
+import { CrmTeamAdmissionService } from './team/team-admission.service';
+import { CrmTeamRabbitService } from './team/team-rabbit.service';
+import { CrmTeamOutboxService } from './team/team-outbox.service';
+import { CrmTeamWorkerService } from './team/team-worker.service';
+import { parseCrmAccessRole } from './runtime/crm-access-runtime.service';
+
+const role = parseCrmAccessRole(process.env.CRM_ACCESS_PROCESS_ROLE);
 
 @Module({
 	imports: [
@@ -25,9 +35,14 @@ import { CrmInternalGuard } from './authorization/crm-internal.guard';
 	],
 	controllers: [
 		CrmAccessHealthController,
-		CrmAccessController,
-		CrmPermissionsController,
-		CrmAuthorizationController
+		...(role === 'api'
+			? [
+					CrmAccessController,
+					CrmPermissionsController,
+					CrmAuthorizationController,
+					CrmTeamController
+				]
+			: [])
 	],
 	providers: [
 		CrmAuthorizationService,
@@ -36,7 +51,13 @@ import { CrmInternalGuard } from './authorization/crm-internal.guard';
 		BillingEntitlementClient,
 		CrmSalesPipelineClient,
 		CrmAccessService,
-		CrmAccessHealthService
+		CrmAccessHealthService,
+		CrmTeamService,
+		IdentityInvitationClient,
+		CrmTeamAdmissionService,
+		CrmTeamRabbitService,
+		CrmTeamOutboxService,
+		CrmTeamWorkerService
 	]
 })
 export class CrmAccessModule implements OnApplicationShutdown {

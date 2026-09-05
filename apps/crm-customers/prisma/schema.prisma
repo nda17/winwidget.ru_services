@@ -61,6 +61,7 @@ model Contact {
   updatedAt        DateTime  @updatedAt @map("updated_at")
   company          Company?  @relation(fields: [workspaceId, companyId], references: [workspaceId, id], onDelete: Restrict, onUpdate: Restrict)
 
+  @@unique([workspaceId, id])
   @@index([workspaceId, archivedAt, createdAt, id])
   @@index([workspaceId, createdBySubject, archivedAt])
   @@index([workspaceId, teamId, archivedAt])
@@ -72,14 +73,14 @@ model Contact {
 }
 
 model CustomerCommand {
-  commandId      String   @id @map("command_id") @db.Uuid
-  workspaceId    String   @map("workspace_id") @db.Uuid
-  entityId       String   @map("entity_id") @db.Uuid
-  entityKind     String   @map("entity_kind") @db.VarChar(16)
-  actorSubject   String   @map("actor_subject") @db.VarChar(256)
-  requestHash    String   @map("request_hash") @db.Char(64)
-  response       Json
-  createdAt      DateTime @default(now()) @map("created_at")
+  commandId    String   @id @map("command_id") @db.Uuid
+  workspaceId  String   @map("workspace_id") @db.Uuid
+  entityId     String   @map("entity_id") @db.Uuid
+  entityKind   String   @map("entity_kind") @db.VarChar(16)
+  actorSubject String   @map("actor_subject") @db.VarChar(256)
+  requestHash  String   @map("request_hash") @db.Char(64)
+  response     Json
+  createdAt    DateTime @default(now()) @map("created_at")
 
   @@index([workspaceId, entityId])
   @@map("customer_commands")
@@ -87,18 +88,47 @@ model CustomerCommand {
 }
 
 model CustomerActivity {
-  id             String   @id @default(uuid()) @db.Uuid
-  workspaceId    String   @map("workspace_id") @db.Uuid
-  entityId       String   @map("entity_id") @db.Uuid
-  entityKind     String   @map("entity_kind") @db.VarChar(16)
-  commandId      String   @unique @map("command_id") @db.Uuid
-  actorSubject   String   @map("actor_subject") @db.VarChar(256)
-  action         String   @db.VarChar(16)
-  entityVersion  Int      @map("entity_version")
-  changedFields  String[] @map("changed_fields")
-  createdAt      DateTime @default(now()) @map("created_at")
+  id            String   @id @default(uuid()) @db.Uuid
+  workspaceId   String   @map("workspace_id") @db.Uuid
+  entityId      String   @map("entity_id") @db.Uuid
+  entityKind    String   @map("entity_kind") @db.VarChar(16)
+  commandId     String   @unique @map("command_id") @db.Uuid
+  actorSubject  String   @map("actor_subject") @db.VarChar(256)
+  action        String   @db.VarChar(16)
+  entityVersion Int      @map("entity_version")
+  changedFields String[] @map("changed_fields")
+  createdAt     DateTime @default(now()) @map("created_at")
 
   @@index([workspaceId, entityKind, entityId, createdAt, id], map: "customer_activities_entity_created_idx")
   @@map("customer_activities")
+  @@schema("crm_customers")
+}
+
+model IntakeOperationSlot {
+  operationId  String    @id @map("operation_id") @db.Uuid
+  workspaceId  String    @map("workspace_id") @db.Uuid
+  workflowId   String    @map("workflow_id") @db.Uuid
+  actorSubject String    @map("actor_subject") @db.VarChar(256)
+  payloadHash  String    @map("payload_hash") @db.Char(64)
+  state        String    @db.VarChar(16)
+  contactId    String?   @map("contact_id") @db.Uuid
+  result       Json?
+  committedAt  DateTime? @map("committed_at")
+  createdAt    DateTime  @default(now()) @map("created_at")
+
+  @@unique([workspaceId, workflowId])
+  @@map("intake_operation_slots")
+  @@schema("crm_customers")
+}
+
+model IntakeOperationCommand {
+  commandId    String   @id @map("command_id") @db.Uuid
+  workspaceId  String   @map("workspace_id") @db.Uuid
+  actorSubject String   @map("actor_subject") @db.VarChar(256)
+  requestHash  String   @map("request_hash") @db.Char(64)
+  result       Json
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  @@map("intake_operation_commands")
   @@schema("crm_customers")
 }

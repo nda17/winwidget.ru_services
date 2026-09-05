@@ -44,6 +44,11 @@ export class CrmAuthorizeSourceDto extends CrmAuthorizeDto {
 	subject!: string;
 }
 
+export class CrmAuthorizeWorkflowDto extends CrmAuthorizeSourceDto {
+	@Equals('INTAKE_ACCEPT')
+	purpose!: 'INTAKE_ACCEPT';
+}
+
 /** UI capabilities are advisory; every domain endpoint reauthorizes independently. */
 @Controller('crm/access')
 export class CrmPermissionsController {
@@ -63,6 +68,20 @@ export class CrmPermissionsController {
 @UseGuards(CrmInternalGuard)
 export class CrmAuthorizationController {
 	constructor(private readonly authorization: CrmAuthorizationService) {}
+	@Post('authorize-workflow')
+	@HttpCode(200)
+	@Header('Cache-Control', 'no-store')
+	authorizeWorkflow(
+		@Headers('x-winwidget-service') caller: CrmCaller,
+		@Body() dto: CrmAuthorizeWorkflowDto
+	) {
+		return this.authorization.authorizeWorkflow(
+			dto.workspaceId,
+			dto.subject,
+			dto.purpose,
+			caller
+		);
+	}
 	@Post('authorize')
 	@HttpCode(200)
 	authorize(

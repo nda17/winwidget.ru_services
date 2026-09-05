@@ -11,23 +11,47 @@ import {
 	IntakeIngestionRateLimiter,
 	IntakeIngestionService
 } from './intake/intake-ingestion.service';
+import { AcceptanceController } from './acceptance/acceptance.controller';
+import { AcceptanceService } from './acceptance/acceptance.service';
+import { AcceptanceOperationsClient } from './acceptance/acceptance-operations.client';
+import { AcceptanceProcessor } from './acceptance/acceptance.processor';
+import {
+	AcceptanceRabbit,
+	intakeProcessRole
+} from './acceptance/acceptance.messaging';
+import { AcceptancePublisher } from './acceptance/acceptance.publisher';
+import { AcceptanceWorker } from './acceptance/acceptance.worker';
+
+const config = ConfigModule.forRoot({ isGlobal: true });
+const role = intakeProcessRole();
+const api = role === 'api' || role === 'all';
+const worker = role === 'worker' || role === 'all';
+const publisher = role === 'publisher' || role === 'all';
 
 @Module({
-	imports: [
-		ConfigModule.forRoot({ isGlobal: true }),
-		CrmIntakePrismaModule
-	],
+	imports: [config, CrmIntakePrismaModule],
 	controllers: [
 		CrmIntakeHealthController,
-		IntakeController,
-		IntakeIngestionController
+		...(api
+			? [IntakeController, IntakeIngestionController, AcceptanceController]
+			: [])
 	],
 	providers: [
 		CrmIntakeHealthService,
-		IntakeAuthorizationClient,
-		IntakeService,
-		IntakeIngestionService,
-		IntakeIngestionRateLimiter
+		...(api || worker ? [IntakeAuthorizationClient] : []),
+		...(api
+			? [
+					IntakeService,
+					IntakeIngestionService,
+					IntakeIngestionRateLimiter,
+					AcceptanceService
+				]
+			: []),
+		...(worker || publisher ? [AcceptanceRabbit] : []),
+		...(worker
+			? [AcceptanceOperationsClient, AcceptanceProcessor, AcceptanceWorker]
+			: []),
+		...(publisher ? [AcceptancePublisher] : [])
 	]
 })
 export class CrmIntakeModule {}

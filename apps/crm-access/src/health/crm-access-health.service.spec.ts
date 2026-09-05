@@ -9,8 +9,15 @@ const identity = {
 };
 
 describe('CrmAccessHealthService', () => {
+	const runtimeReady = { isReady: jest.fn().mockReturnValue(true) };
+	const createHealth = (prisma: unknown) =>
+		new CrmAccessHealthService(
+			prisma as never,
+			runtimeReady as never,
+			runtimeReady as never
+		);
 	it('reports liveness without testing dependencies', () => {
-		const health = new CrmAccessHealthService({} as never);
+		const health = createHealth({});
 		expect(health.liveness()).toMatchObject({
 			status: 'ok',
 			service: 'crm-access'
@@ -18,7 +25,7 @@ describe('CrmAccessHealthService', () => {
 	});
 
 	it('requires its own database and exact service identity for readiness', async () => {
-		const health = new CrmAccessHealthService({
+		const health = createHealth({
 			crmWorkspaceMember: { findFirst: jest.fn().mockResolvedValue(null) },
 			$queryRaw: jest.fn().mockResolvedValue([{ '?column?': 1 }]),
 			serviceIdentity: {
@@ -39,7 +46,7 @@ describe('CrmAccessHealthService', () => {
 	});
 
 	it('fails readiness closed for a missing or foreign database identity', async () => {
-		const health = new CrmAccessHealthService({
+		const health = createHealth({
 			$queryRaw: jest.fn().mockResolvedValue([{ '?column?': 1 }]),
 			serviceIdentity: {
 				findUnique: jest.fn().mockResolvedValue({
@@ -57,7 +64,7 @@ describe('CrmAccessHealthService', () => {
 	});
 
 	it('fails readiness closed when the onboarding schema is missing', async () => {
-		const health = new CrmAccessHealthService({
+		const health = createHealth({
 			$queryRaw: jest.fn().mockResolvedValue([{ '?column?': 1 }]),
 			serviceIdentity: {
 				findUnique: jest.fn().mockResolvedValue(identity)

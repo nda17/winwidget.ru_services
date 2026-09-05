@@ -1,4 +1,8 @@
-import { Injectable, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
+import {
+	Injectable,
+	OnApplicationShutdown,
+	OnModuleInit
+} from '@nestjs/common';
 import { PrismaClient } from '@prisma/crm-intake-client';
 
 const DATABASE_URL_ERROR =
@@ -30,7 +34,7 @@ export function parseCrmIntakeDatabaseUrl(value?: string): string {
 @Injectable()
 export class CrmIntakePrismaService
 	extends PrismaClient
-	implements OnModuleInit, OnModuleDestroy
+	implements OnModuleInit, OnApplicationShutdown
 {
 	constructor() {
 		super({
@@ -48,7 +52,7 @@ export class CrmIntakePrismaService
 		await this.$connect();
 	}
 
-	async onModuleDestroy(): Promise<void> {
+	async onApplicationShutdown(): Promise<void> {
 		await this.$disconnect();
 	}
 }

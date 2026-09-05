@@ -48,7 +48,7 @@ function setup(role = 'OWNER', status = 'ACTIVE') {
 			findUnique: jest.fn().mockResolvedValue({
 				role,
 				membershipId,
-				teamIds: [teamId],
+				teams: [{ teamId }],
 				disabledAt: null
 			})
 		}
@@ -66,6 +66,62 @@ function setup(role = 'OWNER', status = 'ACTIVE') {
 }
 
 describe('CRM service authorization', () => {
+	it.each(['OWNER', 'CRM_ADMIN', 'TEAM_LEAD', 'MANAGER'])(
+		'authorizes the writable %s acceptance workflow without source-admin semantics',
+		async role => {
+			const current = setup(role, 'GRACE');
+			for (const caller of [
+				'crm-intake',
+				'crm-customers',
+				'crm-sales'
+			] as const) {
+				const result = await current.service.authorizeWorkflow(
+					workspaceId,
+					'user-1',
+					'INTAKE_ACCEPT',
+					caller
+				);
+				expect(result.role).toBe(role);
+				expect(
+					result.permissions.every(permission =>
+						permission.startsWith(caller.replace('crm-', '') + ':')
+					)
+				).toBe(true);
+			}
+			expect(current.identity.sourceContext).toHaveBeenCalledTimes(3);
+			expect(current.identity.authContext).not.toHaveBeenCalled();
+		}
+	);
+	it('denies unknown purpose/caller and read-only/analyst workflows', async () => {
+		for (const [role, state] of [
+			['ANALYST', 'ACTIVE'],
+			['MANAGER', 'READ_ONLY']
+		])
+			await expect(
+				setup(role, state).service.authorizeWorkflow(
+					workspaceId,
+					'user-1',
+					'INTAKE_ACCEPT',
+					'crm-sales'
+				)
+			).rejects.toBeInstanceOf(ForbiddenException);
+		await expect(
+			setup().service.authorizeWorkflow(
+				workspaceId,
+				'user-1',
+				'OTHER',
+				'crm-sales'
+			)
+		).rejects.toBeInstanceOf(ForbiddenException);
+		await expect(
+			setup().service.authorizeWorkflow(
+				workspaceId,
+				'user-1',
+				'INTAKE_ACCEPT',
+				'widgets' as never
+			)
+		).rejects.toBeInstanceOf(ForbiddenException);
+	});
 	it.each(['OWNER', 'CRM_ADMIN'])(
 		'freshly revalidates the active %s delegated source actor without a user session',
 		async role => {
@@ -103,7 +159,7 @@ describe('CRM service authorization', () => {
 		current.prisma.crmWorkspaceMember.findUnique.mockResolvedValue({
 			role: 'CRM_ADMIN',
 			membershipId,
-			teamIds: [],
+			teams: [],
 			disabledAt: new Date()
 		});
 		await expect(
@@ -277,7 +333,7 @@ describe('CRM service authorization', () => {
 								kind === 'old-membership'
 									? 'old-membership'
 									: membershipId,
-							teamIds: [],
+							teams: [],
 							disabledAt: kind === 'disabled' ? new Date() : null
 						}
 			);

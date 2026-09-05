@@ -17,6 +17,7 @@ import { NotificationDeliveryPrismaService } from './prisma/notification-deliver
 import { TelegramInfoTransportModule } from '../telegram/telegram-info-transport.module';
 import { Module, OnApplicationShutdown } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
+import { WincrmInvitationContextService } from './wincrm-invitation-context.service';
 
 @Module({
 	imports: [
@@ -29,6 +30,7 @@ import { ConfigModule } from '@nestjs/config';
 	],
 	controllers: [NotificationDeliveryHealthController],
 	providers: [
+		WincrmInvitationContextService,
 		NotificationDeliveryAdapterService,
 		NotificationDeliveryHeartbeatService,
 		NotificationDeliveryMessageMetadataService,

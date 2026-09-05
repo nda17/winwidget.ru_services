@@ -27,6 +27,10 @@ export class CrmCustomersHealthService {
 		try {
 			await this.prisma.$queryRaw`SELECT 1`;
 			await this.prisma
+				.$queryRaw`SELECT operation_id, workspace_id, workflow_id, actor_subject, payload_hash, state, contact_id, result, committed_at FROM crm_customers.intake_operation_slots LIMIT 0`;
+			await this.prisma
+				.$queryRaw`SELECT command_id, workspace_id, actor_subject, request_hash, result FROM crm_customers.intake_operation_commands LIMIT 0`;
+			await this.prisma
 				.$queryRaw`SELECT c.id, c.workspace_id, c.name, c.phone, c.email, c.company_id, c.notes, c.created_by_subject, c.team_id, c.version, c.archived_at, c.created_at, c.updated_at FROM crm_customers.contacts c LIMIT 0`;
 			await this.prisma
 				.$queryRaw`SELECT c.id, c.workspace_id, c.name, c.inn, c.website, c.notes, c.created_by_subject, c.team_id, c.version, c.archived_at, c.created_at, c.updated_at FROM crm_customers.companies c LIMIT 0`;

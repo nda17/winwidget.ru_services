@@ -265,6 +265,16 @@ export class IntakeService {
 			{ expectedVersion: dto.expectedVersion, reason },
 			id,
 			async tx => {
+				if (
+					await tx.acceptance.findFirst({
+						where: {
+							workspaceId: context.workspaceId,
+							entryId: id,
+							status: { not: 'CANCELLED' }
+						}
+					})
+				)
+					throw new ConflictException('Acceptance is already in progress');
 				const prior = await this.entry(tx, context, id);
 				if (prior.version !== dto.expectedVersion)
 					throw this.versionConflict();

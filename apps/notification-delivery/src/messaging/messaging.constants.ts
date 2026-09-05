@@ -18,6 +18,8 @@ export const SUBSCRIPTION_EXPIRY_EMAIL_NOTIFICATION_EVENT_TYPE =
 	'notification.subscription-expiry.email.requested.v1';
 export const SUBSCRIPTION_EXPIRY_TELEGRAM_NOTIFICATION_EVENT_TYPE =
 	'notification.subscription-expiry.telegram.requested.v1';
+export const WINCRM_INVITATION_EMAIL_EVENT_TYPE =
+	'notification.wincrm.invitation.email.requested.v1';
 export const NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE =
 	'notification.delivery.outcome.v1';
 export const REPORTING_NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE =
@@ -30,7 +32,7 @@ export const RETRY_EXCHANGE = 'winwidget.retry';
 export const DEAD_LETTER_EXCHANGE = 'winwidget.dead-letter';
 export const MANUAL_RETRY_EXCHANGE = 'winwidget.manual-retry';
 
-export const NOTIFICATION_DELIVERY_KINDS = [
+export const DEFAULT_NOTIFICATION_DELIVERY_KINDS = [
 	'email',
 	'telegram',
 	'payment-email',
@@ -44,12 +46,25 @@ export const NOTIFICATION_DELIVERY_KINDS = [
 	'subscription-expiry-telegram'
 ] as const;
 
+// New product delivery is opt-in; existing deployments retain their consumers.
+export const NOTIFICATION_DELIVERY_KINDS = [
+	...DEFAULT_NOTIFICATION_DELIVERY_KINDS,
+	'wincrm-invitation-email'
+] as const;
+
 export type NotificationDeliveryKind =
 	(typeof NOTIFICATION_DELIVERY_KINDS)[number];
 export type IntegrationKind = NotificationDeliveryKind;
 export type MessagingKind = NotificationDeliveryKind;
 
 export const MESSAGING_KINDS = NOTIFICATION_DELIVERY_KINDS;
+
+export const isWincrmInvitationDeliveryEnabled = (
+	configuredKinds?: string
+): boolean =>
+	configuredKinds
+		?.split(',')
+		.some(kind => kind.trim() === 'wincrm-invitation-email') === true;
 
 export const MESSAGING_ROUTING_KEYS: Record<MessagingKind, string> = {
 	email: 'lead.integration.email.v2',
@@ -65,7 +80,8 @@ export const MESSAGING_ROUTING_KEYS: Record<MessagingKind, string> = {
 	'subscription-expiry-email':
 		SUBSCRIPTION_EXPIRY_EMAIL_NOTIFICATION_EVENT_TYPE,
 	'subscription-expiry-telegram':
-		SUBSCRIPTION_EXPIRY_TELEGRAM_NOTIFICATION_EVENT_TYPE
+		SUBSCRIPTION_EXPIRY_TELEGRAM_NOTIFICATION_EVENT_TYPE,
+	'wincrm-invitation-email': WINCRM_INVITATION_EMAIL_EVENT_TYPE
 };
 
 export const MESSAGING_QUEUE_NAMES: Record<MessagingKind, string> = {
@@ -82,7 +98,9 @@ export const MESSAGING_QUEUE_NAMES: Record<MessagingKind, string> = {
 	'subscription-expiry-email':
 		'winwidget.notification.subscription-expiry.email',
 	'subscription-expiry-telegram':
-		'winwidget.notification.subscription-expiry.telegram'
+		'winwidget.notification.subscription-expiry.telegram',
+	'wincrm-invitation-email':
+		'winwidget.notification.wincrm.invitation.email'
 };
 
 export const getManualRetryRoutingKey = (kind: MessagingKind): string =>

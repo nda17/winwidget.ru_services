@@ -2,7 +2,7 @@
 	"schemaVersion": 1,
 	"targets": {
 		"notification-delivery": {
-			"manifestSha256": "7fac808a05dd1d01fe8ef86e0378d2fefa7c7d39cbbccef1bcd51b956a45289f",
+			"manifestSha256": "8dd527d4133c9978e6e426d54225c0bb8019355faf82922aa6d925e012b123c7",
 			"migrations": [
 				{
 					"name": "20260727000000_init_notification_delivery",
@@ -35,6 +35,10 @@
 				{
 					"name": "20260830030000_add_notification_delivery_retention_contract",
 					"checksum": "a23bebd290dd472103075fda199ebc46ccf733fdc4cd8f50447e8dd412058f87"
+				},
+				{
+					"name": "20260907000000_add_wincrm_invitation_email",
+					"checksum": "dcbb2dded41b89ed178384893e03952ca8566f5556ce7a9d44ec5a4d67901983"
 				}
 			]
 		},
@@ -122,7 +126,7 @@
 			]
 		},
 		"identity": {
-			"manifestSha256": "f70ee35d30c9bdfe6fb230ef154f824bf02affbe05ccaaf45dcfbac845452943",
+			"manifestSha256": "e8b632f5a7ec1eed5b359b4c3903865a706310dc6e4bb863edab2ecc5a4a1d24",
 			"migrations": [
 				{
 					"name": "20260814000000_init_identity",
@@ -143,6 +147,10 @@
 				{
 					"name": "20260902080000_add_workspaces_and_refresh_rotation",
 					"checksum": "e40b381bacdc09658edb72fb8de63348ccef87aec67653c2d4de735f7afd57d6"
+				},
+				{
+					"name": "20260906010000_add_wincrm_workspace_invitations",
+					"checksum": "ba972d159327e8de05f4b997850d99f7577591f414e8bd09b02781c5ab72d9fb"
 				}
 			]
 		},

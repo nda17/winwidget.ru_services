@@ -65,6 +65,7 @@ const SOURCE_INTEGRATIONS: Record<
 		'campaign-telegram',
 		'subscription-expiry-email',
 		'subscription-expiry-telegram',
+		'wincrm-invitation-email',
 		'daily-summary-delivery-telegram'
 	],
 	widgets: ['webhook', 'bitrix24', 'amo-crm'],

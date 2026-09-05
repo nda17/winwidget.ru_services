@@ -133,3 +133,78 @@ model IngestionRateBucket {
   @@map("ingestion_rate_buckets")
   @@schema("crm_intake")
 }
+
+model Acceptance {
+  id                       String    @id @default(uuid()) @db.Uuid
+  workspaceId              String    @map("workspace_id") @db.Uuid
+  entryId                  String    @map("entry_id") @db.Uuid
+  actorSubject             String    @map("actor_subject") @db.VarChar(256)
+  status                   String    @default("QUEUED") @db.VarChar(24)
+  version                  Int       @default(1)
+  generation               Int       @default(1)
+  mode                     String    @default("EXECUTE") @db.VarChar(16)
+  contactOperationId       String    @unique @map("contact_operation_id") @db.Uuid
+  salesOperationId         String    @unique @map("sales_operation_id") @db.Uuid
+  contactCommandId         String    @unique @map("contact_command_id") @db.Uuid
+  salesCommandId           String    @unique @map("sales_command_id") @db.Uuid
+  contactPayload           Json      @map("contact_payload")
+  salesPayload             Json      @map("sales_payload")
+  contactPayloadHash       String    @map("contact_payload_hash") @db.Char(64)
+  salesPayloadHash         String    @map("sales_payload_hash") @db.Char(64)
+  contactProof             Json?     @map("contact_proof")
+  salesProof               Json?     @map("sales_proof")
+  contactId                String?   @map("contact_id") @db.Uuid
+  dealId                   String?   @map("deal_id") @db.Uuid
+  firstTaskId              String?   @map("first_task_id") @db.Uuid
+  recoverySubject          String?   @map("recovery_subject") @db.VarChar(256)
+  recoveryContactCommandId String?   @map("recovery_contact_command_id") @db.Uuid
+  recoverySalesCommandId   String?   @map("recovery_sales_command_id") @db.Uuid
+  lastErrorCode            String?   @map("last_error_code") @db.VarChar(64)
+  retryAt                  DateTime? @map("retry_at")
+  completedAt              DateTime? @map("completed_at")
+  createdAt                DateTime  @default(now()) @map("created_at")
+  updatedAt                DateTime  @updatedAt @map("updated_at")
+
+  @@index([workspaceId, entryId, createdAt])
+  @@map("acceptances")
+  @@schema("crm_intake")
+}
+
+model AcceptanceOutbox {
+  id               String    @id @default(uuid()) @db.Uuid
+  eventId          String    @map("event_id") @db.Uuid
+  deduplicationKey String    @unique @map("deduplication_key") @db.VarChar(256)
+  route            String    @default("MAIN") @db.VarChar(16)
+  payload          Json
+  status           String    @default("PENDING") @db.VarChar(16)
+  availableAt      DateTime  @default(now()) @map("available_at")
+  leaseToken       String?   @map("lease_token") @db.Uuid
+  leaseUntil       DateTime? @map("lease_until")
+  attempts         Int       @default(0)
+  retryAttempt     Int       @default(0) @map("retry_attempt")
+  lastErrorCode    String?   @map("last_error_code") @db.VarChar(64)
+  publishedAt      DateTime? @map("published_at")
+  createdAt        DateTime  @default(now()) @map("created_at")
+
+  @@index([status, availableAt, id])
+  @@map("acceptance_outbox")
+  @@schema("crm_intake")
+}
+
+model AcceptanceReceipt {
+  eventId      String    @map("event_id") @db.Uuid
+  consumer     String    @db.VarChar(80)
+  workspaceId  String    @map("workspace_id") @db.Uuid
+  workflowId   String    @map("workflow_id") @db.Uuid
+  payloadHash  String    @map("payload_hash") @db.Char(64)
+  status       String    @db.VarChar(24)
+  leaseToken   String?   @map("lease_token") @db.Uuid
+  leaseUntil   DateTime? @map("lease_until")
+  retryAttempt Int       @default(0) @map("retry_attempt")
+  createdAt    DateTime  @default(now()) @map("created_at")
+  updatedAt    DateTime  @updatedAt @map("updated_at")
+
+  @@id([eventId, consumer])
+  @@map("acceptance_receipts")
+  @@schema("crm_intake")
+}

@@ -70,17 +70,9 @@ export class CrmAuthorizationService {
 	}
 
 	async authorizeSource(workspaceId: string, subject: string) {
-		const correlationId = getCrmAccessCorrelationId();
-		const identity = await this.identity.sourceContext(
+		const context = await this.authorizeSubject(
 			workspaceId,
 			subject,
-			correlationId
-		);
-		const context = await this.resolve(
-			workspaceId,
-			identity.subject,
-			identity.membership,
-			correlationId,
 			'crm-intake'
 		);
 		if (
@@ -89,6 +81,55 @@ export class CrmAuthorizationService {
 			!context.permissions.includes('intake:manage-sources')
 		)
 			throw new ForbiddenException('Source delegation is not active');
+		return context;
+	}
+
+	async authorizeSubject(
+		workspaceId: string,
+		subject: string,
+		caller?: CrmCaller
+	) {
+		const correlationId = getCrmAccessCorrelationId();
+		const identity = await this.identity.sourceContext(
+			workspaceId,
+			subject,
+			correlationId
+		);
+		return this.resolve(
+			workspaceId,
+			identity.subject,
+			identity.membership,
+			correlationId,
+			caller
+		);
+	}
+
+	async authorizeWorkflow(
+		workspaceId: string,
+		subject: string,
+		purpose: string,
+		caller: CrmCaller
+	) {
+		const required = {
+			'crm-intake': ['intake:write'],
+			'crm-customers': ['customers:read', 'customers:write'],
+			'crm-sales': ['sales:write']
+		} as const;
+		if (purpose !== 'INTAKE_ACCEPT' || !Object.hasOwn(required, caller))
+			throw new ForbiddenException('Unsupported workflow authority');
+		const context = await this.authorizeSubject(
+			workspaceId,
+			subject,
+			caller
+		);
+		if (
+			context.state === 'READ_ONLY' ||
+			context.role === 'ANALYST' ||
+			!required[caller].every(permission =>
+				context.permissions.includes(permission)
+			)
+		)
+			throw new ForbiddenException('Workflow execution is not permitted');
 		return context;
 	}
 
@@ -113,6 +154,13 @@ export class CrmAuthorizationService {
 							workspaceId_subject: {
 								workspaceId,
 								subject
+							}
+						},
+						include: {
+							teams: {
+								where: { team: { archivedAt: null } },
+								select: { teamId: true },
+								orderBy: { teamId: 'asc' }
 							}
 						}
 					})
@@ -150,6 +198,10 @@ export class CrmAuthorizationService {
 		if (canWrite) permissions.push(...WRITE_PERMISSIONS);
 		if (canWrite && (role === 'OWNER' || role === 'CRM_ADMIN'))
 			permissions.push(...ADMIN_PERMISSIONS);
+		if (role === 'OWNER' || role === 'CRM_ADMIN') {
+			permissions.push('access:read-team');
+			if (canWrite) permissions.push('access:revoke-access');
+		}
 		if (role === 'OWNER') permissions.push(...OWNER_PERMISSIONS);
 		const namespace = caller?.replace('crm-', '');
 		return {
@@ -164,7 +216,7 @@ export class CrmAuthorizationService {
 					: role === 'TEAM_LEAD'
 						? ('TEAM' as const)
 						: ('ALL' as const),
-			teamIds: member?.teamIds ?? [],
+			teamIds: member?.teams.map(team => team.teamId) ?? [],
 			permissions: namespace
 				? permissions.filter(permission =>
 						permission.startsWith(`${namespace}:`)

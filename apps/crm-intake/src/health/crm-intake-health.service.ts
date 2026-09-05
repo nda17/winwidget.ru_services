@@ -1,12 +1,23 @@
-import { Injectable, ServiceUnavailableException } from '@nestjs/common';
+import {
+	Injectable,
+	Optional,
+	ServiceUnavailableException
+} from '@nestjs/common';
 import { CrmIntakePrismaService } from '../prisma/crm-intake-prisma.service';
+import {
+	AcceptanceRabbit,
+	intakeProcessRole
+} from '../acceptance/acceptance.messaging';
 
 const SERVICE_NAME = 'crm-intake';
 const DATABASE_SERVICE_NAME = 'crm-intake-service';
 
 @Injectable()
 export class CrmIntakeHealthService {
-	constructor(private readonly prisma: CrmIntakePrismaService) {}
+	constructor(
+		private readonly prisma: CrmIntakePrismaService,
+		@Optional() private readonly rabbit?: AcceptanceRabbit
+	) {}
 
 	liveness() {
 		return {
@@ -38,6 +49,12 @@ export class CrmIntakeHealthService {
 				.$queryRaw`SELECT source_id, external_command_id, workspace_id, entry_id, audit_command_id, request_hash, received_at FROM crm_intake.inbound_receipts LIMIT 0`;
 			await this.prisma
 				.$queryRaw`SELECT bucket_key, window_start, count FROM crm_intake.ingestion_rate_buckets LIMIT 0`;
+			await this.prisma
+				.$queryRaw`SELECT id, workspace_id, entry_id, actor_subject, status, version, generation, mode, contact_operation_id, sales_operation_id, contact_command_id, sales_command_id, contact_payload, sales_payload, contact_payload_hash, sales_payload_hash, contact_proof, sales_proof, contact_id, deal_id, first_task_id, recovery_subject, recovery_contact_command_id, recovery_sales_command_id, last_error_code, retry_at, completed_at FROM crm_intake.acceptances LIMIT 0`;
+			await this.prisma
+				.$queryRaw`SELECT id, event_id, deduplication_key, route, payload, status, available_at, lease_token, lease_until, attempts, retry_attempt, last_error_code, published_at FROM crm_intake.acceptance_outbox LIMIT 0`;
+			await this.prisma
+				.$queryRaw`SELECT event_id, consumer, workspace_id, workflow_id, payload_hash, status, lease_token, lease_until, retry_attempt FROM crm_intake.acceptance_receipts LIMIT 0`;
 			const identity = await this.prisma.serviceIdentity.findUnique({
 				where: { id: 'singleton' },
 				select: { serviceName: true, databaseId: true }
@@ -53,6 +70,14 @@ export class CrmIntakeHealthService {
 				'CRM Intake database is not ready'
 			);
 		}
+		const role = intakeProcessRole();
+		if (
+			role !== 'api' &&
+			!this.rabbit?.ready(role === 'worker' || role === 'all')
+		)
+			throw new ServiceUnavailableException(
+				'CRM Intake messaging is not ready'
+			);
 
 		return {
 			status: 'ready',

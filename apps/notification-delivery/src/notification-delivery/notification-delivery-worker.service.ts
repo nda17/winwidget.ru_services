@@ -1,5 +1,6 @@
 import {
 	NotificationDeliveryKind,
+	DEFAULT_NOTIFICATION_DELIVERY_KINDS,
 	NOTIFICATION_DELIVERY_KINDS
 } from '../messaging/messaging.constants';
 import { getStableMessageId } from '../messaging/poison-message-id';
@@ -12,7 +13,10 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import type { ConsumeMessage } from 'amqplib';
-import { NotificationDeliveryAdapterService } from './notification-delivery-adapter.service';
+import {
+	NotificationDeliveryAdapterService,
+	NotificationDeliveryResult
+} from './notification-delivery-adapter.service';
 import {
 	NotificationDeliveryEventPayload,
 	parseNotificationDeliveryMessage
@@ -32,7 +36,7 @@ const SHUTDOWN_DRAIN_TIMEOUT_MS = 20_000;
 export function parseNotificationDeliveryKinds(
 	value: string | undefined
 ): readonly NotificationDeliveryKind[] {
-	if (value === undefined) return [...NOTIFICATION_DELIVERY_KINDS];
+	if (value === undefined) return [...DEFAULT_NOTIFICATION_DELIVERY_KINDS];
 
 	const configured = value
 		.split(',')
@@ -257,8 +261,14 @@ export class NotificationDeliveryWorkerService
 			return;
 		}
 
+		let deliveryResult: NotificationDeliveryResult;
 		try {
-			await this.adapter.deliver(kind, payload, eventId, claim.lockToken);
+			deliveryResult = await this.adapter.deliver(
+				kind,
+				payload,
+				eventId,
+				claim.lockToken
+			);
 		} catch (deliveryError) {
 			await this.handleDeliveryFailure({
 				kind,
@@ -275,6 +285,19 @@ export class NotificationDeliveryWorkerService
 		}
 
 		try {
+			if (deliveryResult?.status === 'SKIPPED') {
+				await this.receipts.markSkipped(
+					eventId,
+					kind,
+					claim.lockToken,
+					deliveryResult.reason
+				);
+				this.ackMessage(message);
+				this.logger.log(
+					`Notification skipped eventId=${eventId} kind=${kind} reason=${deliveryResult.reason}`
+				);
+				return;
+			}
 			await this.receipts.markDelivered(
 				eventId,
 				kind,
@@ -287,7 +310,7 @@ export class NotificationDeliveryWorkerService
 			);
 		} catch (error) {
 			this.logger.error(
-				`Provider succeeded but delivery receipt finalization failed eventId=${eventId} kind=${kind}: ${this.errorMessage(
+				`Notification receipt finalization failed eventId=${eventId} kind=${kind}: ${this.errorMessage(
 					error
 				)}`
 			);

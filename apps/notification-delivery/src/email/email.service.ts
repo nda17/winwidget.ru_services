@@ -3,6 +3,7 @@ import LeadNotificationEmail from '../../emails/lead-notification.email';
 import LimitReachedEmail from '../../emails/limit-reached.email';
 import PaymentSucceededEmail from '../../emails/payment-succeeded.email';
 import SubscriptionExpiryReminderEmail from '../../emails/subscription-expiry-reminder.email';
+import WincrmInvitationEmail from '../../emails/wincrm-invitation.email';
 import { EMAIL_TRANSPORTER } from '../config/mailer.config';
 import { Inject, Injectable } from '@nestjs/common';
 import { render } from '@react-email/render';
@@ -154,6 +155,25 @@ export class EmailService {
 				: `Подписка WinWidget закончится через ${this.getDaysLabel(data.daysBeforeExpiry)}`;
 
 		return this.sendEmail(to, subject, html, options);
+	}
+
+	sendWincrmInvitation(
+		to: string,
+		invitationId: string,
+		expiresAt: string,
+		eventId: string
+	) {
+		const html = render(
+			WincrmInvitationEmail({
+				invitationId,
+				expiresAtLabel: new Date(expiresAt).toLocaleString('ru-RU', {
+					timeZone: 'Europe/Moscow'
+				})
+			})
+		);
+		return this.sendEmail(to, 'Приглашение в WinCRM', html, {
+			messageId: `<${eventId}.wincrm-invitation@winwidget.ru>`
+		});
 	}
 
 	private getDaysLabel(days: number): string {

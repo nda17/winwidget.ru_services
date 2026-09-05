@@ -5,9 +5,9 @@
 с безопасной ротацией/отзывом credentials, синхронный приём API/webhook.
 
 Нативная доставка Widgets пока не включена: ей нужен отдельный согласованный
-контракт доставки и явного подключения. Приём в работу тоже
-пока не публикуется: `ACCEPTED` зарезервирован для подтверждённого создания
-контакта и сделки. Фиктивной смены статуса и RabbitMQ-интеграции нет.
+контракт доставки и явного подключения. Явный приём в работу запускает durable
+workflow создания контакта, сделки и первой задачи; `ACCEPTED` появляется
+только после подтверждённых результатов Customers и Sales.
 
 ## Граница владения
 
@@ -170,6 +170,120 @@ tables или чужие схемы. Migration/backup роли самостоя�
 `ingestion_rate_buckets` — SELECT/INSERT/UPDATE/DELETE для счётчиков и TTL.
 
 ## Локальные проверки
+
+### Принятие Inbox
+
+Все маршруты ниже требуют fresh пользовательскую авторизацию и текущую
+видимость Inbox, как остальные endpoints. `GET /inbox/:id/acceptance` принимает
+workspaceId и возвращает `{schemaVersion:1,acceptance:null|summary}`.
+`POST /inbox/:id/accept` требует intake:write, ACTIVE/GRACE, общие поля команды,
+`expectedVersion` записи Inbox, `contact:{mode:CREATE_FROM_ENTRY}` или
+`{mode:EXISTING,contactId}`, `deal:{title,currency:RUB,amountMinor,pipelineId,
+stageId,nextTask:{title,dueAt}}`. Сумма в копейках, 0..2147483647; dueAt —
+canonical ISO UTC, допускается прошедшая дата без её скрытой подмены. Actor и
+team берутся из авторизации и сохранённого Inbox, не из формы. Результат —
+HTTP 202 `{schemaVersion:1,acceptance:summary}`, не готовая сделка.
+
+Summary: `id,workspaceId,entryId,actorSubject,status,version,mode,contactId,
+dealId,firstTaskId,lastErrorCode,retryAt,completedAt,createdAt,updatedAt`.
+Nullable ссылки/ошибка/даты представлены null; payload и именные proofs сюда
+не входят. Status: QUEUED, RUNNING, RETRY_WAIT, BLOCKED, FAILED, RECOVERING,
+CANCELLED, COMPLETED. Mode: EXECUTE/RECOVER. lastErrorCode:
+WORKFLOW_ACCESS_BLOCKED, WORKFLOW_REFERENCE_CONFLICT,
+WORKFLOW_DEPENDENCY_UNAVAILABLE. Клиент перечитывает scoped GET; receipt
+повторной команды сохраняет первоначальный ответ, не заменяет актуальный GET.
+
+`POST /inbox/:id/acceptance/retry` принимает общие поля команды с
+`expectedVersion` Acceptance (не Inbox); допускается для BLOCKED/FAILED/
+RETRY_WAIT исходным actor либо OWNER/CRM_ADMIN, только writable. Тот же actor и
+payload сохраняются. `POST /inbox/:id/acceptance/recover` — writable
+OWNER/CRM_ADMIN для любого незавершённого workflow; атомарно создаёт новый
+generation и Outbox. Сначала закрывается Sales slot, затем Customers slot.
+COMMITTED сохраняется, отсутствующий slot превращается в неизменяемый
+CANCELLED tombstone. Поздние execute не создают записи. Если Sales уже
+COMMITTED, подтверждённые ссылки завершают Inbox; иначе workflow CANCELLED,
+Inbox остаётся NEW. Ранее созданный контакт не удаляется; его ID доступен для
+нового явно проверенного принятия. Смена actor в текущем workflow запрещена.
+
+400 — валидация, 401 — сессия, 403 — права, 404 — невидимый Inbox,
+409 — версия/конкурирующий workflow, 503 — повторить неизменную команду.
+READ_ONLY recovery не разрешён. Отклонить Inbox с незакрытым workflow нельзя.
+
+Worker сохраняет PROCESSING receipt до HTTP и обновляет lease/CAS. Перед
+каждым новым downstream write Access `authorize-workflow` заново проверяет
+сохранённого actor, membership, lifecycle, Billing, CRM-роль и scope. JWT в БД
+и RabbitMQ отсутствует. Ошибка/expiry после контакта блокирует создание сделки.
+Техническое завершение после expiry допустимо только по уже COMMITTED точным
+proofs, без создания новых контактов/сделок/задач и без обхода fresh read scope
+человека. Каждый сервис хранит только собственные таблицы. Downstream HTTP
+ограничен 10s/64KiB, redirect запрещён, origin — HTTPS либо loopback HTTP.
+
+### Процессы, RabbitMQ и ACL
+
+`CRM_INTAKE_PROCESS_ROLE`: api (по умолчанию, port5310), worker (5311),
+publisher (5312), all (5310, локальные проверки). Worker/publisher не имеют
+публичных Inbox/source endpoints. API не требует RabbitMQ; publisher не
+требует Access и downstream credentials. У каждого процесса один глобальный
+PrismaModule/connection pool; общий runtime с другими сервисами отсутствует.
+При shutdown push consumer отменяется и work/publish завершаются до закрытия
+каналов и Prisma. Readiness worker требует активной push registration;
+publisher — соединения/канала, все роли — актуальных собственных таблиц.
+
+Worker env: `CRM_ACCESS_INTERNAL_BASE_URL`, `CRM_ACCESS_CRM_INTAKE_TOKEN`,
+`CRM_CUSTOMERS_INTERNAL_BASE_URL`, `CRM_CUSTOMERS_CRM_INTAKE_TOKEN`,
+`CRM_SALES_INTERNAL_BASE_URL`, `CRM_SALES_CRM_INTAKE_TOKEN`. Внешние origins
+не имеют localhost fallback. Worker/publisher требуют
+`CRM_INTAKE_RABBITMQ_URL` с отдельным principal, AMQPS вне loopback;
+`CRM_INTAKE_RABBITMQ_ASSERT_TOPOLOGY=false` в production. Provisioning может
+использовать true только с configure-доступом к собственному namespace.
+
+Все exchanges direct/durable: `winwidget.crm-intake.events`,
+`winwidget.crm-intake.retry`, `winwidget.crm-intake.dead-letter`.
+Основной queue `winwidget.crm-intake.acceptance.v1`, binding/event type
+`crm.intake.acceptance.requested.v1`. Три retry queue имеют suffix `.retry.1`,
+`.retry.2`, `.retry.3`, TTL 30s/5m/30m и DLX обратно в основной exchange/key;
+binding в retry exchange — `acceptance.retry.1|2|3`. DLQ имеет suffix
+`.dead-letter`, binding из dead-letter exchange — основной event key.
+Каждый consumer получает свою очередь; текущий consumer один:
+`crm-intake-acceptance-v1`. Worker использует basic.consume/prefetch5, не polling.
+
+Rabbit body содержит только `{schemaVersion:1,eventId,workspaceId,workflowId,
+generation,mode}`, без PII/JWT/URLs. Publisher отправляет Buffer JSON,
+persistent+mandatory, требует confirm и отсутствие basic.return. Только затем
+Outbox PUBLISHED. Временные transport errors имеют неограниченный durable
+retry с backoff до60s. Consumer error/retry/DLQ и новая Outbox записываются
+одной транзакцией до ack; пропавший worker восстанавливается lease/CAS,
+stale generation не вызывает HTTP. Ручной retry — только public команда
+выше, никогда не Rabbit Management publish. Poison payload не копируется в
+DLQ: сохраняется безопасный synthetic envelope с hash-only deduplication.
+
+Разделение broker ACL: publisher write только на три перечисленных exchanges,
+read/configure `^$`; worker read только основной queue, write/configure `^$`.
+Provisioning отдельно выдаёт configure/read/write исключительно namespace
+`^winwidget\\.crm-intake\\.`; DLX permissions проверяются при provisioning.
+Мониторинг DLQ и очередь retry могут иметь отдельный read principal.
+
+Новые PG tables: `acceptances`, `acceptance_outbox`, `acceptance_receipts` —
+SELECT/INSERT/UPDATE, без DELETE/DDL для runtime; append-only commands/activity
+не меняют grants. Миграции/backup принадлежат Intake. Retention опубликованной
+Outbox/receipts/операционных tombstones требует отдельной согласованной
+политики: до неё записи не удаляются, иначе поздний replay может повторить
+побочный эффект. Размер таблиц/очередей нужно мониторить перед rollout.
+
+### Сборка и интеграционные проверки
+
+`node test/integration/acceptance-postgres18.integration.mjs` использует ту же
+явную isolated PG18 test-конфигурацию, что Inbox suite. Миграции и grants
+применяются заранее, `.env` скрипт не читает. Проверяются реальный PG CAS,
+двойной claim, lost Sales response, completion после expiry, partial contact,
+admin recovery/tombstones/restart и transactional retry. Downstream boundary
+в этом suite fault-injected; реальные Customer/Sales slots проверяются их
+собственными PG suites, полный HTTP stack проверяется отдельным gate.
+Для реального RabbitMQ добавить `CRM_INTAKE_ACCEPTANCE_TEST_RABBITMQ_URL`:
+loopback broker, отдельный пустой test-vhost с суффиксом `_test`/`_ci`, scoped
+test credentials. Проверяются push, confirm+mandatory, duplicate delivery и
+drain. Скрипт не purge чужие очереди, не обращается в Management API и чистит
+только собственный случайный workspace через migration-role.
 
 ```bash
 cp .env.example .env
