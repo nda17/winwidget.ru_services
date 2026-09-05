@@ -260,7 +260,7 @@ consent snapshot в Billing остаётся отдельным обязател
 Identity image и additive migration `20260910010000_add_login_otp`, без CRM
 foundation, новых CRM tokens, workspace backfill и изменений Widgets/Billing.
 Выпускать fresh candidate поверх exact worker recovery
-`e9501c954dec661e29d92d6b13e8dbf4eef97b56`, не прежний OTP commit: сохранить
+`d3d717dae89913aa673e6c55b9e03c3b5de3d0aa`, не прежний OTP commit: сохранить
 bootstrap recovery Billing/Operations/Support и security lockfiles. Согласовать
 green immutable infra pin и scoped workflow `identity-with-operations-manifest`
 для Identity 3 + Operations 4. Проверить фактический mixed baseline: Operations

@@ -141,15 +141,16 @@ CRM, env и схемы БД не входят в этот релиз. Перед
 процессов; rollback возвращает прежние образы без отката данных. Остальные
 сервисы с аналогичными catch-обработчиками в этот фикс не включены.
 
-Production CI выпускает только эти восемь процессов после полной CI-матрицы,
-используя проверенный immutable infra SHA, точные ревизии и hashes owner env;
-широкого `all` rollout нет. Исправление origin Notification Delivery уже
-применено отдельно к прежнему образу Operations API и проверено read-only.
-Повторно применять его legacy-to-origin guard нельзя. Предыдущая попытка
-worker release остановилась до замены контейнеров: non-root migration probe
-не мог прочитать несекретный verifier. Следующий выпуск требует исправленных
-прав только на этот tracked payload, новой green CI и неизменной live baseline.
-Operations API временно сохраняет прежнюю ревизию: restore остаётся выключен,
+Следующий OTP-кандидат сохраняет bootstrap recovery без изменений, но не
+повторяет его release-job. Production CI этой ветки после полной матрицы
+выпускает только три процесса Identity и четыре Operations через
+`identity-with-operations-manifest`, используя immutable infra SHA и точные
+live revisions/hashes owner env. Billing, Support, Widgets, Gateway и CRM
+не обновляются. Исправление origin Notification Delivery уже применено
+отдельно к прежнему образу Operations API и проверено read-only;
+повторно применять его legacy-to-origin guard нельзя.
+В текущем W2 baseline, до этого OTP-выпуска, Operations API сохраняет прежнюю
+ревизию: restore остаётся выключен,
 активные/pending restore и recovery задания запрещены, catalog неизменен.
 Новая подпись backup от обновлённого worker не доказывает её пригодность для
 старого restore API; следующий согласованный Operations rollout должен
@@ -179,9 +180,13 @@ workflow `winwidget.ru_infra`, закреплённый неизменяемым
 ручного ввода ревизии и прямого запуска controller нет. На production действует
 единый deploy lock. Обязательны побайтово идентичный hash env, метки OCI
 revision, точные owner env и неизменность соседних контейнеров. В этой
-recovery-ветке разрешён только `workers-bootstrap-recovery`. Worker release
-сверяет полные service-owned migration ledgers Billing/Operations/Support
-до и после обновления, не применяет DDL и проверяет readiness восьми ролей.
+OTP-ветке разрешён только `identity-with-operations-manifest`: Identity 3 +
+Operations 4. От baseline `d3d717dae89913aa673e6c55b9e03c3b5de3d0aa`
+Operations меняет только restore manifest с additive Identity OTP migration.
+Перед DDL нужны graceful stop четырёх Operations, ноль runtime PG sessions
+и проверенный backup/restore barrier; при неизвестном результате старый
+manifest не возвращается. OTP выключен по умолчанию, CRM foundation не входит
+в кандидат. Подробные gates находятся в `apps/identity/README.md`.
 
 Notes, Admin Event Log и плоскость управления Telegram/Reporting принадлежат
 Operations. Обычный deploy проверяет актуальные границы service-owned баз,

@@ -161,7 +161,7 @@ workflow, совпадающих local/server env hashes и exact green CI де�
 разрешён; прежние jobs исправления federation/семи workers повторно не запускать.
 
 Кандидат должен наследовать worker recovery
-`e9501c954dec661e29d92d6b13e8dbf4eef97b56`: его двенадцать bootstrap/test
+`d3d717dae89913aa673e6c55b9e03c3b5de3d0aa`: его двенадцать bootstrap/test
 файлов и восемь security lockfiles сохраняются без изменений. При смешанном
 live baseline отдельно закрепляются прежняя ревизия Operations API и ревизия
 трёх её фоновых процессов; их четыре встроенных manifest должны совпадать

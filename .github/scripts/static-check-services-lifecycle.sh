@@ -420,6 +420,10 @@ exactFiles('deploy', ['docker-compose.prod.yml']);
 const servicesWorkflow = readFileSync('.github/workflows/ci.yml', 'utf8');
 const pinnedInfraRevision =
 	'd3e8d5a6dc0cca058d1696b8718b2e839d029dde';
+const identityEnvSha256 = '50233f31f2121046847c96bf0959cddf8c83fc3cc2e6ebd01cda759fbbaf83bc';
+if (!/^[a-f0-9]{64}$/.test(identityEnvSha256)) {
+	throw new Error('Identity owner env must be synchronized and its exact hash reviewed before release');
+}
 for (const evidence of [
 	"cancel-in-progress: ${{ github.ref != 'refs/heads/prod' }}",
 	'operations-control-ledger:',
@@ -477,23 +481,23 @@ if (
 	infraReleaseReferences.length !== 1 ||
 	infraReleaseReferences.some(reference => reference[1] !== pinnedInfraRevision)
 ) {
-	throw new Error('the worker-only production job must use the exact reviewed infra SHA');
+	throw new Error('the coordinated Identity production job must use the exact reviewed infra SHA');
 }
-const workersJob = servicesWorkflow.split('  deploy-production:\n')[1];
-if (!workersJob || (servicesWorkflow.match(/release_scope:/g) ?? []).length !== 1 || servicesWorkflow.includes('operations-federation-config') || servicesWorkflow.includes('deploy-worker-recovery:')) {
-	throw new Error('production must contain only the reviewed worker scope; completed federation correction cannot repeat');
+const identityJob = servicesWorkflow.split('  deploy-production:\n')[1];
+if (!identityJob || (servicesWorkflow.match(/release_scope:/g) ?? []).length !== 1 || servicesWorkflow.includes('operations-federation-config') || servicesWorkflow.includes('workers-bootstrap-recovery') || servicesWorkflow.includes('deploy-worker-recovery:') || servicesWorkflow.includes('expected_support_env_sha256:')) {
+	throw new Error('production must contain only the reviewed Identity/Operations scope; completed releases cannot repeat');
 }
 for (const [job, evidence] of [
-	[workersJob, 'needs:\n      - lifecycle-contract\n      - operations-control-ledger\n      - operations-restore-rehearsal\n      - production-image\n      - service\n      - service-integration\n      - widgets-integration\n'],
-	[workersJob, 'release_scope: workers-bootstrap-recovery'],
-	[workersJob, "expected_service_env_sha256: '649c987a3c9ea2cba281f801482a5e98a73e53739885e4f9a7eaff17994bb6f7'"],
-	[workersJob, "expected_operations_revision: '484e546451088671e23ae37ae4026b9b3fe500c5'"],
-	[workersJob, "expected_operations_env_sha256: '06f1affe7b715a3c2d96d2a00975fab168e2060623a8af72d33c62bb4055799e'"],
-	[workersJob, "expected_support_env_sha256: 'df539741905bc3c5dc925accce98334de37e33cde5c6021db98806c691ba678d'"]
+	[identityJob, 'needs:\n      - lifecycle-contract\n      - operations-control-ledger\n      - operations-restore-rehearsal\n      - production-image\n      - service\n      - service-integration\n      - widgets-integration\n'],
+	[identityJob, 'release_scope: identity-with-operations-manifest'],
+	[identityJob, `expected_service_env_sha256: '${identityEnvSha256}'`],
+	[identityJob, "expected_operations_revision: 'd3d717dae89913aa673e6c55b9e03c3b5de3d0aa'"],
+	[identityJob, "expected_operations_api_revision: '484e546451088671e23ae37ae4026b9b3fe500c5'"],
+	[identityJob, "expected_operations_env_sha256: '06f1affe7b715a3c2d96d2a00975fab168e2060623a8af72d33c62bb4055799e'"]
 ]) {
 	if (!job.includes(evidence)) throw new Error(`scoped release boundary drifted: ${evidence}`);
 }
-for (const job of [workersJob]) {
+for (const job of [identityJob]) {
 	for (const evidence of [
 		"if: github.event_name == 'push' && github.ref == 'refs/heads/prod'",
 		"expected_live_revision: '484e546451088671e23ae37ae4026b9b3fe500c5'",

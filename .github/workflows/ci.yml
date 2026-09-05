@@ -442,7 +442,7 @@ jobs:
           "apps/${{ matrix.app }}"
 
   deploy-production:
-    name: Deploy bootstrap recovery with matching Billing API
+    name: Deploy Identity OTP with matching Operations manifests
     needs:
       - lifecycle-contract
       - operations-control-ledger
@@ -455,12 +455,12 @@ jobs:
     uses: nda17/winwidget.ru_infra/.github/workflows/deploy-production.yml@d3e8d5a6dc0cca058d1696b8718b2e839d029dde
     with:
       services_revision: ${{ github.sha }}
-      release_scope: workers-bootstrap-recovery
+      release_scope: identity-with-operations-manifest
       expected_live_revision: '484e546451088671e23ae37ae4026b9b3fe500c5'
-      expected_service_env_sha256: '649c987a3c9ea2cba281f801482a5e98a73e53739885e4f9a7eaff17994bb6f7'
-      expected_operations_revision: '484e546451088671e23ae37ae4026b9b3fe500c5'
+      expected_service_env_sha256: '50233f31f2121046847c96bf0959cddf8c83fc3cc2e6ebd01cda759fbbaf83bc'
+      expected_operations_revision: 'd3d717dae89913aa673e6c55b9e03c3b5de3d0aa'
+      expected_operations_api_revision: '484e546451088671e23ae37ae4026b9b3fe500c5'
       expected_operations_env_sha256: '06f1affe7b715a3c2d96d2a00975fab168e2060623a8af72d33c62bb4055799e'
-      expected_support_env_sha256: 'df539741905bc3c5dc925accce98334de37e33cde5c6021db98806c691ba678d'
     secrets:
       BACKEND_PRODUCTION_SSH_HOST: ${{ secrets.PRODUCTION_SSH_HOST }}
       BACKEND_PRODUCTION_SSH_PORT: ${{ secrets.PRODUCTION_SSH_PORT }}
