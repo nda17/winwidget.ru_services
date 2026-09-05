@@ -34,6 +34,8 @@ export class IdentityHealthService {
 		try {
 			await this.prisma.$queryRaw`SELECT 1`;
 			await this.prisma
+				.$queryRaw`SELECT c.browser_token_hash, c.identity_verified_at, r.count FROM identity.login_otp_challenges c FULL JOIN identity.login_otp_rate_limits r ON false LIMIT 0`;
+			await this.prisma
 				.$queryRaw`SELECT i.acceptance_id, i.email_verified_at, m.version, m.created_by_product, m.created_by_invitation_id FROM identity.workspace_invitations i FULL JOIN identity.workspace_members m ON false LIMIT 0`;
 			const identity = await this.prisma.serviceIdentity.findUnique({
 				where: { id: 'singleton' },

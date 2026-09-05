@@ -130,7 +130,7 @@
 			]
 		},
 		"identity": {
-			"manifestSha256": "e8b632f5a7ec1eed5b359b4c3903865a706310dc6e4bb863edab2ecc5a4a1d24",
+			"manifestSha256": "bbdaeb72f8dd8bcba866402a0de492fb7af2146ee6f34fd94a065fe3c29604f1",
 			"migrations": [
 				{
 					"name": "20260814000000_init_identity",
@@ -155,6 +155,10 @@
 				{
 					"name": "20260906010000_add_wincrm_workspace_invitations",
 					"checksum": "ba972d159327e8de05f4b997850d99f7577591f414e8bd09b02781c5ab72d9fb"
+				},
+				{
+					"name": "20260910010000_add_login_otp",
+					"checksum": "314f52d752f36d8ea039a4f2c0094d750d62da59c0d63686e7f64de619e71e80"
 				}
 			]
 		},

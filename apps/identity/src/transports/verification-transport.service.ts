@@ -6,7 +6,9 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { render } from '@react-email/render';
 import nodemailer, { type Transporter } from 'nodemailer';
+import type SMTPTransport from 'nodemailer/lib/smtp-transport';
 import { join } from 'node:path';
+import { connect, type Socket } from 'node:net';
 import { passwordEmail, verificationEmail } from './email-templates';
 
 const SMSAERO_ENDPOINT = 'https://gate.smsaero.ru/v2/sms/send';
@@ -68,6 +70,90 @@ export class VerificationTransportService {
 
 	isSmsConfigured(): boolean {
 		return Boolean(this.smsEmail && this.smsApiKey);
+	}
+
+	/** A single bounded login attempt; existing registration transports stay unchanged. */
+	async loginCode(
+		channel: 'EMAIL' | 'SMS',
+		destination: string,
+		code: string,
+		signal: AbortSignal
+	): Promise<void> {
+		signal.throwIfAborted();
+		if (channel === 'SMS') {
+			if (!this.isSmsConfigured())
+				throw new Error('Login delivery unavailable');
+			const payload = {
+				number: Number(destination.replace(/\D/g, '')),
+				text: `Код входа в WinWidget: ${code}. Никому не сообщайте код.`,
+				sign: this.smsSign
+			};
+			const response = await fetch(SMSAERO_ENDPOINT, {
+				method: 'POST',
+				redirect: 'error',
+				headers: {
+					'Content-Type': 'application/json',
+					Authorization: `Basic ${Buffer.from(`${this.smsEmail}:${this.smsApiKey}`).toString('base64')}`
+				},
+				body: JSON.stringify(payload),
+				signal
+			});
+			if (!response.ok) throw new Error('Login delivery unavailable');
+			const body = (await response.json()) as SmsAeroResponse;
+			if (body.success !== true)
+				throw new Error('Login delivery unavailable');
+			return;
+		}
+		if (!this.isEmailConfigured())
+			throw new Error('Login delivery unavailable');
+		const host = this.config.get<string>('SMTP_SERVER')!.trim();
+		const development =
+			this.config.get<string>('MODE')?.trim().toLowerCase() ===
+			'development';
+		const port = development ? 2525 : 465;
+		let socket: Socket | undefined;
+		const options: SMTPTransport.Options = {
+			host,
+			port,
+			secure: !development,
+			auth: {
+				user: this.config.get<string>('SMTP_LOGIN')!.trim(),
+				pass: this.config.get<string>('SMTP_PASSWORD')!.trim()
+			},
+			connectionTimeout: 4_000,
+			greetingTimeout: 4_000,
+			socketTimeout: 4_000,
+			// Own the underlying socket so the same hard response deadline also
+			// aborts DNS/TCP/TLS/SMTP work. Nodemailer performs normal TLS checks.
+			getSocket: (_options, callback) => {
+				if (signal.aborted) {
+					callback(new Error('Login delivery unavailable'), null);
+					return;
+				}
+				socket = connect({ host, port, signal });
+				let handedOff = false;
+				socket.once('connect', () => {
+					handedOff = true;
+					callback(null, { connection: socket });
+				});
+				socket.once('error', () => {
+					if (!handedOff)
+						callback(new Error('Login delivery unavailable'), null);
+				});
+			}
+		};
+		const mailer = nodemailer.createTransport(options);
+		try {
+			await mailer.sendMail({
+				from: MAIL_FROM,
+				to: destination,
+				subject: 'Код входа в WinWidget',
+				text: `Ваш код входа в WinWidget: ${code}. Код действует 5 минут. Никому не сообщайте код. Если вы не запрашивали вход, проигнорируйте письмо.`
+			});
+		} finally {
+			socket?.destroy();
+			mailer.close();
+		}
 	}
 
 	async verifyEmailTransport(): Promise<void> {

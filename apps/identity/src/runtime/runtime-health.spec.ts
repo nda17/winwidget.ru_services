@@ -87,7 +87,16 @@ describe('Identity current runtime readiness', () => {
 		try {
 			housekeeping.onModuleInit();
 			await jest.advanceTimersByTimeAsync(0);
-			expect(execute).toHaveBeenCalledTimes(8);
+			expect(execute).toHaveBeenCalledTimes(10);
+			expect(execute.mock.calls[8][0].sql).toContain(
+				'identity.login_otp_challenges'
+			);
+			expect(execute.mock.calls[9][0].sql).toContain(
+				'identity.login_otp_rate_limits'
+			);
+			expect(execute.mock.calls[9][0].sql).toContain(
+				'target.expires_at <'
+			);
 			expect(housekeeping.isReady()).toBe(true);
 		} finally {
 			housekeeping.onApplicationShutdown();
