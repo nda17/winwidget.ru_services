@@ -109,7 +109,7 @@ describe('BillingSettingsController contract', () => {
 			handler: 'updateCrmSettings',
 			method: RequestMethod.PUT,
 			path: 'admin/crm',
-			roles: ['DEV']
+			roles: ['ADMIN', 'DEV']
 		},
 		{
 			handler: 'publicSettings',
@@ -342,4 +342,92 @@ describe('WinCRM customer pricing HTTP boundary', () => {
 			'crm_commercial_policy_unavailable'
 		);
 	});
+});
+
+describe('WinCRM administrator pricing HTTP authorization', () => {
+	let app: INestApplication;
+	let base: string;
+	const update = jest
+		.fn()
+		.mockResolvedValue({ schemaVersion: 1, version: 2 });
+	const dto = {
+		schemaVersion: 1,
+		commandId: '44444444-4444-4444-8444-444444444444',
+		expectedVersion: 1,
+		monthlyPriceMinor: 99000,
+		yearlyPriceMinor: 990000,
+		additionalSeatMonthlyPriceMinor: 29000,
+		additionalSeatYearlyPriceMinor: 290000,
+		includedSeats: 2,
+		trialSeatLimit: 2
+	};
+	beforeAll(async () => {
+		const module = await Test.createTestingModule({
+			controllers: [BillingSettingsController],
+			providers: [
+				BillingAuthGuard,
+				{ provide: BillingSettingsService, useValue: {} },
+				{ provide: CrmCommercialPolicyService, useValue: { update } },
+				{
+					provide: IdentityInternalClient,
+					useValue: {
+						introspect: jest.fn(async (authorization: string) => {
+							const role = (
+								{
+									'Bearer synthetic-admin': 'ADMIN',
+									'Bearer synthetic-dev': 'DEV',
+									'Bearer synthetic-user': 'USER'
+								} as Record<string, string>
+							)[authorization];
+							if (!role) throw new UnauthorizedException();
+							return { subject: `synthetic-${role}`, roles: [role] };
+						})
+					}
+				}
+			]
+		}).compile();
+		app = module.createNestApplication({ logger: false });
+		app.setGlobalPrefix('api/v1');
+		await app.listen(0, '127.0.0.1');
+		base = await app.getUrl();
+	});
+	beforeEach(() => jest.clearAllMocks());
+	afterAll(async () => {
+		await app?.close();
+	});
+
+	it.each([
+		{ token: 'synthetic-admin', role: 'ADMIN', status: 200 },
+		{ token: 'synthetic-dev', role: 'DEV', status: 200 },
+		{ token: 'synthetic-user', role: 'USER', status: 403 },
+		{ token: 'rejected-token', role: 'ADMIN', status: 401 },
+		{ token: '', role: 'ADMIN', status: 401 }
+	])(
+		'enforces server authorization for $token ($status)',
+		async ({ token, role, status }) => {
+			const response = await fetch(
+				`${base}/api/v1/billing-settings/admin/crm`,
+				{
+					method: 'PUT',
+					headers: {
+						'content-type': 'application/json',
+						'idempotency-key': dto.commandId,
+						'x-user-role': 'DEV',
+						...(token ? { authorization: `Bearer ${token}` } : {})
+					},
+					body: JSON.stringify(dto)
+				}
+			);
+			expect(response.status).toBe(status);
+			await response.body?.cancel();
+			if (status === 200) {
+				expect(update).toHaveBeenCalledWith(
+					dto,
+					expect.objectContaining({
+						actor: { subject: `synthetic-${role}`, roles: [role] }
+					})
+				);
+			} else expect(update).not.toHaveBeenCalled();
+		}
+	);
 });

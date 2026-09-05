@@ -86,15 +86,47 @@ describe('CrmCommercialPolicyService', () => {
 		});
 	});
 
-	it('rejects non-DEV writes before opening a transaction', async () => {
-		const { service, prisma } = harness();
-		await expect(
-			service.update(command, {
-				actor: { subject: 'admin-1', roles: ['ADMIN'] }
-			} as never)
-		).rejects.toBeInstanceOf(ForbiddenException);
-		expect(prisma.$transaction).not.toHaveBeenCalled();
-	});
+	it.each([
+		{ roles: [] },
+		{ roles: ['USER'] },
+		{ roles: ['MANAGER'] },
+		{ roles: ['OWNER'] }
+	])(
+		'rejects unauthorized roles $roles before opening a transaction',
+		async ({ roles }) => {
+			const { service, prisma } = harness();
+			await expect(
+				service.update(command, {
+					actor: { subject: 'user-1', roles }
+				} as never)
+			).rejects.toBeInstanceOf(ForbiddenException);
+			expect(prisma.$transaction).not.toHaveBeenCalled();
+		}
+	);
+
+	it.each([
+		{ roles: ['ADMIN'], actorRole: 'ADMIN' },
+		{ roles: ['DEV'], actorRole: 'DEV' },
+		{ roles: ['ADMIN', 'DEV'], actorRole: 'DEV' }
+	])(
+		'allows $actorRole and preserves the actual audit role',
+		async ({ roles, actorRole }) => {
+			const { service, transaction } = harness();
+			await expect(
+				service.update(command, {
+					actor: { subject: 'administrator-1', roles }
+				} as never)
+			).resolves.toMatchObject({ version: 2 });
+			expect(transaction.outboxEvent.create).toHaveBeenCalledWith({
+				data: expect.objectContaining({
+					payload: expect.objectContaining({
+						actorId: 'administrator-1',
+						metadata: expect.objectContaining({ actorRole })
+					})
+				})
+			});
+		}
+	);
 
 	it('creates a new immutable revision with receipt and Outbox audit in one transaction', async () => {
 		const { service, transaction } = harness();

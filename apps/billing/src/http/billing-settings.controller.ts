@@ -53,7 +53,7 @@ export class BillingSettingsController {
 
 	@Put('admin/crm')
 	@HttpCode(200)
-	@BillingAuth(['DEV'])
+	@BillingAuth(['ADMIN', 'DEV'])
 	@UseGuards(BillingAuthGuard)
 	@UsePipes(
 		new ValidationPipe({

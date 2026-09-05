@@ -69,9 +69,14 @@ export class CrmCommercialPolicyService {
 			userAgent?: string | null;
 		}
 	) {
-		if (!context.actor.roles.includes('DEV')) {
+		const actorRole = context.actor.roles.includes('DEV')
+			? 'DEV'
+			: context.actor.roles.includes('ADMIN')
+				? 'ADMIN'
+				: null;
+		if (!actorRole) {
 			throw new ForbiddenException(
-				'Настройки WinCRM может изменять только DEV'
+				'Настройки WinCRM могут изменять ADMIN и DEV'
 			);
 		}
 		const requestHash = billingCommandRequestHash(COMMAND_TYPE, {
@@ -132,7 +137,7 @@ export class CrmCommercialPolicyService {
 						await enqueueBillingAdminAudit(transaction, {
 							actor: {
 								id: context.actor.subject,
-								role: 'DEV',
+								role: actorRole,
 								ip: context.ip,
 								userAgent: context.userAgent
 							},
