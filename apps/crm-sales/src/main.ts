@@ -24,6 +24,10 @@ async function bootstrap(): Promise<void> {
 
 	app.setGlobalPrefix('api/v1', {
 		exclude: [
+			...['execute', 'read', 'close'].map(action => ({
+				path: `internal/v1/crm-sales/intake-operations/${action}`,
+				method: RequestMethod.POST
+			})),
 			{ path: 'health/live', method: RequestMethod.GET },
 			{ path: 'health/ready', method: RequestMethod.GET },
 			{ path: 'health/revision', method: RequestMethod.GET },

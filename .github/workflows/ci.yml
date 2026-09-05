@@ -879,7 +879,7 @@ jobs:
               ;;
             crm-sales)
               mutable_tables='crm_sales.deals, crm_sales.tasks'
-              receipt_tables='crm_sales.deal_timeline, crm_sales.command_receipts, crm_sales.pipeline_template_installations, crm_sales.pipeline_template_installation_commands'
+              receipt_tables='crm_sales.deal_timeline, crm_sales.command_receipts, crm_sales.pipeline_template_installations, crm_sales.pipeline_template_installation_commands, crm_sales.intake_operation_slots, crm_sales.intake_operation_commands'
               docker exec "$POSTGRES_CONTAINER_ID" psql -U crm_domain_bootstrap_ci -d "$DOMAIN_DATABASE" -v ON_ERROR_STOP=1 -c 'GRANT SELECT, INSERT, UPDATE, DELETE ON crm_sales.pipelines, crm_sales.pipeline_stages TO crm_domain_runtime_ci'
               ;;
             *) exit 1 ;;

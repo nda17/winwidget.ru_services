@@ -112,6 +112,51 @@ commit без next action и append-only ACL. Требуются loopback тес
 
 ## Локальные проверки
 
+### Приём обращения: service-owned operation slots
+
+`POST /internal/v1/crm-sales/intake-operations/{execute,read,close}` доступен
+только Intake через loopback/private HTTPS ingress и отдельную пару
+`CRM_SALES_CRM_INTAKE_TOKEN`. Все endpoints принимают точный binding
+`schemaVersion:1, workspaceId, workflowId, operationId, actorSubject, payloadHash`.
+UUID должны быть canonical lowercase UUIDv4; hash — lowercase SHA-256 от JSON
+payload с рекурсивной сортировкой ключей объектов и сохранением порядка массивов.
+`execute`/`close` дополнительно требуют UUID `commandId` и совпадающий
+`Idempotency-Key`. JWT, source tokens и неподтверждённые `contactId`/имя
+в команды не входят.
+
+`execute` принимает `payload: {title, currency:RUB, amountMinor, pipelineId,
+stageId, teamId:null|UUID, nextTask:{title,dueAt},
+contactOperation:{operationId,payloadHash}}`. Sales перепроверяет инициатора
+через Access `authorize-workflow`, а текущую доступность и отсутствие архива
+контакта — через Customers `intake-operations/verify` с отдельной парой
+`CRM_CUSTOMERS_CRM_SALES_TOKEN`. Proof связан с точными workspace, workflow,
+actor, operation и payload hash; включает только ID, name snapshot и version
+контакта. Проверки HTTP выполняются до короткой PostgreSQL-транзакции.
+
+Одна транзакция создаёт сделку, первую задачу, timeline, immutable COMMITTED
+slot и actor/request-bound receipt. Срок задачи не подменяется при задержке:
+canonical ISO в прошлом создаёт честно просроченную задачу. Идентификаторы
+созданных сущностей защищены составными FK только внутри Sales. Уникальность
+workspace/workflow и operation ID запрещает второй бизнес-эффект с новым
+command ID. Перед успешным ответом проверяются named deferred constraints.
+
+`read` возвращает только точный доказанный результат, включая после expiry,
+чтобы Intake мог завершить bookkeeping без новых записей. `close` требует
+`recoverySubject`, заново проверяет writable OWNER/CRM_ADMIN и атомарно либо
+возвращает уже COMMITTED результат, либо создаёт CANCELLED tombstone.
+Поздний execute заново проверяет slot под тем же business-operation lock и
+не создаёт сделку после tombstone. Подмена первоначального actor, удаление
+созданной сделки/контакта и автоматическое повторное принятие запрещены.
+
+Ответ: `{...binding,state:ABSENT|COMMITTED|CANCELLED,result:null|{
+contactId,dealId,firstTaskId},committedAt:null|ISO}`. Internal proof не является
+публичным endpoint и не заменяет fresh user authorization при просмотре CRM.
+Runtime получает только SELECT/INSERT на `intake_operation_slots` и
+`intake_operation_commands`; UPDATE/DELETE/TRUNCATE дополнительно запрещены
+SQL triggers. `pnpm test:intake-operations` проверяет параллельный replay,
+отзыв прав, гонку close/execute, FK, атомарный rollback и append-only ACL
+на отдельной PostgreSQL 18. Этот сценарий также включён в `test:workflow`.
+
 ```bash
 cp .env.example .env
 pnpm install --frozen-lockfile

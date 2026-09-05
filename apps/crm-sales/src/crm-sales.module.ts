@@ -12,6 +12,10 @@ import { SalesController } from './sales/sales.controller';
 import { SalesService } from './sales/sales.service';
 import { SalesAccessClient, SalesAccessGuard } from './sales/sales-access';
 import { SalesContactClient } from './sales/sales-contact.client';
+import { IntakeOperationClient } from './intake-operations/intake-operation.client';
+import { IntakeOperationGuard } from './intake-operations/intake-operation.guard';
+import { IntakeOperationController } from './intake-operations/intake-operation.controller';
+import { IntakeOperationService } from './intake-operations/intake-operation.service';
 
 @Module({
 	imports: [
@@ -22,7 +26,8 @@ import { SalesContactClient } from './sales/sales-contact.client';
 		CrmSalesHealthController,
 		PipelineTemplateCatalogController,
 		PipelineTemplateInstallationController,
-		SalesController
+		SalesController,
+		IntakeOperationController
 	],
 	providers: [
 		CrmSalesHealthService,
@@ -32,7 +37,10 @@ import { SalesContactClient } from './sales/sales-contact.client';
 		SalesService,
 		SalesAccessClient,
 		SalesAccessGuard,
-		SalesContactClient
+		SalesContactClient,
+		IntakeOperationClient,
+		IntakeOperationGuard,
+		IntakeOperationService
 	]
 })
 export class CrmSalesModule {}

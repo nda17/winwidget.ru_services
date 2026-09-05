@@ -1,6 +1,7 @@
 import { Injectable, ServiceUnavailableException } from '@nestjs/common';
 import { CrmSalesPrismaService } from '../prisma/crm-sales-prisma.service';
 import { salesAccessToken, serviceOrigin } from '../sales/sales-access';
+import { intakeOperationToken } from '../intake-operations/intake-operation.client';
 
 const SERVICE_NAME = 'crm-sales';
 const DATABASE_SERVICE_NAME = 'crm-sales-service';
@@ -28,6 +29,8 @@ export class CrmSalesHealthService {
 		serviceOrigin(process.env.CRM_ACCESS_INTERNAL_BASE_URL);
 		serviceOrigin(process.env.CRM_CUSTOMERS_INTERNAL_BASE_URL);
 		salesAccessToken();
+		intakeOperationToken('CRM_SALES_CRM_INTAKE_TOKEN');
+		intakeOperationToken('CRM_CUSTOMERS_CRM_SALES_TOKEN');
 		try {
 			await this.prisma.$queryRaw`SELECT 1`;
 			const [identity] = await Promise.all([
@@ -51,6 +54,12 @@ export class CrmSalesHealthService {
 				}),
 				this.prisma.dealTimeline.findFirst({ select: { id: true } }),
 				this.prisma.salesCommandReceipt.findFirst({
+					select: { commandId: true }
+				}),
+				this.prisma.intakeOperationSlot.findFirst({
+					select: { operationId: true, state: true }
+				}),
+				this.prisma.intakeOperationCommand.findFirst({
 					select: { commandId: true }
 				})
 			]);

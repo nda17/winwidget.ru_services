@@ -123,8 +123,10 @@ model Deal {
   stage             PipelineStage         @relation(fields: [stageId, pipelineId, workspaceId], references: [id, pipelineId, workspaceId], onDelete: Restrict)
   tasks             SalesTask[]
   timeline          DealTimeline[]
+  intakeOperations  IntakeOperationSlot[] @relation("IntakeDeal")
 
   @@unique([id, workspaceId])
+  @@unique([id, workspaceId, contactId])
   @@index([workspaceId, archivedAt, createdAt])
   @@index([workspaceId, assignedToSubject, createdAt])
   @@index([workspaceId, teamId, createdAt])
@@ -133,18 +135,19 @@ model Deal {
 }
 
 model SalesTask {
-  id                String          @id @default(uuid()) @db.Uuid
-  workspaceId       String          @map("workspace_id") @db.Uuid
-  dealId            String          @map("deal_id") @db.Uuid
-  version           Int             @default(1)
-  title             String          @db.VarChar(200)
-  dueAt             DateTime        @map("due_at")
-  status            SalesTaskStatus @default(OPEN)
-  assignedToSubject String          @map("assigned_to_subject") @db.VarChar(256)
-  completedAt       DateTime?       @map("completed_at")
-  createdAt         DateTime        @default(now()) @map("created_at")
-  updatedAt         DateTime        @updatedAt @map("updated_at")
-  deal              Deal            @relation(fields: [dealId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
+  id                String                @id @default(uuid()) @db.Uuid
+  workspaceId       String                @map("workspace_id") @db.Uuid
+  dealId            String                @map("deal_id") @db.Uuid
+  version           Int                   @default(1)
+  title             String                @db.VarChar(200)
+  dueAt             DateTime              @map("due_at")
+  status            SalesTaskStatus       @default(OPEN)
+  assignedToSubject String                @map("assigned_to_subject") @db.VarChar(256)
+  completedAt       DateTime?             @map("completed_at")
+  createdAt         DateTime              @default(now()) @map("created_at")
+  updatedAt         DateTime              @updatedAt @map("updated_at")
+  deal              Deal                  @relation(fields: [dealId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
+  intakeOperations  IntakeOperationSlot[] @relation("IntakeFirstTask")
 
   @@unique([id, dealId, workspaceId])
   @@index([workspaceId, status, dueAt])
@@ -188,5 +191,37 @@ enum SalesTaskStatus {
   COMPLETED
   CANCELLED
 
+  @@schema("crm_sales")
+}
+
+model IntakeOperationSlot {
+  operationId  String     @id @map("operation_id") @db.Uuid
+  workspaceId  String     @map("workspace_id") @db.Uuid
+  workflowId   String     @map("workflow_id") @db.Uuid
+  actorSubject String     @map("actor_subject") @db.VarChar(256)
+  payloadHash  String     @map("payload_hash") @db.Char(64)
+  state        String     @db.VarChar(16)
+  contactId    String?    @map("contact_id") @db.Uuid
+  dealId       String?    @map("deal_id") @db.Uuid
+  firstTaskId  String?    @map("first_task_id") @db.Uuid
+  committedAt  DateTime?  @map("committed_at")
+  createdAt    DateTime   @default(now()) @map("created_at")
+  deal         Deal?      @relation("IntakeDeal", fields: [dealId, workspaceId, contactId], references: [id, workspaceId, contactId], onDelete: Restrict, onUpdate: Restrict)
+  firstTask    SalesTask? @relation("IntakeFirstTask", fields: [firstTaskId, dealId, workspaceId], references: [id, dealId, workspaceId], onDelete: Restrict, onUpdate: Restrict)
+
+  @@unique([workspaceId, workflowId])
+  @@map("intake_operation_slots")
+  @@schema("crm_sales")
+}
+
+model IntakeOperationCommand {
+  commandId    String   @id @map("command_id") @db.Uuid
+  workspaceId  String   @map("workspace_id") @db.Uuid
+  actorSubject String   @map("actor_subject") @db.VarChar(256)
+  requestHash  String   @map("request_hash") @db.Char(64)
+  result       Json
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  @@map("intake_operation_commands")
   @@schema("crm_sales")
 }

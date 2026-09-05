@@ -6,10 +6,16 @@ describe('CrmSalesHealthService', () => {
 	const keys = [
 		'CRM_ACCESS_INTERNAL_BASE_URL',
 		'CRM_CUSTOMERS_INTERNAL_BASE_URL',
-		'CRM_ACCESS_CRM_SALES_TOKEN'
+		'CRM_ACCESS_CRM_SALES_TOKEN',
+		'CRM_SALES_CRM_INTAKE_TOKEN',
+		'CRM_CUSTOMERS_CRM_SALES_TOKEN'
 	] as const;
 	const original = new Map(keys.map(key => [key, process.env[key]]));
 	beforeEach(() => {
+		process.env.CRM_SALES_CRM_INTAKE_TOKEN =
+			'health-sales-intake-test-pair-token'.repeat(2);
+		process.env.CRM_CUSTOMERS_CRM_SALES_TOKEN =
+			'health-customer-sales-test-pair-token'.repeat(2);
 		process.env.CRM_ACCESS_INTERNAL_BASE_URL = 'http://127.0.0.1:5300';
 		process.env.CRM_CUSTOMERS_INTERNAL_BASE_URL = 'http://127.0.0.1:5320';
 		process.env.CRM_ACCESS_CRM_SALES_TOKEN =
@@ -31,6 +37,12 @@ describe('CrmSalesHealthService', () => {
 			salesTask: { findFirst: jest.fn().mockResolvedValue(null) },
 			dealTimeline: { findFirst: jest.fn().mockResolvedValue(null) },
 			salesCommandReceipt: {
+				findFirst: jest.fn().mockResolvedValue(null)
+			},
+			intakeOperationSlot: {
+				findFirst: jest.fn().mockResolvedValue(null)
+			},
+			intakeOperationCommand: {
 				findFirst: jest.fn().mockResolvedValue(null)
 			},
 			pipelineTemplateInstallation: {

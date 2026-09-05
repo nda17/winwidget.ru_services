@@ -513,7 +513,9 @@ async function grantRuntime(service) {
 				'pipeline_template_installations',
 				'pipeline_template_installation_commands',
 				'deal_timeline',
-				'command_receipts'
+				'command_receipts',
+				'intake_operation_slots',
+				'intake_operation_commands'
 			]
 		}
 	};
@@ -596,6 +598,8 @@ function environment() {
 		'BILLING_OPERATIONS_TOKEN',
 		'WIDGETS_INTERNAL_TOKEN',
 		'CRM_SALES_CRM_ACCESS_TOKEN',
+		'CRM_SALES_CRM_INTAKE_TOKEN',
+		'CRM_CUSTOMERS_CRM_SALES_TOKEN',
 		'CRM_ACCESS_CRM_CUSTOMERS_TOKEN',
 		'CRM_ACCESS_CRM_SALES_TOKEN',
 		'CRM_ACCESS_CRM_INTAKE_TOKEN'
@@ -736,6 +740,8 @@ function ownedEnvironment(app, values) {
 		'crm-sales': [
 			'CRM_SALES_LISTEN_HOST',
 			'CRM_SALES_CRM_ACCESS_TOKEN',
+			'CRM_SALES_CRM_INTAKE_TOKEN',
+			'CRM_CUSTOMERS_CRM_SALES_TOKEN',
 			'CRM_ACCESS_INTERNAL_BASE_URL',
 			'CRM_ACCESS_CRM_SALES_TOKEN',
 			'CRM_CUSTOMERS_INTERNAL_BASE_URL'
