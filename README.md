@@ -10,18 +10,18 @@ listener `:4200` запрещены steady-state verifier-ом.
 
 ## Сервисы
 
-| Каталог                      | Ответственность                                                                 | Процессы и порты                                           |
-| ---------------------------- | ------------------------------------------------------------------------------- | ---------------------------------------------------------- |
-| `apps/api-gateway`           | Публичная точка входа `/api/v1/*`, JWT/JWKS, CORS и проксирование               | Gateway `4100`                                             |
-| `apps/identity`              | Пользователи, auth, OAuth, Telegram auth, профиль и S3-аватары                  | API `4900`, worker `4901`, outbox `4902`                   |
-| `apps/billing`               | Тарифы, подписки, платежи и партнёрская программа                               | API `4800`, scheduler `4801`, worker `4802`, outbox `4803` |
-| `apps/widgets`               | Все виджеты, заявки, настройки, интеграции и runtime-assets                     | API/worker/outbox `4700`                                   |
-| `apps/campaigns`             | Кампании, аудитории, email/Telegram-рассылки                                    | API/worker/outbox `4500`                                   |
-| `apps/reporting`             | Аналитические проекции, статистика и Daily Summary                              | API/worker/scheduler/outbox `4600`                         |
-| `apps/platform`              | Контент главной, юридические страницы и настройки сайта                         | API `5000`, outbox `5001`                                  |
-| `apps/support`               | Чат с оператором и Telegram support transport                                   | API `5100`, worker `5101`, outbox `5102`                   |
-| `apps/notification-delivery` | Фактическая доставка email и Telegram-сообщений                                 | worker `4401`                                              |
-| `apps/operations`            | Notes, Admin Event Log, очереди/DLQ, Telegram settings, backup/restore и alerts | API `5200`, worker `5201`, outbox `5202`, restore `5203`   |
+| Каталог                      | Ответственность                                                          | Процессы и порты                                           |
+| ---------------------------- | ------------------------------------------------------------------------ | ---------------------------------------------------------- |
+| `apps/api-gateway`           | Публичная точка входа `/api/v1/*`, JWT/JWKS, CORS и проксирование        | Gateway `4100`                                             |
+| `apps/identity`              | Пользователи, auth, OAuth, Telegram auth, профиль и S3-аватары           | API `4900`, worker `4901`, outbox `4902`                   |
+| `apps/billing`               | Тарифы, подписки, платежи и партнёрская программа                        | API `4800`, scheduler `4801`, worker `4802`, outbox `4803` |
+| `apps/widgets`               | Все виджеты, заявки, настройки, интеграции и runtime-assets              | API/worker/outbox `4700`                                   |
+| `apps/campaigns`             | Кампании, аудитории, email/Telegram-рассылки                             | API/worker/outbox `4500`                                   |
+| `apps/reporting`             | Аналитические проекции, статистика и Daily Summary                       | API/worker/scheduler/outbox `4600`                         |
+| `apps/platform`              | Контент главной, юридические страницы и настройки сайта                  | API `5000`, outbox `5001`                                  |
+| `apps/support`               | Чат с оператором и Telegram support transport                            | API `5100`, worker `5101`, outbox `5102`                   |
+| `apps/notification-delivery` | Фактическая доставка email и Telegram-сообщений                          | worker `4401`                                              |
+| `apps/operations`            | Admin Event Log, очереди/DLQ, Telegram settings, backup/restore и alerts | API `5200`, worker `5201`, outbox `5202`, restore `5203`   |
 
 Gateway использует манифест точных префиксов. Общего универсального маршрута
 `/api/v1` нет:
@@ -141,20 +141,15 @@ CRM, env и схемы БД не входят в этот релиз. Перед
 процессов; rollback возвращает прежние образы без отката данных. Остальные
 сервисы с аналогичными catch-обработчиками в этот фикс не включены.
 
-Следующий OTP-кандидат сохраняет bootstrap recovery без изменений, но не
-повторяет его release-job. Production CI этой ветки после полной матрицы
-выпускает только три процесса Identity и четыре Operations через
-`identity-with-operations-manifest`, используя immutable infra SHA и точные
-live revisions/hashes owner env. Billing, Support, Widgets, Gateway и CRM
-не обновляются. Исправление origin Notification Delivery уже применено
-отдельно к прежнему образу Operations API и проверено read-only;
-повторно применять его legacy-to-origin guard нельзя.
-В текущем W2 baseline, до этого OTP-выпуска, Operations API сохраняет прежнюю
-ревизию: restore остаётся выключен,
-активные/pending restore и recovery задания запрещены, catalog неизменен.
-Новая подпись backup от обновлённого worker не доказывает её пригодность для
-старого restore API; следующий согласованный Operations rollout должен
-восстановить единый revision до включения восстановления.
+Кандидат удаления административного Backlog основан на OTP-выпуске
+`a10fd2d2bac9cc3f825193d03b065570cfcf9c53`, где Identity и четыре Operations
+уже имеют согласованные revisions и restore manifests. Bootstrap recovery,
+Identity OTP, lockfiles и bundled restore JSON сохраняются побайтно. CI этой
+ветки не повторяет завершённые Identity, worker recovery или Notification
+Delivery config jobs. После полной матрицы `operations-runtime` обновляет
+только четыре Operations-процесса и устанавливает persistent Notes writer
+fence; таблица и связанный аудит пока остаются. Identity, Billing, Support,
+Widgets, Gateway и CRM не обновляются. Restore остаётся выключен.
 
 ## Данные и RabbitMQ
 
@@ -179,16 +174,27 @@ lifecycle gate и полной CI-матрицы release-job автоматич�
 workflow `winwidget.ru_infra`, закреплённый неизменяемым 40-символьным SHA;
 ручного ввода ревизии и прямого запуска controller нет. На production действует
 единый deploy lock. Обязательны побайтово идентичный hash env, метки OCI
-revision, точные owner env и неизменность соседних контейнеров. В этой
-OTP-ветке разрешён только `identity-with-operations-manifest`: Identity 3 +
-Operations 4. От baseline `d3d717dae89913aa673e6c55b9e03c3b5de3d0aa`
-Operations меняет только restore manifest с additive Identity OTP migration.
-Перед DDL нужны graceful stop четырёх Operations, ноль runtime PG sessions
-и проверенный backup/restore barrier; при неизвестном результате старый
-manifest не возвращается. OTP выключен по умолчанию, CRM foundation не входит
-в кандидат. Подробные gates находятся в `apps/identity/README.md`.
+revision, точные owner env и неизменность соседних контейнеров. В этой ветке
+разрешён только `operations-runtime`, закреплённый на infra
+`2e83c5bb7b9bdf7bcbfb1039a5c645547cdf2272`, с exact live baseline
+`a10fd2d2bac9cc3f825193d03b065570cfcf9c53`. Первая фаза проверяет quiet,
+безопасно завершает четыре Operations и запускает Notes-free runtime; после
+health-проверок отзывает права записи Notes и сохраняет phase-A receipt.
+Она не выполняет Prisma migrations, `DROP` или удаление аудита; Notes migration
+остаётся явно pending. После fence автоматический возврат старого Notes writer
+запрещён.
 
-Notes, Admin Event Log и плоскость управления Telegram/Reporting принадлежат
+Получение ACL-preserving service-owned backup (`operations-backlog-backup`),
+проверка его SHA и восстановление в изолированный PostgreSQL 18, применение
+точной миграции (`operations-backlog-finalize`) и удаление Gateway route —
+отдельные согласованные этапы. Они не запускаются этой CI-веткой автоматически.
+Обычный Telegram backup не заменяет доказательство сохранности owner/ACL и
+writer fence. Удаляются только административные Notes и их audit-копии, не
+технический `docs/backlog.md`, заметки CRM, другие audits, Outbox или receipts.
+CRM runtime и новая Identity DDL не входят в кандидат. Подробные gates
+находятся в `apps/operations/README.md` и infra runbook.
+
+Admin Event Log и плоскость управления Telegram/Reporting принадлежат
 Operations. Обычный deploy проверяет актуальные границы service-owned баз,
 миграции, readiness и краткие negative invariants: отсутствуют Core runtime,
 routes, queues, users и listener `:4200`. Исторические import/activate/bootstrap

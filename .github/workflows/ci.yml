@@ -212,6 +212,7 @@ jobs:
           - 5432:5432
         options: >-
           --label winwidget.operations-control-ledger=true
+          --label winwidget.operations-backlog-test=true
           --health-cmd "pg_isready -U operations_control_ledger_superuser -d operations_control_ledger"
           --health-interval 2s
           --health-timeout 2s
@@ -244,6 +245,12 @@ jobs:
         env:
           OPERATIONS_CONTROL_LEDGER_POSTGRES_CONTAINER_ID: ${{ job.services.postgres.id }}
         run: pnpm --dir apps/operations run test:integration:restore-control-ledger
+      - name: Prove exact admin Backlog deletion and transactional rollback
+        env:
+          OPERATIONS_BACKLOG_TEST_CONTAINER_ID: ${{ job.services.postgres.id }}
+          OPERATIONS_BACKLOG_TEST_POSTGRES_USER: operations_control_ledger_superuser
+          OPERATIONS_BACKLOG_TEST_ALLOW_MUTATION: 'true'
+        run: node apps/operations/test/integration/admin-backlog-removal-postgres18.integration.mjs
 
   service-integration:
     name: Service integration / ${{ matrix.app }}
@@ -442,7 +449,7 @@ jobs:
           "apps/${{ matrix.app }}"
 
   deploy-production:
-    name: Deploy Identity OTP with matching Operations manifests
+    name: Deploy Operations Notes-free runtime and writer fence
     needs:
       - lifecycle-contract
       - operations-control-ledger
@@ -452,15 +459,12 @@ jobs:
       - service-integration
       - widgets-integration
     if: github.event_name == 'push' && github.ref == 'refs/heads/prod'
-    uses: nda17/winwidget.ru_infra/.github/workflows/deploy-production.yml@b6f2392d53eaf250d0472140d61b6cf1fa4f9c5a
+    uses: nda17/winwidget.ru_infra/.github/workflows/deploy-production.yml@2e83c5bb7b9bdf7bcbfb1039a5c645547cdf2272
     with:
       services_revision: ${{ github.sha }}
-      release_scope: identity-with-operations-manifest
-      expected_live_revision: '484e546451088671e23ae37ae4026b9b3fe500c5'
-      expected_service_env_sha256: '50233f31f2121046847c96bf0959cddf8c83fc3cc2e6ebd01cda759fbbaf83bc'
-      expected_operations_revision: 'd3d717dae89913aa673e6c55b9e03c3b5de3d0aa'
-      expected_operations_api_revision: '484e546451088671e23ae37ae4026b9b3fe500c5'
-      expected_operations_env_sha256: '06f1affe7b715a3c2d96d2a00975fab168e2060623a8af72d33c62bb4055799e'
+      release_scope: operations-runtime
+      expected_live_revision: 'a10fd2d2bac9cc3f825193d03b065570cfcf9c53'
+      expected_service_env_sha256: '06f1affe7b715a3c2d96d2a00975fab168e2060623a8af72d33c62bb4055799e'
     secrets:
       BACKEND_PRODUCTION_SSH_HOST: ${{ secrets.PRODUCTION_SSH_HOST }}
       BACKEND_PRODUCTION_SSH_PORT: ${{ secrets.PRODUCTION_SSH_PORT }}

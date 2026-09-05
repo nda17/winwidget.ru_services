@@ -7,7 +7,7 @@
 
 ## Ответственность
 
-- Notes и агрегированный журнал событий администратора.
+- Агрегированный журнал событий администратора.
 - Объединённые admin alerts из Billing и Widgets, а также собственные alerts
   Operations.
 - Объединение обзора сообщений, ошибок, retry и close.
@@ -71,6 +71,63 @@
 `/api/v1/internal/v1/operations/widgets/*`. URL сервисов должны быть точными
 закрытыми HTTP origins без встроенных путей или учётных данных.
 
+## Удаление административного Backlog
+
+Миграция `20260910110000_remove_admin_backlog` удаляет только
+`operations.notes` и копии задач в `operations.admin_event_logs`, отмеченные
+разделом `BACKLOG`, типом `backlog_task` или одним из трёх действий
+`BACKLOG_TASK_CREATE/UPDATE/DELETE`. Общий журнал, RabbitMQ receipts/Outbox,
+данные CRM и технический `docs/backlog.md` не удаляются. Notes API больше
+не регистрируется. Миграция не расширяет права runtime и не меняет защитные
+функции восстановления.
+
+Две runtime/DDL-фазы используют один immutable Operations image. Между ними
+обязательны отдельные получение safety backup и проверка восстановления:
+
+1. `operations-runtime` обновляет четыре Operations-процесса без применения
+   миграции. Таблица пока остаётся в БД. После проверки новой ревизии и
+   отсутствия старого Notes writer controller под блокировкой таблицы отзывает
+   у runtime права записи и фиксирует phase-A receipt с прежним migration
+   ledger. Это persistent PostgreSQL `REVOKE`, не read-only проверка.
+   Миграция остаётся явно pending; отмечать её применённой нельзя.
+2. Отдельный CI scope `operations-backlog-backup` запускает одноразовый
+   maintenance executor из того же exact image, только с read-only Operations
+   backup credential. API/JWT/Telegram и admin/migration credentials не
+   передаются. Source worker из phase-A receipt и одноразовый executor — разные
+   контейнеры. `pg_dump` сохраняет владельцев и ACL; root-sealed acquisition
+   receipt связывает exact database UUID, phase-A hash, source/executor
+   container/image/revision, SHA/размер artifact и время получения после fence.
+   Этот этап не пересобирает/перезапускает сервисы и не применяет миграции;
+   повтор с готовым sealed artifact только проверяет его, не перезаписывает.
+3. Полученный artifact проверяется по SHA-256 и восстановлением в изолированный
+   PostgreSQL 18 с сохранением owner/ACL: прежний ledger, Notes-данные,
+   настоящий writer fence и неизменность постороннего аудита. Недостаточно
+   `pg_restore --list`, позднего времени restore или штатной Telegram-копии
+   с `--no-privileges`. Operations self-restore через работающий control ledger
+   запрещён. Проверка выполняется после отдельного resource preflight.
+4. Только привязанный к phase-A/acquisition receipt успешный proof допускает
+   отдельный `operations-backlog-finalize`: повторную проверку fence и
+   применение точной миграции migration-ролью, без возврата старого runtime.
+   При неизвестном результате DDL сохраняется recovery fence; итог проверяют
+   по реальному ledger и состоянию БД, а не повторным общим deploy.
+
+Operations не входит в allowlist собственного автоматического restore и
+bundled restore manifest семи других сервисов. Её backup имеет
+`backupProvenance: null`; не выдавать его за подписанный restore artifact.
+Bundled JSON сохраняется побайтно от совместимого OTP release: Notes DDL его
+не меняет. Manifest в phase-A receipt описывает фактически применённые старые
+Operations migrations, а не pending DDL из нового образа. Self-restore
+control ledger и новый backup framework в этот выпуск не входят.
+
+Gateway route `/api/v1/notes` удаляется отдельным согласованным rollout с
+двусторонней синхронизацией env. Обычный общий migration-before-restart
+controller не подходит для этого удаления. Остальные приложения не
+перезапускаются; `DATABASE_RESTORE_ENABLED` остаётся `false`.
+`DROP ... RESTRICT` блокирует удаление при неожиданной зависимости, timeout
+откатывает всю транзакцию. Возврат к Notes-capable runtime без отдельно
+согласованного восстановления не поддерживается. Исторические резервные копии
+подчиняются прежнему retention; эта миграция их не удаляет.
+
 ## Контракты RabbitMQ
 
 Operations публикует в `winwidget.events`:
@@ -96,7 +153,10 @@ Payload маршрутизации уведомлений имеет точны�
 только переменные и отдельные scoped credentials, необходимые Operations.
 
 Operations использует один глобальный `OperationsPrismaModule` и один пул
-Prisma Client на процесс. Примените миграции до запуска новой ревизии:
+Prisma Client на процесс. Для обычных совместимых миграций примените их до
+запуска новой ревизии. Исключение — удаление Notes выше: первая фаза намеренно
+не запускает `prisma:migrate:deploy`; pending destructive DDL допустима только
+в отдельной proof-gated финализации.
 
 ```bash
 pnpm prisma:generate

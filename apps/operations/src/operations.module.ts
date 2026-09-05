@@ -26,8 +26,6 @@ import { DatabaseBackupService } from './maintenance/database-backup.service';
 import { DatabaseBackupProvenanceService } from './maintenance/database-backup-provenance.service';
 import { OperationalAlertService } from './monitoring/operational-alert.service';
 import { OperationsHeartbeatService } from './monitoring/operations-heartbeat.service';
-import { NotesController } from './notes/notes.controller';
-import { NotesService } from './notes/notes.service';
 import { OperationsPrismaModule } from './prisma/operations-prisma.module';
 import { OperationsPrismaService } from './prisma/operations-prisma.service';
 import { ReportingPolicyController } from './reporting-policy/reporting-policy.controller';
@@ -67,7 +65,6 @@ const PROCESS_ROLE = parseOperationsProcessRole(
 const API_CONTROLLERS =
 	PROCESS_ROLE === 'api'
 		? [
-				NotesController,
 				AdminEventLogController,
 				OperationsIdentityController,
 				AdminAlertsController,
@@ -101,7 +98,6 @@ const ROLE_SCOPED_PROVIDERS =
 		OperationsAuthGuard,
 		...ROLE_SCOPED_PROVIDERS,
 		AdminEventLogService,
-		NotesService,
 		OperationsFederationClient,
 		RabbitMqManagementClient,
 		AdminAlertsService,

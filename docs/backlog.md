@@ -254,46 +254,22 @@ consent snapshot в Billing остаётся отдельным обязател
 
 ## Identity и доступ
 
-### P1 — отдельный production-выпуск резервного входа по коду
+### P1 — подтвердить реальную доставку и вход по резервному коду
 
-До включения `IDENTITY_LOGIN_OTP_ENABLED=true` выпустить только совместимый
-Identity image и additive migration `20260910010000_add_login_otp`, без CRM
-foundation, новых CRM tokens, workspace backfill и изменений Widgets/Billing.
-Выпускать fresh candidate поверх exact worker recovery
-`d3d717dae89913aa673e6c55b9e03c3b5de3d0aa`, не прежний OTP commit: сохранить
-bootstrap recovery Billing/Operations/Support и security lockfiles. Согласовать
-green immutable infra pin и scoped workflow `identity-with-operations-manifest`
-для Identity 3 + Operations 4. Проверить фактический mixed baseline: Operations
-API может иметь иную ревизию, чем три worker; их старые manifests должны совпадать.
-Не повторять предыдущие federation/worker jobs и не использовать `all` или
-ручной общий Compose restart.
+С участием пользователя проверить в production получение кода на его
+подтверждённые email/телефон и завершение входа при недоступности Google
+CAPTCHA. Успешный `GET /api/v1/auth/login-otp/capabilities`, наличие настроек
+SMTP/SMS и одинаковый ответ запроса кода не доказывают фактическую доставку.
+Без участия пользователя не отправлять тестовые SMS/письма и не создавать
+сессии обходом Identity.
 
-Проверить service-owned runtime/backup ACL двух новых `login_otp_*` таблиц,
-миграционную роль/default ACL и актуальный restore manifest. Новый readiness
-и housekeeping требуют миграцию перед переключением runtime даже при
-выключенном флаге. Старый runtime совместим с additive схемой; rollback не
-удаляет новые таблицы, challenge и сессии, сначала выключается OTP и
-завершаются активные запросы.
-
-Operations подписывает backup provenance по manifest, встроенному в её image,
-а не по фактическому migration ledger Identity. Обновлённый JSON в Git сам
-по себе не обновляет работающий worker. До Identity-only cutover согласовать
-доставку совместимого Operations artifact (от worker baseline — только manifest,
-без Notes/DDL) и fence Identity backup jobs на переходное окно. Сначала собрать
-images, повторно проверить quiet, выполнить bounded SIGTERM всех Operations 4,
-доказать физический stop, ноль runtime PG sessions и SHARE/0PROCESSING/no active
-restore. Quiet не считать атомарным drain. После успешного/неизвестного DDL не
-возобновлять старый manifest, сохранять recovery fence до проверки ledger.
-Не выпускать dumps с несовпадающим manifest и не ослаблять restore/provenance.
-
-Синхронизировать canonical production env local/server в обе стороны с
-побайтовой проверкой и обновить expected env hash. Флаг должен оставаться
-`false` до проверки провайдеров и trusted-IP boundary Gateway → Identity.
-Проверить доступность точных методов существующего `/api/v1/auth` prefix,
-общие PostgreSQL-лимиты и отсутствие обхода CAPTCHA по клиентскому признаку
-ошибки. Реальные email/SMS проверки требуют участия пользователя; synthetic
-PG/transport tests и readiness не доказывают доставку. Сохранить прежний
-парольный вход, регистрацию, OAuth и Telegram без изменения их контрактов.
+Проверить в браузере неверный и истёкший код, повторную отправку после
+таймера, восстановление после ошибки и сохранность обычного входа.
+Не ослаблять browser binding, независимые PostgreSQL-лимиты
+IP/контакта/канала, trusted-proxy boundary или CAPTCHA обычного входа и
+регистрации. Frontend не должен показывать фиктивную успешную доставку
+при неготовом backend. Локальные synthetic transport/PG/DOM проверки не
+заменяют эту внешнюю проверку.
 
 ### P1 — общий auth rate limiter до нескольких replicas
 
@@ -355,6 +331,62 @@ replicas.
 не заменяет внешнее юридическое заключение и договорные документы.
 
 ## Инженерная эксплуатация
+
+### P1 — применить удаление пользовательской вкладки «Беклог» в production
+
+Выпустить Notes-free Operations от проверенного OTP baseline
+`a10fd2d2bac9cc3f825193d03b065570cfcf9c53`, сохранив bootstrap recovery,
+Identity OTP, lockfiles и bundled restore manifest. Первая фаза
+`operations-runtime` с infra `2e83c5bb7b9bdf7bcbfb1039a5c645547cdf2272`
+обновляет только четыре Operations, затем устанавливает persistent Notes
+writer `REVOKE` и root phase-A receipt. До замены проверить quiet и graceful
+stop; после health — отсутствие старого writer и активных Notes-транзакций.
+Не запускать общий migration-before-restart: таблица и audit-копии остаются,
+миграция `20260910110000_remove_admin_backlog` явно pending.
+
+Отдельным `operations-backlog-backup` получить ACL-preserving service-owned
+safety dump из одноразового maintenance executor с одной read-only Operations
+backup credential, без API/JWT/Telegram/admin/migration доступа. Root-sealed
+acquisition receipt должен связать phase-A hash, database UUID, exact source
+worker и executor/image/revision, SHA/размер artifact и время получения после
+fence. Не заменять эти проверки обычным Telegram backup с `--no-privileges`,
+поздним `restoredAt` или одним `pg_restore --list`.
+
+Скачать и проверить реальный artifact по hash, восстановить с owner/ACL в
+изолированном PostgreSQL 18 и доказать прежний ledger, Notes-данные, writer
+fence и сохранность постороннего аудита после точной DDL. Локальный proof
+требует отдельного resource preflight; это не production rehearsal семи signed
+restore targets и не снимает их отдельный gate 6 GiB. Не восстанавливать
+Operations через её собственный работающий control ledger.
+
+Только после проверенных phase-A/acquisition/restore receipts выпустить
+отдельный `operations-backlog-finalize`. Миграция удаляет только
+`operations.notes` и связанные audit-копии по `BACKLOG`, `backlog_task` и трём
+точным `BACKLOG_TASK_*` действиям, без CASCADE. Не затрагивать заметки CRM,
+остальные audits, Outbox или receipts. При неизвестном результате DDL
+сохранять recovery fence. После writer fence не возвращать старый
+Notes-capable runtime без отдельного согласованного восстановления.
+
+Gateway `operations-notes` удалить отдельным config-only этапом с полной
+двусторонней env-синхронизацией и compatible exact infra contract: 42 routes,
+7 у Operations. Первая фаза оставляет прежние 43 routes. После всех этапов
+проверить отсутствие Notes endpoints/UI, прежнюю работу остальных сервисов и
+сохранность финансовых данных. Исторические backups подчиняются прежнему
+retention; технический `docs/backlog.md` не является удаляемыми данными.
+
+### P1 — завершить production-проверки frontend после cutover
+
+Закончить авторизованную browser-проверку desktop/mobile: профиль с отдельным
+статусом WinCRM, переключатель оплаты, навигация админки, переходы между
+продуктами и auth/returnUrl. Проверить реальные overview/history/schedule/restore
+данные для ADMIN/DEV, частичную недоступность и сохранность текущего задания,
+не включая восстановление и не создавая задания только ради визуального QA.
+Локальные проверки не заменяют production-сессию; реальная доставка кода и
+вход требуют участия пользователя, без обхода Identity и provider gates.
+CRM-ссылка должна быть активной и вести на `https://crm.winwidget.ru`:
+до выпуска CRM backend домен показывает «Скоро» без инициализации сессии,
+продуктовые API и платёжные действия выключены. Не возвращать `#0` вместо
+ссылки и не считать доступный frontend подтверждением готовности CRM backend.
 
 ### P1 — убрать временное ограничение Platform sanitizer audit
 

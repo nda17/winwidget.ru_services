@@ -6,6 +6,7 @@ bash -n .github/scripts/validate-production-compose.sh
 node --check .github/scripts/validate-production-compose.cjs
 node --check apps/operations/test/integration/database-restore-control-ledger-postgres18.integration.mjs
 node --check apps/operations/test/integration/database-restore-postgres18.rehearsal.mjs
+node --check apps/operations/test/integration/admin-backlog-removal-postgres18.integration.mjs
 node --check apps/identity/test/integration/login-otp-postgres18.integration.mjs
 
 env \
@@ -419,10 +420,10 @@ exactFiles('deploy', ['docker-compose.prod.yml']);
 
 const servicesWorkflow = readFileSync('.github/workflows/ci.yml', 'utf8');
 const pinnedInfraRevision =
-	'b6f2392d53eaf250d0472140d61b6cf1fa4f9c5a';
-const identityEnvSha256 = '50233f31f2121046847c96bf0959cddf8c83fc3cc2e6ebd01cda759fbbaf83bc';
-if (!/^[a-f0-9]{64}$/.test(identityEnvSha256)) {
-	throw new Error('Identity owner env must be synchronized and its exact hash reviewed before release');
+	'2e83c5bb7b9bdf7bcbfb1039a5c645547cdf2272';
+const operationsEnvSha256 = '06f1affe7b715a3c2d96d2a00975fab168e2060623a8af72d33c62bb4055799e';
+if (!/^[a-f0-9]{64}$/.test(operationsEnvSha256)) {
+	throw new Error('Operations owner env must be synchronized and its exact hash reviewed before release');
 }
 for (const evidence of [
 	"cancel-in-progress: ${{ github.ref != 'refs/heads/prod' }}",
@@ -430,6 +431,8 @@ for (const evidence of [
 	'--label winwidget.operations-control-ledger=true',
 	'      - name: Run control-ledger negative SQL matrix\n        env:\n          OPERATIONS_CONTROL_LEDGER_POSTGRES_CONTAINER_ID: ${{ job.services.postgres.id }}',
 	'pnpm --dir apps/operations run test:integration:restore-control-ledger',
+	'--label winwidget.operations-backlog-test=true',
+	'      - name: Prove exact admin Backlog deletion and transactional rollback\n        env:\n          OPERATIONS_BACKLOG_TEST_CONTAINER_ID: ${{ job.services.postgres.id }}\n          OPERATIONS_BACKLOG_TEST_POSTGRES_USER: operations_control_ledger_superuser\n          OPERATIONS_BACKLOG_TEST_ALLOW_MUTATION: \'true\'\n        run: node apps/operations/test/integration/admin-backlog-removal-postgres18.integration.mjs',
 	'operations-restore-rehearsal:',
 	'--label winwidget.operations-restore-rehearsal=true',
 	'      - name: Run isolated restore rehearsal\n        env:\n          OPERATIONS_RESTORE_REHEARSAL_POSTGRES_CONTAINER_ID: ${{ job.services.postgres.id }}',
@@ -481,26 +484,23 @@ if (
 	infraReleaseReferences.length !== 1 ||
 	infraReleaseReferences.some(reference => reference[1] !== pinnedInfraRevision)
 ) {
-	throw new Error('the coordinated Identity production job must use the exact reviewed infra SHA');
+	throw new Error('the Operations phase-A production job must use the exact reviewed infra SHA');
 }
-const identityJob = servicesWorkflow.split('  deploy-production:\n')[1];
-if (!identityJob || (servicesWorkflow.match(/release_scope:/g) ?? []).length !== 1 || servicesWorkflow.includes('operations-federation-config') || servicesWorkflow.includes('workers-bootstrap-recovery') || servicesWorkflow.includes('deploy-worker-recovery:') || servicesWorkflow.includes('expected_support_env_sha256:')) {
-	throw new Error('production must contain only the reviewed Identity/Operations scope; completed releases cannot repeat');
+const operationsJob = servicesWorkflow.split('  deploy-production:\n')[1];
+if (!operationsJob || (servicesWorkflow.match(/release_scope:/g) ?? []).length !== 1 || servicesWorkflow.includes('operations-federation-config') || servicesWorkflow.includes('workers-bootstrap-recovery') || servicesWorkflow.includes('identity-with-operations-manifest') || servicesWorkflow.includes('deploy-worker-recovery:') || servicesWorkflow.includes('expected_support_env_sha256:') || /expected_operations_(?:revision|api_revision|env_sha256):|operations_runtime_revision:|operations_evidence_sha256:/.test(servicesWorkflow)) {
+	throw new Error('production must contain only the reviewed Operations phase-A scope; completed releases and finalization cannot repeat');
 }
 for (const [job, evidence] of [
-	[identityJob, 'needs:\n      - lifecycle-contract\n      - operations-control-ledger\n      - operations-restore-rehearsal\n      - production-image\n      - service\n      - service-integration\n      - widgets-integration\n'],
-	[identityJob, 'release_scope: identity-with-operations-manifest'],
-	[identityJob, `expected_service_env_sha256: '${identityEnvSha256}'`],
-	[identityJob, "expected_operations_revision: 'd3d717dae89913aa673e6c55b9e03c3b5de3d0aa'"],
-	[identityJob, "expected_operations_api_revision: '484e546451088671e23ae37ae4026b9b3fe500c5'"],
-	[identityJob, "expected_operations_env_sha256: '06f1affe7b715a3c2d96d2a00975fab168e2060623a8af72d33c62bb4055799e'"]
+	[operationsJob, 'needs:\n      - lifecycle-contract\n      - operations-control-ledger\n      - operations-restore-rehearsal\n      - production-image\n      - service\n      - service-integration\n      - widgets-integration\n'],
+	[operationsJob, 'release_scope: operations-runtime'],
+	[operationsJob, `expected_service_env_sha256: '${operationsEnvSha256}'`]
 ]) {
 	if (!job.includes(evidence)) throw new Error(`scoped release boundary drifted: ${evidence}`);
 }
-for (const job of [identityJob]) {
+for (const job of [operationsJob]) {
 	for (const evidence of [
 		"if: github.event_name == 'push' && github.ref == 'refs/heads/prod'",
-		"expected_live_revision: '484e546451088671e23ae37ae4026b9b3fe500c5'",
+		"expected_live_revision: 'a10fd2d2bac9cc3f825193d03b065570cfcf9c53'",
 		'services_revision: ${{ github.sha }}'
 	]) if (!job.includes(evidence)) throw new Error(`scoped release identity drifted: ${evidence}`);
 }
