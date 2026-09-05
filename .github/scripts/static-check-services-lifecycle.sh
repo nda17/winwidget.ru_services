@@ -6,6 +6,7 @@ bash -n .github/scripts/validate-production-compose.sh
 node --check .github/scripts/validate-production-compose.cjs
 node --check apps/operations/test/integration/database-restore-control-ledger-postgres18.integration.mjs
 node --check apps/operations/test/integration/database-restore-postgres18.rehearsal.mjs
+node --check apps/operations/test/integration/admin-backlog-removal-postgres18.integration.mjs
 node --check apps/identity/test/integration/login-otp-postgres18.integration.mjs
 
 env \

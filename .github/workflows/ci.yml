@@ -212,6 +212,7 @@ jobs:
           - 5432:5432
         options: >-
           --label winwidget.operations-control-ledger=true
+          --label winwidget.operations-backlog-test=true
           --health-cmd "pg_isready -U operations_control_ledger_superuser -d operations_control_ledger"
           --health-interval 2s
           --health-timeout 2s
@@ -244,6 +245,12 @@ jobs:
         env:
           OPERATIONS_CONTROL_LEDGER_POSTGRES_CONTAINER_ID: ${{ job.services.postgres.id }}
         run: pnpm --dir apps/operations run test:integration:restore-control-ledger
+      - name: Prove exact admin Backlog deletion and transactional rollback
+        env:
+          OPERATIONS_BACKLOG_TEST_CONTAINER_ID: ${{ job.services.postgres.id }}
+          OPERATIONS_BACKLOG_TEST_POSTGRES_USER: operations_control_ledger_superuser
+          OPERATIONS_BACKLOG_TEST_ALLOW_MUTATION: 'true'
+        run: node apps/operations/test/integration/admin-backlog-removal-postgres18.integration.mjs
 
   service-integration:
     name: Service integration / ${{ matrix.app }}

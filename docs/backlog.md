@@ -348,6 +348,36 @@ replicas.
 
 ## Инженерная эксплуатация
 
+### P1 — двухфазное удаление пользовательского Backlog в production
+
+После отдельного совместимого OTP release выпустить только Notes-free
+Operations runtime через reviewed immutable scoped controller. В фазе
+`operations-runtime` миграция `20260910110000_remove_admin_backlog` остаётся
+pending: сначала заменить четыре Operations-процесса, доказать отсутствие
+старого Notes writer и под блокировкой отозвать runtime-права записи в
+`operations.notes`. Зафиксировать phase-A receipt с database identity,
+runtime revision, прежним migration ledger и точным checksum будущей DDL.
+
+После fence получить service-owned safety backup от maintenance-worker,
+скачать его с проверкой SHA-256 и доказать восстановление в изолированную
+PostgreSQL 18, сохранение постороннего аудита, writer fence и откат при
+неожиданной зависимости. Operations не восстанавливается через собственный
+control ledger; её backup не имеет подписанного provenance семи разрешённых
+restore targets. Bundled manifest этих targets сохраняется от OTP release,
+поскольку Notes DDL не меняет ни один из них.
+
+Только после bound restore evidence выполнить `operations-backlog-finalize`
+с повторным fence/ledger gate и migration role. Не применять общий
+migration-before-restart workflow, не делать автоматический rollback на
+Notes-capable runtime и не затрагивать CRM, Billing, посторонние audits,
+Outbox, receipts или исторические backups. Проверить отсутствие Notes API и
+данных вкладки; технический `docs/backlog.md` не удаляется.
+
+Отдельно удалить Gateway route `operations-notes` с полной двусторонней
+синхронизацией canonical env и согласованным infra contract/pin. До выпуска
+оставить `DATABASE_RESTORE_ENABLED=false`; review/pin, production backup proof
+и обе фазы rollout пока не выполнены.
+
 ### P1 — убрать временное ограничение Platform sanitizer audit
 
 С 02.09.2026 `npm audit` для `sanitize-html@2.17.5` публикует conditional

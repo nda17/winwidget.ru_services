@@ -21,17 +21,6 @@ model ServiceIdentity {
   @@schema("operations")
 }
 
-model Note {
-  id        String   @id @default(cuid())
-  text      String
-  done      Boolean  @default(false)
-  createdAt DateTime @default(now()) @map("created_at")
-  updatedAt DateTime @updatedAt @map("updated_at")
-
-  @@map("notes")
-  @@schema("operations")
-}
-
 model AdminEventLog {
   id              String   @id @default(cuid())
   adminId         String?  @map("admin_id")
