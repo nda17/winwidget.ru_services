@@ -63,6 +63,7 @@ describe('CrmEntitlementService', () => {
 			.useFakeTimers()
 			.setSystemTime(new Date('2026-09-08T10:00:00.000Z'));
 		const prisma = {
+			crmPaidPeriod: { findFirst: jest.fn().mockResolvedValue(null) },
 			crmEntitlement: {
 				findUnique: jest.fn().mockResolvedValue(entitlement())
 			}
@@ -81,6 +82,7 @@ describe('CrmEntitlementService', () => {
 	it('returns Billing-owned provisioning provenance in the internal entitlement contract', async () => {
 		jest.useFakeTimers().setSystemTime(NOW);
 		const prisma = {
+			crmPaidPeriod: { findFirst: jest.fn().mockResolvedValue(null) },
 			crmEntitlement: {
 				findUnique: jest.fn().mockResolvedValue(entitlement())
 			}
@@ -121,6 +123,7 @@ describe('CrmEntitlementService', () => {
 		async (date, status) => {
 			jest.useFakeTimers().setSystemTime(new Date(date));
 			const prisma = {
+				crmPaidPeriod: { findFirst: jest.fn().mockResolvedValue(null) },
 				crmEntitlement: {
 					findUnique: jest.fn().mockResolvedValue(
 						entitlement({
@@ -172,6 +175,7 @@ describe('CrmEntitlementService', () => {
 	it('keeps trial metadata nullable for a future paid entitlement', async () => {
 		jest.useFakeTimers().setSystemTime(NOW);
 		const prisma = {
+			crmPaidPeriod: { findFirst: jest.fn().mockResolvedValue(null) },
 			crmEntitlement: {
 				findUnique: jest.fn().mockResolvedValue(
 					entitlement({

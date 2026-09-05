@@ -152,6 +152,69 @@ function build(authContext = context()) {
 }
 
 describe('CrmAccessService bootstrap', () => {
+	it('recovers first PAID onboarding from proven Billing provenance without starting Trial', async () => {
+		const current = build();
+		const paid = activeEntitlement();
+		current.billing.get.mockResolvedValue({
+			...paid,
+			entitlement: {
+				...paid.entitlement,
+				planCode: 'PAID',
+				trialStartedAt: null,
+				seatLimit: 2,
+				policyVersion: 1,
+				graceUntil: '2026-09-10T10:00:00.000Z',
+				provisioningCommandType: 'ACTIVATE_WINCRM_PAID'
+			}
+		});
+		current.prisma.crmWorkspaceAccess.upsert.mockResolvedValue({
+			...onboardingAccess(),
+			provisioningCommandType: 'ACTIVATE_WINCRM_PAID'
+		});
+		await expect(
+			current.service.bootstrap('Bearer token')
+		).resolves.toMatchObject({
+			state: 'ONBOARDING',
+			entitlement: { planCode: 'PAID', trialStartedAt: null }
+		});
+		expect(current.billing.activateTrial).not.toHaveBeenCalled();
+		expect(current.sales.installTemplate).not.toHaveBeenCalled();
+		expect(current.prisma.crmWorkspaceAccess.upsert).toHaveBeenCalledWith(
+			expect.objectContaining({
+				create: expect.objectContaining({
+					provisioningCommandType: 'ACTIVATE_WINCRM_PAID',
+					activatedBySubject: 'user-1'
+				})
+			})
+		);
+	});
+	it('keeps original Trial provisioning immutable when Billing projects a later PAID period', async () => {
+		const current = build();
+		const paid = activeEntitlement();
+		current.billing.get.mockResolvedValue({
+			...paid,
+			entitlement: {
+				...paid.entitlement,
+				planCode: 'PAID',
+				seatLimit: 5,
+				aggregateVersion: '2',
+				sourceSequence: '2'
+			}
+		});
+		current.prisma.crmWorkspaceAccess.findUnique.mockResolvedValue(
+			onboardingAccess()
+		);
+		await expect(
+			current.service.bootstrap('Bearer token')
+		).resolves.toMatchObject({
+			state: 'ONBOARDING',
+			entitlement: { planCode: 'PAID' }
+		});
+		expect(
+			current.prisma.crmWorkspaceAccess.upsert
+		).not.toHaveBeenCalled();
+		expect(current.billing.activateTrial).not.toHaveBeenCalled();
+	});
 	it('returns workspace selection before any Billing, Sales or CRM database call', async () => {
 		const current = build(
 			context([membership(WORKSPACE_A), membership(WORKSPACE_B, 'MEMBER')])

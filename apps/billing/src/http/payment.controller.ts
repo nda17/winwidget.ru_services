@@ -17,6 +17,7 @@ import { BillingAuth, BillingAuthGuard } from '../auth/billing-auth.guard';
 import { CurrentBillingActor } from '../auth/current-billing-actor.decorator';
 import type { BillingActor } from '../auth/billing-request';
 import { getBillingClientContext } from '../common/billing-request-context';
+import { WincrmCommerceService } from '../domain/wincrm-commerce.service';
 import {
 	BILLING_PAYMENT_WEBHOOK_SUBPATH,
 	PaymentDomainService
@@ -32,7 +33,10 @@ import {
 
 @Controller('payments')
 export class PaymentController {
-	constructor(private readonly payments: PaymentDomainService) {}
+	constructor(
+		private readonly payments: PaymentDomainService,
+		private readonly wincrm: WincrmCommerceService
+	) {}
 
 	@Post('create')
 	@BillingAuth()
@@ -327,7 +331,10 @@ export class PaymentController {
 
 	@Post(BILLING_PAYMENT_WEBHOOK_SUBPATH)
 	@HttpCode(200)
-	webhook(@Body() body: unknown) {
+	async webhook(@Body() body: unknown) {
+		if (await this.wincrm.enqueueProviderVerification(body)) {
+			return { ok: true };
+		}
 		return this.payments.webhook(body);
 	}
 

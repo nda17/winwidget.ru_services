@@ -1,21 +1,13 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
+import { generateKeyPairSync, randomBytes, randomUUID } from 'node:crypto';
 import {
-	createHash,
-	generateKeyPairSync,
-	randomBytes,
-	randomUUID
-} from 'node:crypto';
-import {
-	access,
 	chmod,
 	copyFile,
-	cp,
 	lstat,
 	mkdir,
 	mkdtemp,
 	readFile,
-	readdir,
 	realpath,
 	stat,
 	symlink,
@@ -34,76 +26,6 @@ const servicesRoot = resolve(
 	'../../../..'
 );
 const workspaceRoot = dirname(servicesRoot);
-const frontendFolders = ['winwidget.ru_client', 'winwidget.ru_client_crm'];
-const frontendConfigs = [
-	'package.json',
-	'next.config.mjs',
-	'tsconfig.json',
-	'tailwind.config.ts',
-	'postcss.config.js',
-	'next-env.d.ts'
-];
-
-async function sourceSnapshot(root) {
-	const hash = createHash('sha256');
-	const walk = async relative => {
-		const path = join(root, relative);
-		let info;
-		try {
-			info = await lstat(path);
-		} catch (error) {
-			if (relative === 'public' && error.code === 'ENOENT') return;
-			throw error;
-		}
-		assert.ok(
-			!info.isSymbolicLink(),
-			'Frontend source snapshots must not traverse symlinks'
-		);
-		if (info.isDirectory()) {
-			for (const name of (await readdir(path)).sort()) {
-				if (
-					name.startsWith('.env') ||
-					['.git', '.next', 'node_modules'].includes(name)
-				)
-					continue;
-				await walk(join(relative, name));
-			}
-		} else if (info.isFile()) {
-			const content = await readFile(path);
-			hash.update(`${relative}\0${content.length}\0`).update(content);
-		}
-	};
-	for (const path of ['src', 'public', ...frontendConfigs])
-		await walk(path);
-	return hash.digest('hex');
-}
-
-async function copyFrontendSource(root, mirror) {
-	for (const entry of ['src', 'public']) {
-		try {
-			await access(join(root, entry));
-		} catch (error) {
-			if (entry === 'public' && error.code === 'ENOENT') continue;
-			throw error;
-		}
-		await cp(join(root, entry), join(mirror, entry), {
-			recursive: true,
-			filter: path =>
-				!basename(path).startsWith('.env') &&
-				!['.git', '.next', 'node_modules'].includes(basename(path))
-		});
-	}
-	for (const file of frontendConfigs)
-		await copyFile(join(root, file), join(mirror, file));
-	const hash = await sourceSnapshot(root);
-	assert.equal(
-		await sourceSnapshot(mirror),
-		hash,
-		'Frontend changed during copy or contains stale files; launch a fresh harness'
-	);
-	return hash;
-}
-
 if (process.argv[2] === '--refresh-frontends') {
 	assert.equal(
 		process.argv.length,
@@ -125,18 +47,23 @@ if (process.argv[2] === '--refresh-frontends') {
 	}
 	const fixture = JSON.parse(await readFile(path, 'utf8'));
 	assert.match(fixture.runId, /^[a-f0-9]{10}$/);
-	for (const folder of frontendFolders) {
-		const mirror = join(directory, folder);
-		assert.equal(await realpath(mirror), mirror);
-		const sourceHash = await copyFrontendSource(
-			join(workspaceRoot, folder),
-			mirror
-		);
-		fixture.frontendSnapshots[folder] = { mirror, sourceHash };
-		console.log(
-			`[wincrm-local] Refreshed ${folder} source SHA-256 ${sourceHash}`
-		);
-	}
+	assert.equal(fixture.ownedMarker, `wincrm-local-stack:${fixture.runId}`);
+	const frontend = await import('./local-frontends.mjs');
+	const source = await frontend.resolveFrontendSource(
+		workspaceRoot,
+		process.env.WINCRM_FRONTENDS_SOURCE_ROOT
+	);
+	const snapshot = await frontend.refreshFrontendMirror({
+		source,
+		mirror: join(directory, 'frontends'),
+		stateDirectory: directory,
+		previous: fixture.frontendSnapshots?.monorepo
+	});
+	await frontend.syncFrontendPublic(snapshot);
+	fixture.frontendSnapshots.monorepo = snapshot;
+	console.log(
+		`[wincrm-local] Refreshed monorepo source SHA-256 ${snapshot.sourceHash}`
+	);
 	await writeFile(path, `${JSON.stringify(fixture, null, 2)}\n`, {
 		mode: 0o600
 	});
@@ -148,12 +75,16 @@ if (process.argv[2] === '--refresh-frontends') {
 
 const args = new Set(process.argv.slice(2));
 if (args.has('--help')) {
-	console.log(`Usage: WINCRM_LOCAL_STACK_ALLOW_MUTATION=true node apps/crm-access/test/integration/local-wincrm-stack.mjs [--backend-only] [--activate-owner] [--with-widgets] [--verify-native-widget-http] [--verify-domain] [--verify-acceptance-http] [--smoke-and-stop]
+	console.log(`Usage: WINCRM_LOCAL_STACK_ALLOW_MUTATION=true node apps/crm-access/test/integration/local-wincrm-stack.mjs [--backend-only] [--activate-owner] [--with-widgets] [--verify-native-widget-http] [--verify-domain] [--verify-billing] [--verify-billing-http] [--verify-acceptance-http] [--smoke-and-stop]
 
 Requires local Colima container wincrm-mvp-postgres18, PostgreSQL 18 on
 127.0.0.1:55440 with local test-only trust and bootstrap role crm_bootstrap_ci.
 Creates fresh isolated test databases and restricted roles, migrates/builds
-current services, and starts real APIs plus temporary frontend mirrors.
+current services, and starts real APIs plus one private frontend monorepo mirror.
+Four real Next apps use landing3100/widgets3002/admin3003/CRM3001; browser
+main origin localhost:3000 is a local path/asset/WS proxy, CRM stays localhost:3001.
+WINCRM_FRONTENDS_SOURCE_ROOT may explicitly select the immediate workspace child
+winwidget.ru_client or winwidget.ru_frontends; separate CRM repos are not supported.
 Default owner starts without WinCRM: use the real five-day Trial button.
 --activate-owner additionally activates Trial and installs universal-sales@1 via API.
 --with-widgets requires --activate-owner, adds a real Widgets API on loopback 4700,
@@ -165,6 +96,13 @@ It additionally proves public Quiz submit -> real Widgets Outbox publisher -> Ra
 -> real Intake worker/HTTP dependencies -> Inbox, without external provider delivery.
 --verify-domain runs Customers, Intake and Sales PostgreSQL 18 integration scenarios.
 It includes the service-owned native Widget transfer PostgreSQL gate.
+--verify-billing proves Billing commerce transactions and Access admission fences on PostgreSQL 18.
+It uses synthetic provider responses, not real payments or provider HTTP.
+--verify-billing-http enables the isolated paid CRM APIs for two extra synthetic accounts.
+It proves public checkout -> Billing Outbox -> scoped RabbitMQ -> real worker/reverse
+authorization -> a synthetic loopback provider. No real payment or provider URL override.
+Requires BILLING_WINCRM_HTTP_TEST_{PROVISIONER,WORKER,PUBLISHER}_RABBITMQ_URL
+on one local test vhost. Use separately from --verify-billing (which leaves fault fixtures).
 --verify-acceptance-http uses a separate normal test account and real HTTP downstream operations.
 It drives a claimed Intake event without a broker and does not prove RabbitMQ transport.
 Use --refresh-frontends /exact/private/browser-fixture.json to refresh source snapshots.
@@ -181,6 +119,8 @@ for (const arg of args) {
 			'--with-widgets',
 			'--verify-native-widget-http',
 			'--verify-domain',
+			'--verify-billing',
+			'--verify-billing-http',
 			'--verify-acceptance-http',
 			'--smoke-and-stop'
 		].includes(arg),
@@ -189,6 +129,13 @@ for (const arg of args) {
 }
 const withWidgets = args.has('--with-widgets');
 const withNativeWidgetHttp = args.has('--verify-native-widget-http');
+const withBillingHttp = args.has('--verify-billing-http');
+const withBillingCommerce =
+	withBillingHttp || args.has('--verify-billing');
+assert.ok(
+	!withBillingHttp || !args.has('--verify-billing'),
+	'Run --verify-billing-http separately from the PostgreSQL fault-fixture gate'
+);
 assert.ok(
 	!withNativeWidgetHttp || withWidgets,
 	'--verify-native-widget-http requires --with-widgets'
@@ -215,6 +162,7 @@ const bootstrapRole = 'crm_bootstrap_ci';
 const secrets = new Set();
 const children = new Map();
 const frontendSnapshots = {};
+let frontendProxy;
 let stopping = false;
 let ready = false;
 const generated = () => {
@@ -545,6 +493,8 @@ async function grantRuntime(service) {
 				'auth_identities',
 				'telegram_notification_channels',
 				'verification_challenges',
+				'login_otp_challenges',
+				'login_otp_rate_limits',
 				'auth_settings',
 				'oauth_authorizations',
 				'aggregate_versions',
@@ -559,15 +509,36 @@ async function grantRuntime(service) {
 			]
 		},
 		billing: {
-			'SELECT, INSERT': ['crm_commercial_policies', 'command_receipts'],
+			'SELECT, INSERT': [
+				'crm_commercial_policies',
+				'command_receipts',
+				...(withBillingCommerce
+					? ['crm_auto_renewal_consents', 'identity_contact_projections']
+					: [])
+			],
 			// Normal Identity login ensures the separate Widgets Trial in Billing;
 			// it must never implicitly activate WinCRM.
-			'SELECT, INSERT, UPDATE': ['source_sequences', 'subscriptions'],
+			'SELECT, INSERT, UPDATE': [
+				'source_sequences',
+				'subscriptions',
+				...(withBillingCommerce
+					? [
+							'crm_commerce_accounts',
+							'crm_commerce_commands',
+							'crm_orders',
+							'crm_paid_periods',
+							'crm_auto_renewals',
+							'crm_provider_operations',
+							'crm_provider_deliveries',
+							'crm_payment_receipts'
+						]
+					: [])
+			],
 			'SELECT, INSERT, UPDATE, DELETE': [
 				'crm_entitlements',
 				'outbox_events'
 			],
-			SELECT: ['settings', 'tariff_prices']
+			SELECT: ['settings', 'tariff_prices', 'crm_paid_periods']
 		},
 		widgets: {
 			SELECT: [
@@ -609,7 +580,9 @@ async function grantRuntime(service) {
 				'crm_workspace_members',
 				'crm_teams',
 				'crm_invitation_intents',
-				'crm_admissions'
+				'crm_admissions',
+				'crm_billing_capacity',
+				'crm_billing_operations'
 			],
 			'SELECT, INSERT, DELETE': ['crm_member_teams'],
 			'SELECT, INSERT': ['crm_team_command_receipts', 'crm_team_audit'],
@@ -723,6 +696,41 @@ async function grantRuntime(service) {
 			),
 			't'
 		);
+	}
+}
+
+async function verifyBilling() {
+	for (const [app, file, prefix] of [
+		[
+			'billing',
+			'wincrm-commerce-postgres18.integration.mjs',
+			'BILLING_WINCRM_COMMERCE'
+		],
+		[
+			'crm-access',
+			'billing-capacity-postgres18.integration.mjs',
+			'CRM_ACCESS'
+		]
+	]) {
+		const service = byApp[app];
+		const output = await execute(
+			process.execPath,
+			[join(service.root, 'test/integration', file)],
+			{
+				env: {
+					[app === 'billing'
+						? `${prefix}_TEST_ALLOW_MUTATION`
+						: `${prefix}_INTEGRATION_ALLOW_MUTATION`]: 'true',
+					[`${prefix}_TEST_DATABASE_URL`]: databaseUrl(
+						service,
+						service.runtimeRole
+					),
+					[`${prefix}_TEST_RUNTIME_ROLE`]: service.runtimeRole
+				},
+				label: `${app} commerce PostgreSQL 18 integration`
+			}
+		);
+		log(output);
 	}
 }
 
@@ -925,6 +933,44 @@ function nativeWidgetHttpBrokerEnvironment() {
 	}
 }
 
+function billingHttpBrokerEnvironment() {
+	try {
+		const result = {};
+		const urls = ['provisioner', 'worker', 'publisher'].map(kind => {
+			const value =
+				process.env[
+					`BILLING_WINCRM_HTTP_TEST_${kind.toUpperCase()}_RABBITMQ_URL`
+				];
+			if (value) secrets.add(value);
+			const url = new URL(value);
+			secrets.add(url.password);
+			secrets.add(decodeURIComponent(url.password));
+			assert.ok(
+				url.protocol === 'amqp:' &&
+					url.hostname === '127.0.0.1' &&
+					url.port === '5673'
+			);
+			assert.ok(url.username && url.password && !url.search && !url.hash);
+			assert.match(
+				decodeURIComponent(url.pathname),
+				/^\/[a-z0-9_-]+_(test|ci)$/
+			);
+			result[kind] = value;
+			return url;
+		});
+		assert.ok(urls.every(url => url.pathname === urls[0].pathname));
+		assert.equal(
+			new Set(urls.map(url => decodeURIComponent(url.username))).size,
+			3
+		);
+		return result;
+	} catch {
+		throw new Error(
+			'Billing HTTP proof requires three distinct scoped principals on one loopback test vhost; values suppressed'
+		);
+	}
+}
+
 function environment() {
 	const tokens = {};
 	for (const key of [
@@ -940,6 +986,7 @@ function environment() {
 		'WIDGETS_IDENTITY_TOKEN',
 		'OPERATIONS_IDENTITY_TOKEN',
 		'BILLING_CRM_ACCESS_TOKEN',
+		...(withBillingHttp ? ['BILLING_CRM_ACCESS_COMMERCE_TOKEN'] : []),
 		'BILLING_CAMPAIGNS_TOKEN',
 		'BILLING_OPERATIONS_TOKEN',
 		'WIDGETS_INTERNAL_TOKEN',
@@ -997,6 +1044,14 @@ function environment() {
 		CRM_ACCESS_PROCESS_ROLE: 'api',
 		CRM_INTAKE_PROCESS_ROLE: 'api',
 		BILLING_WINCRM_WIDGETS_ELIGIBILITY_ENABLED: String(withWidgets),
+		BILLING_WINCRM_PAYMENTS_ENABLED: String(withBillingHttp),
+		CRM_ACCESS_BILLING_ENABLED: String(withBillingHttp),
+		...(withBillingHttp
+			? {
+					BILLING_CRM_ACCESS_COMMERCE_BASE_URL: 'http://127.0.0.1:5300',
+					BILLING_WINCRM_FRONTEND_ORIGIN: 'http://localhost:3001'
+				}
+			: {}),
 		CRM_INTAKE_WIDGETS_ENABLED: String(withWidgets),
 		CRM_INTAKE_WIDGET_TRANSFERS_ENABLED: String(withNativeWidgetHttp),
 		...(withWidgets
@@ -1090,6 +1145,14 @@ function ownedEnvironment(app, values) {
 		],
 		billing: [
 			'BILLING_PROCESS_ROLE',
+			'BILLING_WINCRM_PAYMENTS_ENABLED',
+			...(withBillingHttp
+				? [
+						'BILLING_CRM_ACCESS_COMMERCE_TOKEN',
+						'BILLING_CRM_ACCESS_COMMERCE_BASE_URL',
+						'BILLING_WINCRM_FRONTEND_ORIGIN'
+					]
+				: []),
 			'BILLING_LISTEN_HOST',
 			'PAYMENT_METHOD_ENCRYPTION_KEY',
 			'BILLING_IDENTITY_TOKEN',
@@ -1135,6 +1198,8 @@ function ownedEnvironment(app, values) {
 		],
 		'crm-access': [
 			'CRM_ACCESS_PROCESS_ROLE',
+			'CRM_ACCESS_BILLING_ENABLED',
+			...(withBillingHttp ? ['BILLING_CRM_ACCESS_COMMERCE_TOKEN'] : []),
 			'CRM_ACCESS_LISTEN_HOST',
 			'IDENTITY_INTERNAL_BASE_URL',
 			'IDENTITY_CRM_ACCESS_TOKEN',
@@ -1224,6 +1289,12 @@ async function seedIdentity() {
 			['manager', ['USER']],
 			['teamLead', ['USER']],
 			['analyst', ['USER']],
+			...(withBillingHttp
+				? [
+						['billing', ['USER']],
+						['billingRevoked', ['USER']]
+					]
+				: []),
 			...(args.has('--verify-acceptance-http')
 				? [['workflow', ['USER']]]
 				: [])
@@ -1263,6 +1334,77 @@ async function seedIdentity() {
 		await prisma.$disconnect();
 	}
 	return accounts;
+}
+
+async function seedBillingHttpContacts(accounts) {
+	assert.ok(withBillingHttp);
+	const service = byApp.billing;
+	const require = createRequire(join(service.root, 'package.json'));
+	const prisma = new (require('@prisma/billing-client').PrismaClient)({
+		datasources: {
+			db: { url: databaseUrl(service, service.runtimeRole) }
+		},
+		log: []
+	});
+	try {
+		for (const name of ['billing', 'billingRevoked']) {
+			const account = accounts[name];
+			assert.equal(account.userId, `wincrm-local-${name}-${runId}`);
+			assert.equal(
+				account.email,
+				`wincrm-${name.toLowerCase()}@example.test`
+			);
+			// Seed authority owns only this fresh Billing fixture. No Identity DB read
+			// or fabricated entitlement/payment; checkout still uses real owner HTTP.
+			await prisma.identityContactProjection.create({
+				data: {
+					userId: account.userId,
+					email: account.email,
+					status: 'ACTIVE',
+					roles: ['USER'],
+					projectionVersion: 1n,
+					sourceSequence: 1n
+				}
+			});
+		}
+	} finally {
+		await prisma.$disconnect();
+	}
+}
+
+async function changeBillingFixtureOwner(account, active) {
+	assert.ok(withBillingHttp);
+	assert.equal(account.userId, `wincrm-local-billingRevoked-${runId}`);
+	const service = byApp.identity;
+	const require = createRequire(join(service.root, 'package.json'));
+	const prisma = new (require('@prisma/identity-client').PrismaClient)({
+		datasources: {
+			db: { url: databaseUrl(service, service.runtimeRole) }
+		},
+		log: []
+	});
+	try {
+		const changed = await prisma.workspaceMember.updateMany({
+			where: {
+				workspaceId: account.workspaceId,
+				userId: account.userId,
+				role: 'OWNER',
+				status: active ? 'INACTIVE' : 'ACTIVE',
+				workspace: { personalOwnerUserId: account.userId }
+			},
+			data: {
+				status: active ? 'ACTIVE' : 'INACTIVE',
+				version: { increment: 1 }
+			}
+		});
+		assert.equal(
+			changed.count,
+			1,
+			'Exact synthetic owner fixture must change once'
+		);
+	} finally {
+		await prisma.$disconnect();
+	}
 }
 
 async function seedWidgets(account) {
@@ -1788,41 +1930,6 @@ async function waitForHttp(label, url, status = 200) {
 	);
 }
 
-async function startFrontend(folder, port, env) {
-	const root = join(workspaceRoot, folder);
-	const mirror = join(stateDirectory, folder);
-	await mkdir(mirror);
-	// Next's route discovery does not follow a symlinked src/app tree.
-	const sourceHash = await copyFrontendSource(root, mirror);
-	frontendSnapshots[folder] = { mirror, sourceHash };
-	log(`${folder} source SHA-256 ${sourceHash}`);
-	for (const entry of ['node_modules']) {
-		await access(join(root, entry));
-		await symlink(join(root, entry), join(mirror, entry), 'dir');
-	}
-	const cli = join(root, 'node_modules/next/dist/bin/next');
-	start(
-		folder,
-		process.execPath,
-		[
-			cli,
-			'dev',
-			mirror,
-			'--hostname',
-			'127.0.0.1',
-			'--port',
-			String(port),
-			...(folder.endsWith('_crm') ? ['--webpack'] : [])
-		],
-		env,
-		mirror
-	);
-	await waitForHttp(
-		folder,
-		`http://127.0.0.1:${port}${folder.endsWith('_crm') ? '/inbox' : '/login'}`
-	);
-}
-
 async function smoke(accounts) {
 	const login = async account => {
 		const response = await fetch(`${publicApi}/auth/login`, {
@@ -1972,6 +2079,7 @@ async function smoke(accounts) {
 async function shutdown(exitCode = 0) {
 	if (stopping) return;
 	stopping = true;
+	await frontendProxy?.close();
 	for (const { child, exited } of children.values()) {
 		if (!exited && child.pid) {
 			try {
@@ -2006,6 +2114,9 @@ process.once('SIGINT', () => void shutdown());
 process.once('SIGTERM', () => void shutdown());
 
 try {
+	const billingHttpBroker = withBillingHttp
+		? billingHttpBrokerEnvironment()
+		: null;
 	const nativeWidgetBroker = withNativeWidgetHttp
 		? nativeWidgetHttpBrokerEnvironment()
 		: null;
@@ -2013,12 +2124,15 @@ try {
 	const ports = [
 		4100,
 		...serviceDefinitions.map(service => service.port),
-		...(args.has('--backend-only') ? [] : [3000, 3001])
+		...(args.has('--backend-only') ? [] : [3000, 3001, 3002, 3003, 3100])
 	];
 	for (const port of ports) await assertFreePort(port);
 	for (const service of serviceDefinitions) await prepareDatabase(service);
+	if (args.has('--verify-billing')) await verifyBilling();
 	if (args.has('--verify-domain')) await verifyDomain();
 	const accounts = await seedIdentity();
+	if (withBillingHttp) await seedBillingHttpContacts(accounts);
+	let billingHttpEvidence = null;
 	let widgetsFixture = withWidgets
 		? await seedWidgets(accounts.owner)
 		: null;
@@ -2096,6 +2210,25 @@ try {
 	);
 	await waitForHttp('api-gateway', 'http://127.0.0.1:4100/health/ready');
 	await smoke(accounts);
+	if (withBillingHttp) {
+		const { verifyWincrmCommerceHttpRabbit } =
+			await import('../../../billing/test/integration/wincrm-commerce-http-rabbit.integration.mjs');
+		const billing = byApp.billing;
+		billingHttpEvidence = await verifyWincrmCommerceHttpRabbit({
+			servicesRoot,
+			runId,
+			apiUrl: publicApi,
+			account: accounts.billing,
+			secondaryAccount: accounts.billingRevoked,
+			billingDatabaseUrl: databaseUrl(billing, billing.runtimeRole),
+			billingEnvironment: ownedEnvironment('billing', common),
+			broker: billingHttpBroker,
+			changeSyntheticOwner: active =>
+				changeBillingFixtureOwner(accounts.billingRevoked, active),
+			registerSecret: value => secrets.add(value),
+			log
+		});
+	}
 	if (withWidgets)
 		widgetsFixture = await verifyWidgetsControlHttp(
 			accounts.owner,
@@ -2147,7 +2280,20 @@ try {
 		await seedTeamFixtures(accounts, accounts.owner.workspaceId);
 	}
 	if (!args.has('--backend-only')) {
+		const frontend = await import('./local-frontends.mjs');
+		const snapshot = await frontend.prepareFrontendMirror({
+			workspaceRoot,
+			explicitSource: process.env.WINCRM_FRONTENDS_SOURCE_ROOT,
+			stateDirectory
+		});
+		frontendSnapshots.monorepo = snapshot;
+		await frontend.syncFrontendPublic(snapshot);
+		log(`Frontend monorepo source SHA-256 ${snapshot.sourceHash}`);
 		const frontendEnv = {
+			APP_REVISION: frontend.FRONTEND_REVISION,
+			NEXT_PUBLIC_WINCRM_BILLING_ENABLED: withBillingHttp
+				? 'true'
+				: 'false',
 			NEXT_PUBLIC_MODE: 'development',
 			NEXT_PUBLIC_API_URL: publicApi,
 			NEXT_PUBLIC_PRODUCTION_HOST: '',
@@ -2162,8 +2308,23 @@ try {
 			NEXT_PUBLIC_MAIN_APP_URL: 'http://localhost:3000',
 			NEXT_PUBLIC_APP_URL: 'http://localhost:3001'
 		};
-		await startFrontend('winwidget.ru_client', 3000, frontendEnv);
-		await startFrontend('winwidget.ru_client_crm', 3001, frontendEnv);
+		for (const spec of frontend.frontendProcesses(snapshot)) {
+			start(
+				spec.label,
+				process.execPath,
+				spec.args,
+				frontendEnv,
+				spec.cwd
+			);
+			await waitForHttp(
+				spec.label,
+				`http://127.0.0.1:${spec.port}/__frontend/health`
+			);
+			await frontend.checkFrontendReadiness(spec.port, spec.app);
+		}
+		frontendProxy = await frontend.startFrontendProxy();
+		await waitForHttp('frontend-widgets', 'http://127.0.0.1:3000/login');
+		await waitForHttp('frontend-crm', 'http://127.0.0.1:3001/inbox');
 	}
 	await writeFile(
 		fixturePath,
@@ -2181,6 +2342,7 @@ try {
 				activatedOwner: args.has('--activate-owner'),
 				acceptanceHttpVerified: args.has('--verify-acceptance-http'),
 				widgets: widgetsFixture,
+				billingHttp: billingHttpEvidence,
 				rabbitTransportVerified: false,
 				databases: serviceDefinitions.map(
 					({ app, database, migrationRole, runtimeRole }) => ({

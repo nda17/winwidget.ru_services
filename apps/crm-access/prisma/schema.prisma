@@ -223,6 +223,47 @@ enum CrmMemberRole {
   @@schema("crm_access")
 }
 
+// Service-owned payment coordination; an absent Access profile is valid before
+// first PAID activation. No foreign Identity/Billing tables are referenced.
+model CrmBillingCapacity {
+  workspaceId               String   @id @map("workspace_id") @db.Uuid
+  revision                  Int      @default(0)
+  admissionCeiling           Int?     @map("admission_ceiling")
+  pendingOperationId        String?  @map("pending_operation_id") @db.Uuid
+  pendingTargetSeats        Int?     @map("pending_target_seats")
+  latestCommittedOperationId String?  @map("latest_committed_operation_id") @db.Uuid
+  createdAt                 DateTime @default(now()) @map("created_at")
+  updatedAt                 DateTime @updatedAt @map("updated_at")
+
+  @@map("crm_billing_capacity")
+  @@schema("crm_access")
+}
+
+model CrmBillingOperation {
+  commandId      String   @id @map("command_id") @db.Uuid
+  workspaceId    String   @map("workspace_id") @db.Uuid
+  actorSubject   String   @map("actor_subject") @db.VarChar(256)
+  commandType    String   @map("command_type") @db.VarChar(64)
+  requestHash    String?  @map("request_hash") @db.Char(64)
+  request        Json?
+  fenceRevision  Int?     @map("fence_revision")
+  targetSeats    Int?     @map("target_seats")
+  state          String   @default("PENDING") @db.VarChar(16)
+  releaseFence   Boolean  @default(false) @map("release_fence")
+  billingVersion String?  @map("billing_version") @db.VarChar(20)
+  holdUntil      DateTime? @map("hold_until")
+  nextCheckAt    DateTime @default(now()) @map("next_check_at")
+  proof          Json?
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  @@unique([commandId, workspaceId])
+  @@index([workspaceId, state, createdAt])
+  @@index([releaseFence, nextCheckAt, commandId])
+  @@map("crm_billing_operations")
+  @@schema("crm_access")
+}
+
 enum CrmAccessLifecycle {
   ONBOARDING
   ACTIVE

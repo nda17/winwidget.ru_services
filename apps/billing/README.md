@@ -180,6 +180,115 @@ NOCREATEROLE NOREPLICATION NOBYPASSRLS`, без CREATE на БД. Grant allowlis
 другой роли; runtime не получает USAGE/SELECT. Скрипт проверяет отказ
 доступа к sentinel. Production ACL этим тестом не изменяются.
 
+### Отдельные платные периоды WinCRM
+
+WinCRM не использует строки Widgets `payments`, `subscriptions` и
+`auto_renewals`. Billing владеет отдельными `crm_commerce_accounts`,
+`crm_commerce_commands`, `crm_orders`, `crm_paid_periods`,
+`crm_auto_renewals`, `crm_auto_renewal_consents`, `crm_provider_operations`,
+`crm_provider_deliveries` и `crm_payment_receipts`.
+
+Trial запускается только явной командой: 5 дней, по умолчанию 2 места с
+владельцем. Оплата во время Trial создаёт один `SCHEDULED` период после
+его окончания. Уже начатый Trial и его provisioning provenance не
+переписываются. Начало PAID определяется свежим чтением по серверному времени,
+а scheduler отдельно фиксирует идемпотентное уведомление о начале периода.
+После оплаченного периода — 3 дня GRACE, затем READ_ONLY; данные не удаляются.
+
+Первоначальный checkout допускается без действующего PAID/SCHEDULED периода
+и без незавершённого PENDING/UNKNOWN заказа. Произвольная цепочка будущих
+периодов не поддерживается. Цены заказа и периода — immutable snapshots,
+не текущая административная политика. MONTHLY/YEARLY прибавляется календарно
+с ограничением дня концом месяца. Изменение числа мест активного PAID периода
+не создаёт денежный баланс или возврат: оставшееся время пересчитывается как
+`floor(remainingMs * oldPeriodPrice / newPeriodPrice)` целочисленно через
+BigInt, сохраняя cycle и snapshot цен. CAS Billing и durable capacity fences
+в CRM Access защищают изменение количества мест и admission сотрудников.
+
+Все пользовательские финансовые действия проходят через CRM Access BFF с
+актуальной проверкой Identity OWNER, независимо от CRM business-write.
+Закрытый Billing prefix — `/internal/v1/crm-access/billing/commerce`;
+вызовы POST с existing парой `BILLING_CRM_ACCESS_TOKEN`,
+`x-winwidget-service: crm-access` и `x-winwidget-internal-token`:
+
+| Суффикс                                     | Назначение                                                       |
+| ------------------------------------------- | ---------------------------------------------------------------- |
+| `summary`, `quote`, `orders/get`, `history` | Состояние, серверная цена, заказ и серверная пагинация           |
+| `checkout`, `seats`                         | Заказ либо пересчёт времени с capacity fence                     |
+| `renewal/disable`, `renewal/confirm-price`  | Отказ от автопродления и явное подтверждение новой цены          |
+| `orders/verify`                             | Явная постановка GET-проверки только известного provider ID      |
+| `operations/get`, `operations/close`        | Durable proof либо CANCELLED tombstone перед освобождением fence |
+
+Точные version-1 DTO находятся в `src/domain/wincrm-commerce.contract.ts`.
+Каждая команда имеет UUID `commandId`, совпадающий с `Idempotency-Key`,
+actor/request binding и ожидаемую версию. Отсутствие receipt не считается
+откатом. SCHEDULED checkout удерживает fence до начала PAID. Возврат из
+ЮKassa сам по себе не подтверждает оплату; результат фиксирует Billing после
+проверенного ответа провайдера, синхронно с периодом и Outbox.
+
+`BILLING_WINCRM_PAYMENTS_ENABLED=false` по умолчанию запрещает новые продажи
+и CREATE dispatch. При включении worker требует отдельные
+`BILLING_CRM_ACCESS_COMMERCE_BASE_URL`,
+`BILLING_CRM_ACCESS_COMMERCE_TOKEN` для свежей reverse-авторизации capacity
+перед списанием; HTTPS origin или loopback HTTP, без redirects/TLS bypass.
+`BILLING_WINCRM_FRONTEND_ORIGIN` по умолчанию `https://crm.winwidget.ru`;
+return path фиксирован `/billing/return`, provider confirmation URL проходит
+закрытую проверку разрешённых HTTPS-страниц ЮKassa/ЮMoney.
+
+Согласие на автопродление не проставляется автоматически. Сохранённый способ
+оплаты зашифрован `PAYMENT_METHOD_ENCRYPTION_KEY`, raw method ID не сохраняется
+в JSON, Outbox или браузере. Повторный CREATE использует исходный key,
+return URL и зашифрованный method snapshot. `firstDispatchAt` — durable граница
+возможного внешнего списания: после неё отказ/сбой нельзя выдать за неотправленный
+платёж. После 23 часов новый POST запрещён. Отключение renewal не отменяет
+уже отправленную операцию и не реактивируется от позднего успеха. Отказ банка
+допускает две попытки примерно через 24/72 часа с часовым окном;
+изменение цены требует нового отдельного подтверждения согласия.
+
+Провайдер обслуживается отдельным push consumer
+`winwidget.billing.wincrm-provider.v1` через scoped
+`BILLING_WINCRM_PROVIDER_RABBITMQ_URL`. Событие
+`billing.wincrm.provider-operation.requested.v1` публикуется в
+`winwidget.events`; payload содержит только schema/event/operation IDs.
+DLQ: exchange `winwidget.billing.wincrm-provider.dead-letter`, queue
+`winwidget.billing.wincrm-provider.v1.dead-letter`. Default
+`BILLING_WINCRM_PROVIDER_ASSERT_TOPOLOGY=false`; topology создаётся отдельно.
+Retry использует PostgreSQL Outbox `availableAt`, без TTL/DLX-таймеров.
+Claim/lease/CAS предшествует внешнему вызову, ack — после commit;
+publisher использует Buffer JSON, confirm и mandatory return.
+
+После отключения продаж сохраняйте собственный broker URL и workers до
+завершения durable обязательств: VERIFY, фискальная синхронизация и начало
+уже оплаченного SCHEDULED периода продолжаются. Пустой/pending список чеков
+не считается завершённой фискализацией; отменённый чек даёт отдельную ошибку
+и DLQ, не отменяя оплаченный период. Существующий общий webhook сначала
+проверяет DB-owned CRM binding, затем legacy Widgets; metadata webhook не
+является доказательством успешной оплаты.
+
+Независимый ручной retry —
+`POST /api/v1/payments/admin/crm-provider-operations/:operationId/retry`,
+только DEV после Identity introspection. Body: `schemaVersion:1`, UUID
+`commandId`, `expectedVersion`; UUID совпадает с `Idempotency-Key`.
+Команда атомарно создаёт actor-bound receipt, новый VERIFY/SYNC_RECEIPT,
+Outbox и событие Журнала `BILLING_DELIVERY_RETRY`. Новый CREATE невозможен;
+UNKNOWN без provider evidence требует отдельной контролируемой сверки.
+
+`pnpm run test:integration:wincrm-commerce` — PostgreSQL 18 gate с отдельной
+loopback БД `winwidget_billing_*_test`/`*_ci`, ограниченной runtime-ролью и
+`BILLING_WINCRM_COMMERCE_TEST_ALLOW_MUTATION=true`,
+`BILLING_WINCRM_COMMERCE_TEST_DATABASE_URL`,
+`BILLING_WINCRM_COMMERCE_TEST_RUNTIME_ROLE`. Предварительно применяются все
+migrations, генерируется клиент и собирается Billing. CI использует отдельную
+чистую БД, не результаты изменяющего policy-test.
+Новые 8 изменяемых CRM commerce-таблиц получают SELECT/INSERT/UPDATE;
+`crm_auto_renewal_consents` — только SELECT/INSERT. DELETE/TRUNCATE и прямой
+EXECUTE `protect_wincrm_commerce_evidence()` запрещены. Для синтетического
+seed тесту отдельно разрешён INSERT `identity_contact_projections`;
+это не расширяет production API grants. Тест проверяет транзакции, concurrency,
+неизменяемость, ACL, Trial/PAID и seat conversion с синтетическими ответами
+провайдера. Он не доказывает реальные платежи, RabbitMQ или договорные условия
+провайдера. Production rollout и внешние платёжные проверки остаются отдельными.
+
 ### Окружение и миграции
 
 Скопируйте `.env.example` в `.env.production` внутри каталога Billing на VPS.

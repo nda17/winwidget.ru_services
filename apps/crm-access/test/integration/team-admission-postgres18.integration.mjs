@@ -103,7 +103,8 @@ const admission = new CrmTeamAdmissionService(
 	billing,
 	identity,
 	invitations,
-	teams
+	teams,
+	{ syncPending: async () => undefined }
 );
 const command = data => ({
 	schemaVersion: 1,

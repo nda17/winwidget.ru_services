@@ -8,6 +8,9 @@ import { PaymentMethodCryptoService } from '../provider/payment-method-crypto.se
 import { YooKassaService } from '../provider/yookassa.service';
 import { BillingRuntimeService } from '../runtime/billing-runtime.service';
 import { BillingSchedulerService } from '../scheduler/billing-scheduler.service';
+import { WincrmProviderWorkerService } from '../provider/wincrm-provider-worker.service';
+import { WincrmCommerceSchedulerService } from '../scheduler/wincrm-commerce-scheduler.service';
+import { wincrmProviderMessagingEnabled } from '../provider/wincrm-provider.config';
 
 @Injectable()
 export class BillingHealthService {
@@ -20,7 +23,9 @@ export class BillingHealthService {
 		private readonly yookassa: YooKassaService,
 		private readonly paymentMethodCrypto: PaymentMethodCryptoService,
 		private readonly publisher: BillingOutboxPublisherService,
-		private readonly scheduler: BillingSchedulerService
+		private readonly scheduler: BillingSchedulerService,
+		private readonly wincrmWorker: WincrmProviderWorkerService,
+		private readonly wincrmScheduler: WincrmCommerceSchedulerService
 	) {}
 
 	liveness() {
@@ -54,6 +59,25 @@ export class BillingHealthService {
 			) {
 				throw new Error();
 			}
+			// Entitlement reads must continue to resolve already-paid periods even
+			// while new commerce sales are disabled.
+			await this.prisma.crmPaidPeriod.findFirst({
+				select: { id: true, startsAt: true, activationNotifiedAt: true }
+			});
+			if (wincrmProviderMessagingEnabled()) {
+				await Promise.all([
+					this.prisma.crmCommerceAccount.findFirst({
+						select: { workspaceId: true, version: true }
+					}),
+					this.prisma.crmProviderOperation.findFirst({
+						select: {
+							id: true,
+							pendingEventId: true,
+							firstDispatchAt: true
+						}
+					})
+				]);
+			}
 		} catch {
 			throw new ServiceUnavailableException(
 				'Billing database is not ready'
@@ -79,6 +103,15 @@ export class BillingHealthService {
 		if (this.runtime.schedulerEnabled && !this.scheduler.isReady()) {
 			throw new ServiceUnavailableException(
 				'Billing scheduler is not ready'
+			);
+		}
+		if (
+			wincrmProviderMessagingEnabled() &&
+			((this.runtime.workerEnabled && !this.wincrmWorker.isReady()) ||
+				(this.runtime.schedulerEnabled && !this.wincrmScheduler.isReady()))
+		) {
+			throw new ServiceUnavailableException(
+				'WinCRM commerce workers are not ready'
 			);
 		}
 		const paymentMethodEncryptionKeyConfigured =

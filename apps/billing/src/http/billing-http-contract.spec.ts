@@ -514,11 +514,18 @@ describe('Billing public HTTP compatibility contract', () => {
 		}
 	);
 
-	it('keeps the webhook public and accepts an absent body', () => {
+	it('keeps the webhook public and accepts an absent body', async () => {
 		const webhook = jest.fn().mockReturnValue({ accepted: true });
-		const controller = new PaymentController({ webhook } as never);
+		const controller = new PaymentController(
+			{ webhook } as never,
+			{
+				enqueueProviderVerification: jest.fn().mockResolvedValue(false)
+			} as never
+		);
 
-		expect(controller.webhook(undefined)).toEqual({ accepted: true });
+		expect(await controller.webhook(undefined)).toEqual({
+			accepted: true
+		});
 		expect(webhook).toHaveBeenCalledWith(undefined);
 		const handler = handlerFor(
 			PUBLIC_ROUTES.find(route => route.handler === 'webhook')!
@@ -529,9 +536,57 @@ describe('Billing public HTTP compatibility contract', () => {
 		expect(pipesFor(handler)).toEqual([]);
 	});
 
+	it('routes a known CRM payment to durable verification without invoking Widgets', async () => {
+		const webhook = jest.fn();
+		const enqueueProviderVerification = jest.fn().mockResolvedValue(true);
+		const controller = new PaymentController(
+			{ webhook } as never,
+			{ enqueueProviderVerification } as never
+		);
+		const body = {
+			event: 'payment.succeeded',
+			object: { id: 'crm-provider-payment-ci' }
+		};
+		await expect(controller.webhook(body)).resolves.toEqual({ ok: true });
+		expect(enqueueProviderVerification).toHaveBeenCalledWith(body);
+		expect(webhook).not.toHaveBeenCalled();
+	});
+	it('does not acknowledge or fall back to Widgets if durable CRM routing fails', async () => {
+		const webhook = jest.fn();
+		const enqueueProviderVerification = jest
+			.fn()
+			.mockRejectedValue(new Error('DB unavailable'));
+		const controller = new PaymentController(
+			{ webhook } as never,
+			{ enqueueProviderVerification } as never
+		);
+		await expect(
+			controller.webhook({ object: { id: 'crm-provider-payment-ci' } })
+		).rejects.toThrow('DB unavailable');
+		expect(webhook).not.toHaveBeenCalled();
+	});
+	it('preserves the original Widgets response and body when CRM routing does not match', async () => {
+		const response = { accepted: true, status: 'unchanged' };
+		const webhook = jest.fn().mockResolvedValue(response);
+		const enqueueProviderVerification = jest.fn().mockResolvedValue(false);
+		const controller = new PaymentController(
+			{ webhook } as never,
+			{ enqueueProviderVerification } as never
+		);
+		const body = {
+			event: 'payment.succeeded',
+			object: { id: 'widgets-provider-payment-ci' }
+		};
+		await expect(controller.webhook(body)).resolves.toBe(response);
+		expect(webhook).toHaveBeenCalledWith(body);
+	});
+
 	it('keeps verify authenticated while accepting an absent body', async () => {
 		const verify = jest.fn().mockReturnValue({ status: 'pending' });
-		const controller = new PaymentController({ verify } as never);
+		const controller = new PaymentController(
+			{ verify } as never,
+			{} as never
+		);
 		const route = PUBLIC_ROUTES.find(
 			item =>
 				item.controller === PaymentController && item.handler === 'verify'
@@ -560,11 +615,14 @@ describe('Billing public HTTP compatibility contract', () => {
 		const create = jest.fn();
 		const disableUserAutoRenewal = jest.fn();
 		const confirmPrice = jest.fn();
-		const controller = new PaymentController({
-			create,
-			disableUserAutoRenewal,
-			confirmPrice
-		} as never);
+		const controller = new PaymentController(
+			{
+				create,
+				disableUserAutoRenewal,
+				confirmPrice
+			} as never,
+			{} as never
+		);
 		const actor = { subject: 'user-1', roles: ['USER'] } as never;
 		const request = {
 			ip: '',

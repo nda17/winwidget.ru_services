@@ -19,11 +19,17 @@ describe('BillingHealthService provider configuration', () => {
 		'YOOKASSA_PRODUCTION_SHOP_ID',
 		'YOOKASSA_PRODUCTION_SECRET_KEY',
 		'PAYMENT_METHOD_ENCRYPTION_KEY',
-		'APP_REVISION'
+		'APP_REVISION',
+		'BILLING_WINCRM_PAYMENTS_ENABLED',
+		'BILLING_WINCRM_PROVIDER_RABBITMQ_URL'
 	] as const;
 	const originalEnvironment = new Map(
 		environmentKeys.map(key => [key, process.env[key]])
 	);
+	beforeEach(() => {
+		delete process.env.BILLING_WINCRM_PAYMENTS_ENABLED;
+		delete process.env.BILLING_WINCRM_PROVIDER_RABBITMQ_URL;
+	});
 
 	afterEach(() => {
 		for (const key of environmentKeys) {
@@ -50,6 +56,13 @@ describe('BillingHealthService provider configuration', () => {
 		const crmCommercialPolicyFindFirst = jest
 			.fn()
 			.mockResolvedValue({ version: 1 });
+		const crmCommerceAccountFindFirst = jest.fn().mockResolvedValue(null);
+		const crmPaidPeriodFindFirst = jest.fn().mockResolvedValue(null);
+		const crmProviderOperationFindFirst = jest
+			.fn()
+			.mockResolvedValue(null);
+		const wincrmWorkerReady = jest.fn().mockReturnValue(true);
+		const wincrmSchedulerReady = jest.fn().mockReturnValue(true);
 		const service = new BillingHealthService(
 			{
 				$queryRaw: jest.fn().mockResolvedValue([{ '?column?': 1 }]),
@@ -57,6 +70,9 @@ describe('BillingHealthService provider configuration', () => {
 					findFirst: crmEntitlementFindFirst
 				},
 				crmCommercialPolicy: { findFirst: crmCommercialPolicyFindFirst },
+				crmCommerceAccount: { findFirst: crmCommerceAccountFindFirst },
+				crmPaidPeriod: { findFirst: crmPaidPeriodFindFirst },
+				crmProviderOperation: { findFirst: crmProviderOperationFindFirst },
 				serviceIdentity: {
 					findUnique: jest.fn().mockResolvedValue({
 						serviceName: 'billing-service',
@@ -82,15 +98,78 @@ describe('BillingHealthService provider configuration', () => {
 			} as unknown as BillingOutboxPublisherService,
 			{
 				isReady: jest.fn().mockReturnValue(true)
-			} as unknown as BillingSchedulerService
+			} as unknown as BillingSchedulerService,
+			{ isReady: wincrmWorkerReady } as never,
+			{ isReady: wincrmSchedulerReady } as never
 		);
 		return {
 			crmEntitlementFindFirst,
 			crmCommercialPolicyFindFirst,
+			crmCommerceAccountFindFirst,
+			crmPaidPeriodFindFirst,
+			crmProviderOperationFindFirst,
+			wincrmWorkerReady,
+			wincrmSchedulerReady,
 			service,
 			yookassa
 		};
 	};
+	it('does not require new-sales workers before CRM commerce rollout', async () => {
+		const test = createService('scheduler');
+		test.crmCommerceAccountFindFirst.mockRejectedValue(
+			new Error('migration not deployed')
+		);
+		test.wincrmSchedulerReady.mockReturnValue(false);
+		await expect(test.service.readiness()).resolves.toMatchObject({
+			status: 'ready'
+		});
+		expect(test.crmCommerceAccountFindFirst).not.toHaveBeenCalled();
+		expect(test.wincrmSchedulerReady).not.toHaveBeenCalled();
+	});
+	it('always requires the paid-period schema used by entitlement reads', async () => {
+		const test = createService('scheduler');
+		test.crmPaidPeriodFindFirst.mockRejectedValue(
+			new Error('migration missing')
+		);
+		await expect(test.service.readiness()).rejects.toThrow(
+			'Billing database is not ready'
+		);
+	});
+	it('requires commerce schema when CRM payments are enabled', async () => {
+		process.env.BILLING_WINCRM_PAYMENTS_ENABLED = 'true';
+		const test = createService('scheduler');
+		test.crmProviderOperationFindFirst.mockRejectedValue(
+			new Error('migration missing')
+		);
+		await expect(test.service.readiness()).rejects.toThrow(
+			'Billing database is not ready'
+		);
+	});
+	it('keeps checking reconciliation schema with new sales disabled and its broker configured', async () => {
+		process.env.BILLING_WINCRM_PAYMENTS_ENABLED = 'false';
+		process.env.BILLING_WINCRM_PROVIDER_RABBITMQ_URL =
+			'amqp://synthetic:synthetic@127.0.0.1:5672/test';
+		const test = createService('scheduler');
+		await expect(test.service.readiness()).resolves.toMatchObject({
+			status: 'ready'
+		});
+		expect(test.crmCommerceAccountFindFirst).toHaveBeenCalledTimes(1);
+		expect(test.crmProviderOperationFindFirst).toHaveBeenCalledTimes(1);
+	});
+	it.each(['worker', 'scheduler'] as const)(
+		'fails readiness if the enabled CRM %s is not ready',
+		async role => {
+			process.env.BILLING_WINCRM_PAYMENTS_ENABLED = 'true';
+			const test = createService(role);
+			(role === 'worker'
+				? test.wincrmWorkerReady
+				: test.wincrmSchedulerReady
+			).mockReturnValue(false);
+			await expect(test.service.readiness()).rejects.toThrow(
+				'WinCRM commerce workers are not ready'
+			);
+		}
+	);
 
 	it('publishes only a boolean when production YooKassa credentials are configured', async () => {
 		process.env.MODE = 'production';

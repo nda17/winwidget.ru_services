@@ -55,6 +55,50 @@ async function bootstrap(): Promise<void> {
 				method: RequestMethod.POST
 			},
 			{
+				path: 'internal/v1/crm-access/billing/commerce/summary',
+				method: RequestMethod.POST
+			},
+			{
+				path: 'internal/v1/crm-access/billing/commerce/quote',
+				method: RequestMethod.POST
+			},
+			{
+				path: 'internal/v1/crm-access/billing/commerce/checkout',
+				method: RequestMethod.POST
+			},
+			{
+				path: 'internal/v1/crm-access/billing/commerce/seats',
+				method: RequestMethod.POST
+			},
+			{
+				path: 'internal/v1/crm-access/billing/commerce/renewal/disable',
+				method: RequestMethod.POST
+			},
+			{
+				path: 'internal/v1/crm-access/billing/commerce/renewal/confirm-price',
+				method: RequestMethod.POST
+			},
+			{
+				path: 'internal/v1/crm-access/billing/commerce/orders/get',
+				method: RequestMethod.POST
+			},
+			{
+				path: 'internal/v1/crm-access/billing/commerce/orders/verify',
+				method: RequestMethod.POST
+			},
+			{
+				path: 'internal/v1/crm-access/billing/commerce/history',
+				method: RequestMethod.POST
+			},
+			{
+				path: 'internal/v1/crm-access/billing/commerce/operations/get',
+				method: RequestMethod.POST
+			},
+			{
+				path: 'internal/v1/crm-access/billing/commerce/operations/close',
+				method: RequestMethod.POST
+			},
+			{
 				path: 'internal/v1/billing/widgets/wincrm-eligibility',
 				method: RequestMethod.POST
 			},

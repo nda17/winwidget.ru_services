@@ -46,6 +46,7 @@ export class ProviderRequestError extends Error {
 }
 
 interface CreateProviderPaymentInput {
+	productCode?: 'WINCRM';
 	paymentId: string;
 	amount: string;
 	currency: string;
@@ -95,11 +96,16 @@ export class YooKassaService {
 				false
 			);
 		}
+		const productName =
+			input.productCode === 'WINCRM' ? 'WinCRM' : 'WinWidget';
 		const body: Record<string, unknown> = {
 			amount: { value: input.amount, currency: input.currency },
 			capture: true,
-			description: `WinWidget ${input.plan} ${input.billingPeriod}`,
+			description: `${productName} ${input.plan} ${input.billingPeriod}`,
 			metadata: {
+				...(input.productCode === 'WINCRM'
+					? { productCode: 'WINCRM' }
+					: {}),
 				paymentId: input.paymentId,
 				kind: input.kind,
 				plan: input.plan,
@@ -109,7 +115,7 @@ export class YooKassaService {
 				customer,
 				items: [
 					{
-						description: `Подписка WinWidget ${input.plan}`,
+						description: `Подписка ${productName} ${input.plan}`,
 						quantity: '1.00',
 						amount: { value: input.amount, currency: input.currency },
 						vat_code: YOOKASSA_RECEIPT_CONTRACT.item.vatCode,
@@ -131,22 +137,28 @@ export class YooKassaService {
 		}
 		return this.request('/payments', {
 			method: 'POST',
+			rejectRedirects: input.productCode === 'WINCRM',
 			body: JSON.stringify(body),
 			headers: { 'Idempotence-Key': idempotencyKey }
 		});
 	}
 
-	getPayment(providerPaymentId: string): Promise<Record<string, unknown>> {
+	getPayment(
+		providerPaymentId: string,
+		productCode?: 'WINCRM'
+	): Promise<Record<string, unknown>> {
 		return this.request(
 			`/payments/${encodeURIComponent(providerPaymentId)}`,
 			{
-				method: 'GET'
+				method: 'GET',
+				rejectRedirects: productCode === 'WINCRM'
 			}
 		);
 	}
 
 	async getReceipts(
-		providerPaymentId: string
+		providerPaymentId: string,
+		productCode?: 'WINCRM'
 	): Promise<Record<string, unknown>> {
 		const items: unknown[] = [];
 		const seenCursors = new Set<string>();
@@ -161,7 +173,8 @@ export class YooKassaService {
 			const response = await this.request(
 				`/receipts?${query.toString()}`,
 				{
-					method: 'GET'
+					method: 'GET',
+					rejectRedirects: productCode === 'WINCRM'
 				}
 			);
 			if (!Array.isArray(response.items)) {
@@ -210,6 +223,7 @@ export class YooKassaService {
 		path: string,
 		options: {
 			method: 'GET' | 'POST';
+			rejectRedirects?: boolean;
 			body?: string;
 			headers?: Record<string, string>;
 		}
@@ -219,6 +233,7 @@ export class YooKassaService {
 		try {
 			response = await fetch(`${BASE_URL}${path}`, {
 				method: options.method,
+				...(options.rejectRedirects ? { redirect: 'error' as const } : {}),
 				headers: {
 					authorization: `Basic ${Buffer.from(`${credentials.shopId}:${credentials.secret}`).toString('base64')}`,
 					accept: 'application/json',

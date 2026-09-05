@@ -24,6 +24,15 @@ import { CrmTeamRabbitService } from './team/team-rabbit.service';
 import { CrmTeamOutboxService } from './team/team-outbox.service';
 import { CrmTeamWorkerService } from './team/team-worker.service';
 import { parseCrmAccessRole } from './runtime/crm-access-runtime.service';
+import { CrmBillingController } from './billing/billing.controller';
+import {
+	BillingOperationController,
+	BillingOperationGuard
+} from './billing/billing-operation.controller';
+import { CrmBillingService } from './billing/billing.service';
+import { CrmBillingCapacityService } from './billing/billing-capacity.service';
+import { BillingCommerceClient } from './billing/billing-commerce.client';
+import { CrmBillingReconciliationService } from './billing/billing-reconciliation.service';
 
 const role = parseCrmAccessRole(process.env.CRM_ACCESS_PROCESS_ROLE);
 
@@ -40,7 +49,9 @@ const role = parseCrmAccessRole(process.env.CRM_ACCESS_PROCESS_ROLE);
 					CrmAccessController,
 					CrmPermissionsController,
 					CrmAuthorizationController,
-					CrmTeamController
+					CrmTeamController,
+					CrmBillingController,
+					BillingOperationController
 				]
 			: [])
 	],
@@ -57,7 +68,12 @@ const role = parseCrmAccessRole(process.env.CRM_ACCESS_PROCESS_ROLE);
 		CrmTeamAdmissionService,
 		CrmTeamRabbitService,
 		CrmTeamOutboxService,
-		CrmTeamWorkerService
+		CrmTeamWorkerService,
+		CrmBillingService,
+		CrmBillingCapacityService,
+		BillingCommerceClient,
+		BillingOperationGuard,
+		CrmBillingReconciliationService
 	]
 })
 export class CrmAccessModule implements OnApplicationShutdown {

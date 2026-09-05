@@ -60,6 +60,8 @@ export class CrmAccessHealthService {
 			});
 			await this.prisma
 				.$queryRaw`SELECT t.version, i.identity_version, a.position, r.request_hash, h.command_id, o.lease_token, d.version FROM crm_access.crm_teams t FULL JOIN crm_access.crm_invitation_intents i ON false FULL JOIN crm_access.crm_admissions a ON false FULL JOIN crm_access.crm_team_command_receipts r ON false FULL JOIN crm_access.crm_team_audit h ON false FULL JOIN crm_access.crm_team_outbox o ON false FULL JOIN crm_access.crm_team_deliveries d ON false LIMIT 0`;
+			await this.prisma
+				.$queryRaw`SELECT c.revision, c.admission_ceiling, c.pending_operation_id, c.pending_target_seats, c.latest_committed_operation_id, o.state, o.request_hash, o.next_check_at, o.release_fence FROM crm_access.crm_billing_capacity c FULL JOIN crm_access.crm_billing_operations o ON false LIMIT 0`;
 			if (!this.rabbit.isReady() || !this.outbox.isReady())
 				throw new Error('CRM team runtime is not ready');
 			return {

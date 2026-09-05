@@ -17,6 +17,10 @@ import {
 import { CrmAccessPrismaService } from '../prisma/crm-access-prisma.service';
 import { CrmTeamService } from './team.service';
 import {
+	CrmBillingCapacityService,
+	effectiveAdmissionCeiling
+} from '../billing/billing-capacity.service';
+import {
 	auditTeam,
 	emitTeamEvent,
 	serializable,
@@ -45,7 +49,8 @@ export class CrmTeamAdmissionService {
 		private readonly billing: BillingEntitlementClient,
 		private readonly identity: IdentityAuthContextClient,
 		private readonly invitations: IdentityInvitationClient,
-		private readonly teams: CrmTeamService
+		private readonly teams: CrmTeamService,
+		private readonly capacity: CrmBillingCapacityService
 	) {}
 
 	async provision(workspaceId: string, invitationId: string) {
@@ -208,6 +213,7 @@ export class CrmTeamAdmissionService {
 	}
 
 	async admitNext(workspaceId: string) {
+		await this.capacity.syncPending(workspaceId);
 		const candidate = await this.prisma.crmAdmission.findFirst({
 			where: { workspaceId, status: 'WAITING' },
 			orderBy: { position: 'asc' }
@@ -378,7 +384,16 @@ export class CrmTeamAdmissionService {
 			const enabled = await tx.crmWorkspaceMember.count({
 				where: { workspaceId, disabledAt: null }
 			});
-			if (1 + enabled >= Number(seatLimit)) return;
+			// This durable ceiling survives operation completion: an admission may
+			// have fetched an older Billing response before a concurrent decrease.
+			const capacity = await tx.crmBillingCapacity.findUnique({
+				where: { workspaceId }
+			});
+			const admissionLimit = effectiveAdmissionCeiling(
+				Number(seatLimit),
+				capacity
+			);
+			if (1 + enabled >= admissionLimit) return;
 			const activated = member
 				? await tx.crmWorkspaceMember.update({
 						where: { id: member.id },
@@ -418,6 +433,7 @@ export class CrmTeamAdmissionService {
 				{
 					usedSeats: 2 + enabled,
 					seatLimit,
+					admissionLimit,
 					entitlementId: entitlement.id,
 					policyVersion: entitlement.policyVersion,
 					role,

@@ -154,6 +154,111 @@ describe('YooKassaService safe readiness', () => {
 		});
 		expect(body.save_payment_method).toBe(true);
 		expect(body).not.toHaveProperty('payment_method_id');
+		expect(body.description).toBe('WinWidget EASY MONTHLY');
+		expect(options).not.toHaveProperty('redirect');
+		expect(body.metadata).toEqual({
+			paymentId: 'payment-1',
+			kind: 'ONE_TIME',
+			plan: 'EASY',
+			billingPeriod: 'MONTHLY'
+		});
+	});
+
+	it.each(['ONE_TIME', 'RECURRING'] as const)(
+		'isolates the WinCRM %s request without changing Widgets metadata',
+		async kind => {
+			process.env.MODE = 'development';
+			process.env.YOOKASSA_SHOP_ID = 'test-shop-id';
+			process.env.YOOKASSA_SECRET_KEY = 'test-secret';
+			const fetchMock = jest.fn().mockResolvedValue({
+				ok: true,
+				status: 200,
+				json: jest.fn().mockResolvedValue({
+					id: 'crm-provider-payment',
+					status: 'pending'
+				})
+			});
+			global.fetch = fetchMock as unknown as typeof fetch;
+			await new YooKassaService().createPayment(
+				{
+					productCode: 'WINCRM',
+					paymentId: 'crm-payment-1',
+					amount: '1280.00',
+					currency: 'RUB',
+					plan: 'PAID',
+					billingPeriod: 'MONTHLY',
+					autoRenew: true,
+					customerEmail: 'crm-payer@example.test',
+					returnUrl: 'https://crm.winwidget.ru/settings',
+					...(kind === 'RECURRING'
+						? { paymentMethodId: 'crm-saved-method' }
+						: {}),
+					kind
+				},
+				'wincrm-provider-command-1'
+			);
+			const [, options] = fetchMock.mock.calls[0] as [
+				string,
+				{ body: string; headers: Record<string, string> }
+			];
+			const body = JSON.parse(options.body) as Record<string, any>;
+			expect(options).toMatchObject({ redirect: 'error' });
+			expect(body.description).toBe('WinCRM PAID MONTHLY');
+			expect(body.metadata).toEqual({
+				productCode: 'WINCRM',
+				paymentId: 'crm-payment-1',
+				kind,
+				plan: 'PAID',
+				billingPeriod: 'MONTHLY'
+			});
+			expect(body.receipt.items[0].description).toBe(
+				'Подписка WinCRM PAID'
+			);
+			expect(body.receipt.items[0].amount).toEqual({
+				value: '1280.00',
+				currency: 'RUB'
+			});
+			expect(options.headers['Idempotence-Key']).toBe(
+				'wincrm-provider-command-1'
+			);
+			if (kind === 'RECURRING') {
+				expect(body.payment_method_id).toBe('crm-saved-method');
+				expect(body).not.toHaveProperty('confirmation');
+				expect(body).not.toHaveProperty('save_payment_method');
+			} else {
+				expect(body.confirmation).toEqual({
+					type: 'redirect',
+					return_url: 'https://crm.winwidget.ru/settings'
+				});
+				expect(body.save_payment_method).toBe(true);
+				expect(body).not.toHaveProperty('payment_method_id');
+			}
+		}
+	);
+
+	it('rejects redirects during WinCRM payment and receipt verification only', async () => {
+		process.env.MODE = 'development';
+		process.env.YOOKASSA_SHOP_ID = 'test-shop-id';
+		process.env.YOOKASSA_SECRET_KEY = 'test-secret';
+		const fetchMock = jest.fn().mockImplementation(async () => ({
+			ok: true,
+			status: 200,
+			json: async () => ({ items: [], status: 'pending' })
+		}));
+		global.fetch = fetchMock;
+		const service = new YooKassaService();
+		await service.getPayment('provider-payment', 'WINCRM');
+		await service.getReceipts('provider-payment', 'WINCRM');
+		await service.getPayment('provider-payment');
+		await service.getReceipts('provider-payment');
+		for (const index of [0, 1])
+			expect(fetchMock.mock.calls[index][1]).toMatchObject({
+				redirect: 'error'
+			});
+		for (const index of [2, 3])
+			expect(fetchMock.mock.calls[index][1]).not.toHaveProperty(
+				'redirect'
+			);
 	});
 
 	it('uses the saved provider method without redirect fields for recurring payment', async () => {

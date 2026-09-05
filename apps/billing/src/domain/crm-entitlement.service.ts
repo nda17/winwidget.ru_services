@@ -17,6 +17,7 @@ import {
 	lockBillingCommand
 } from './billing-command-idempotency';
 import { requireCrmCommercialPolicy } from './crm-commercial-policy.service';
+import { readWincrmPriceSnapshot } from './wincrm-commerce.helpers';
 
 const CRM_PRODUCT_CODE = 'WINCRM';
 const CRM_TRIAL_PLAN_CODE = 'TRIAL';
@@ -61,7 +62,31 @@ export class CrmEntitlementService {
 		const entitlement = await this.prisma.crmEntitlement.findUnique({
 			where: { workspaceId }
 		});
-		return this.response(entitlement, new Date());
+		const now = new Date();
+		if (
+			!entitlement ||
+			['SUSPENDED', 'CANCELLED'].includes(entitlement.status)
+		)
+			return this.response(entitlement, now);
+		const paid = await this.prisma.crmPaidPeriod.findFirst({
+			where: { workspaceId, startsAt: { lte: now } },
+			orderBy: [{ startsAt: 'desc' }, { id: 'desc' }]
+		});
+		if (!paid) return this.response(entitlement, now);
+		const snapshot = readWincrmPriceSnapshot(paid.priceSnapshot);
+		return this.response(
+			{
+				...entitlement,
+				planCode: 'PAID',
+				status: CrmEntitlementStatus.ACTIVE,
+				seatLimit: paid.totalSeats,
+				policyVersion: snapshot.policyVersion,
+				effectiveFrom: paid.startsAt,
+				effectiveUntil: paid.expiresAt,
+				graceUntil: paid.graceUntil
+			},
+			now
+		);
 	}
 
 	async activateTrial(dto: ActivateCrmTrialCommandDto) {
