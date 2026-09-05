@@ -490,6 +490,16 @@ Frontend должен отдельно обрабатывать неготовы
 успешной отправки кода. Локальные synthetic transport/PG/DOM проверки не
 заменяют production rollout.
 
+Не продвигать feature SHA через текущий общий backend controller как якобы
+точечное обновление Identity: он мигрирует и пересоздаёт весь существующий
+набор приложений. Перед выпуском согласовать и проверить service-scoped
+controller либо полный совместимый набор существующих сервисов. Четыре
+`crm-*` runtime при этом остаются вне текущего production Compose. Новая
+Identity foundation требует `IDENTITY_CRM_ACCESS_TOKEN` уже при старте API;
+его отсутствие блокирует обычный вход, а не только CRM endpoints. Подготовить
+отдельный сильный token и явную Compose-проводку вместе с
+`IDENTITY_LOGIN_OTP_ENABLED`, не ослабляя guard и не подставляя placeholder.
+
 ### P1 — общий auth rate limiter до нескольких replicas
 
 Для прежних password/register/OAuth endpoints до второй Identity/Gateway
@@ -555,11 +565,21 @@ replicas.
 ### P1 — применить удаление пользовательской вкладки «Беклог» в production
 
 Перед миграцией Operations `20260910110000_remove_admin_backlog` получить
-проверенный service-owned safety backup и остановить/drain старый Notes writer.
+проверенный service-owned safety backup после остановки/drain старого Notes writer.
 Обычный migration-before-restart без отдельного writer fence не считать
 подтверждённой последовательностью этого удаления. Удалить Gateway route
 `operations-notes` с полной двусторонней синхронизацией production env и
 совместимым exact infra contract (42 routes, 7 у Operations).
+
+Подготовить проверенный двухфазный service-scoped выпуск: сначала runtime без
+Notes endpoints при сохранённой таблице, затем доказать отсутствие старых
+writers и активных Notes-транзакций, создать safety backup и применить
+destructive migration. Проверить скачанный backup по hash и восстановлением
+в изолированную БД; одного `pg_restore --list` недостаточно. Operations не
+входит в собственный allowlist автоматического restore: не пытаться
+восстановить её control ledger через тот же работающий control ledger.
+Синхронизировать новый immutable infra pin с удалением route; прежний pin
+`b602ae5` ожидает 43 маршрута и несовместим с новым контрактом 42.
 
 Миграция удаляет только `operations.notes` и связанные audit-копии по
 `BACKLOG`, `backlog_task`, `BACKLOG_TASK_*`; не использовать CASCADE и не
