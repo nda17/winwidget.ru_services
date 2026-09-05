@@ -418,7 +418,7 @@ exactFiles('deploy', ['docker-compose.prod.yml']);
 
 const servicesWorkflow = readFileSync('.github/workflows/ci.yml', 'utf8');
 const pinnedInfraRevision =
-	'6700763501accdd6e04cf52d18762d9a50271028';
+	'd3e8d5a6dc0cca058d1696b8718b2e839d029dde';
 for (const evidence of [
 	"cancel-in-progress: ${{ github.ref != 'refs/heads/prod' }}",
 	'operations-control-ledger:',
@@ -473,20 +473,17 @@ const infraReleaseReferences = [
 	)
 ];
 if (
-	infraReleaseReferences.length !== 2 ||
+	infraReleaseReferences.length !== 1 ||
 	infraReleaseReferences.some(reference => reference[1] !== pinnedInfraRevision)
 ) {
-	throw new Error('both scoped production jobs must use the same exact reviewed infra SHA');
+	throw new Error('the worker-only production job must use the exact reviewed infra SHA');
 }
-const federationJob = servicesWorkflow.split('  deploy-production:\n')[1]?.split('  deploy-worker-recovery:\n')[0];
-const workersJob = servicesWorkflow.split('  deploy-worker-recovery:\n')[1];
-if (!federationJob || !workersJob || (servicesWorkflow.match(/release_scope:/g) ?? []).length !== 2) {
-	throw new Error('production must contain exactly the two reviewed ordered scopes');
+const workersJob = servicesWorkflow.split('  deploy-production:\n')[1];
+if (!workersJob || (servicesWorkflow.match(/release_scope:/g) ?? []).length !== 1 || servicesWorkflow.includes('operations-federation-config') || servicesWorkflow.includes('deploy-worker-recovery:')) {
+	throw new Error('production must contain only the reviewed worker scope; completed federation correction cannot repeat');
 }
 for (const [job, evidence] of [
-	[federationJob, 'release_scope: operations-federation-config'],
-	[federationJob, "expected_service_env_sha256: '06f1affe7b715a3c2d96d2a00975fab168e2060623a8af72d33c62bb4055799e'"],
-	[workersJob, 'needs:\n      - deploy-production\n'],
+	[workersJob, 'needs:\n      - lifecycle-contract\n      - operations-control-ledger\n      - operations-restore-rehearsal\n      - production-image\n      - service\n      - service-integration\n      - widgets-integration\n'],
 	[workersJob, 'release_scope: workers-bootstrap-recovery'],
 	[workersJob, "expected_service_env_sha256: '649c987a3c9ea2cba281f801482a5e98a73e53739885e4f9a7eaff17994bb6f7'"],
 	[workersJob, "expected_operations_revision: '484e546451088671e23ae37ae4026b9b3fe500c5'"],
@@ -495,7 +492,7 @@ for (const [job, evidence] of [
 ]) {
 	if (!job.includes(evidence)) throw new Error(`scoped release boundary drifted: ${evidence}`);
 }
-for (const job of [federationJob, workersJob]) {
+for (const job of [workersJob]) {
 	for (const evidence of [
 		"if: github.event_name == 'push' && github.ref == 'refs/heads/prod'",
 		"expected_live_revision: '484e546451088671e23ae37ae4026b9b3fe500c5'",

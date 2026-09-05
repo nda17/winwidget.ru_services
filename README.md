@@ -132,19 +132,28 @@ production entrypoint копирования ключа. Отрицательн�
 Это проверка восстановления при ошибке старта, а не обещание безопасного
 прерывания любого уже выполняющегося внешнего действия. Известные lease/ACK
 ограничения Operations требуют отдельного решения. Worker recovery scope
-допускает только семь согласованных worker/outbox/restore процессов; API,
-scheduler Billing, CRM, env и схемы БД не входят в этот релиз. Перед заменой
+допускает семь согласованных worker/outbox/restore процессов и Billing API
+как обязательный companion: его отчёт готовности требует совпадения revision
+API и worker. Эта проверка сохраняется. Остальные API, scheduler Billing,
+CRM, env и схемы БД не входят в этот релиз. Перед заменой
 нужны проверенное окно без активных финансовых/backup/restore заданий,
 неподтверждённых сообщений/публикаций и безопасное завершение старых
 процессов; rollback возвращает прежние образы без отката данных. Остальные
 сервисы с аналогичными catch-обработчиками в этот фикс не включены.
 
-Production CI сначала меняет только legacy origin Notification Delivery в
-существующем образе Operations API, затем отдельным зависимым job выпускает
-семь worker-ролей. Оба job используют один проверенный immutable infra SHA,
-точные ревизии и hashes подготовленных owner env; широкого `all` rollout
-нет. Если первый шаг успешен, а второй упал, повторяется только failed job:
-повторно применять legacy-to-origin guard первого шага нельзя.
+Production CI выпускает только эти восемь процессов после полной CI-матрицы,
+используя проверенный immutable infra SHA, точные ревизии и hashes owner env;
+широкого `all` rollout нет. Исправление origin Notification Delivery уже
+применено отдельно к прежнему образу Operations API и проверено read-only.
+Повторно применять его legacy-to-origin guard нельзя. Предыдущая попытка
+worker release остановилась до замены контейнеров: non-root migration probe
+не мог прочитать несекретный verifier. Следующий выпуск требует исправленных
+прав только на этот tracked payload, новой green CI и неизменной live baseline.
+Operations API временно сохраняет прежнюю ревизию: restore остаётся выключен,
+активные/pending restore и recovery задания запрещены, catalog неизменен.
+Новая подпись backup от обновлённого worker не доказывает её пригодность для
+старого restore API; следующий согласованный Operations rollout должен
+восстановить единый revision до включения восстановления.
 
 ## Данные и RabbitMQ
 
@@ -170,9 +179,9 @@ workflow `winwidget.ru_infra`, закреплённый неизменяемым
 ручного ввода ревизии и прямого запуска controller нет. На production действует
 единый deploy lock. Обязательны побайтово идентичный hash env, метки OCI
 revision, точные owner env и неизменность соседних контейнеров. В этой
-recovery-ветке разрешены только два описанных выше scope. Worker release
+recovery-ветке разрешён только `workers-bootstrap-recovery`. Worker release
 сверяет полные service-owned migration ledgers Billing/Operations/Support
-до и после обновления, не применяет DDL и проверяет readiness семи ролей.
+до и после обновления, не применяет DDL и проверяет readiness восьми ролей.
 
 Notes, Admin Event Log и плоскость управления Telegram/Reporting принадлежат
 Operations. Обычный deploy проверяет актуальные границы service-owned баз,
