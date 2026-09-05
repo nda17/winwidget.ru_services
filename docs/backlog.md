@@ -659,11 +659,6 @@ Notes-capable runtime нельзя возвращать без явного пл
 
 ### P1 — завершить production-проверки frontend после cutover
 
-Довыпустить страницу «Скоро» на `crm.winwidget.ru`, чтобы закрытый CRM release
-не запускал проверку сессии и недоступные API. Сохранить `/__frontend/health`
-и отдельный gate оплаты. Выпускать только exact green-CI SHA через текущий
-четырёхконтейнерный controller с закреплёнными env/Nginx/image identities.
-
 Закончить авторизованную production browser-проверку desktop/mobile:
 профиль с отдельным статусом WinCRM, переключатель оплаты, новая навигация
 админки, переходы между продуктами, редактирование контента и недоступность
@@ -671,11 +666,12 @@ Notes-capable runtime нельзя возвращать без явного пл
 
 Все четыре frontend-контейнера пока размещаются на одном существующем VPS.
 Сохраняются прежние main-domain URL Widgets и админки, auth/returnUrl, OAuth,
-cookies и публичные страницы виджетов. По разрешению пользователя удалить
-устаревшие `winwidget.ru_client_crm` и `nda17/winwidget.ru_client_crm` после
-проверки переноса истории/содержимого в монорепозиторий, отсутствия зависимых
-процессов/CI/CD и сохранения recoverable Git bundle. Не удалять
-`winwidget.ru_frontends` или действующий checkout `winwidget.ru_client`.
+cookies и публичные страницы виджетов. Завершить разрешённое пользователем
+удаление устаревшего GitHub-репозитория `nda17/winwidget.ru_client_crm`:
+текущему CLI-токену недоступен scope `delete_repo`, DELETE возвращает 403.
+Перед повтором проверить точный repository ID `1351670384`, перенос истории
+в монорепозиторий и сохранность recoverable Git bundle вне Git-репозиториев.
+Не удалять `winwidget.ru_frontends` или действующий checkout `winwidget.ru_client`.
 Не путать готовность frontend с выпуском четырёх CRM backend-сервисов: CRM-ссылка
 остаётся `#0`/«Скоро», продуктовые API и платёжные действия выключены.
 
