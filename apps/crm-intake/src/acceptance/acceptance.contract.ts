@@ -39,6 +39,7 @@ export class AcceptanceContactDto {
 		| 'CREATE_FROM_ENTRY'
 		| 'EXISTING';
 	@IsOptional() @IsUUID('4') contactId?: string;
+	@IsOptional() @IsString() @MaxLength(200) @Matches(/\S/) name?: string;
 }
 export class AcceptanceNextTaskDto {
 	@IsString() @MaxLength(200) @Matches(/\S/) title!: string;

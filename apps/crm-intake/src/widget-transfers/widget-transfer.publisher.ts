@@ -4,14 +4,12 @@ import {
 	OnApplicationBootstrap
 } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
-import { Prisma } from '@prisma/crm-intake-client';
-import { ACCEPTANCE_RETRY_MS } from './acceptance.processor';
 import { CrmIntakePrismaService } from '../prisma/crm-intake-prisma.service';
-import { parseAcceptanceEvent } from './acceptance.contract';
-import { AcceptanceRabbit } from './acceptance.messaging';
+import { parseWidgetTransferEvent } from './widget-transfer.contract';
+import { WidgetTransferRabbit } from './widget-transfer.messaging';
 
 @Injectable()
-export class AcceptancePublisher
+export class WidgetTransferPublisher
 	implements OnApplicationBootstrap, BeforeApplicationShutdown
 {
 	private timer: NodeJS.Timeout | null = null;
@@ -19,7 +17,7 @@ export class AcceptancePublisher
 	private stopping = false;
 	constructor(
 		private readonly prisma: CrmIntakePrismaService,
-		private readonly rabbit: AcceptanceRabbit
+		private readonly rabbit: WidgetTransferRabbit
 	) {}
 	onApplicationBootstrap() {
 		this.schedule();
@@ -38,12 +36,12 @@ export class AcceptancePublisher
 	}
 	async tick() {
 		const now = await this.databaseNow();
-		await this.prisma.acceptanceOutbox.updateMany({
+		await this.prisma.widgetTransferOutbox.updateMany({
 			where: { status: 'PUBLISHING', leaseUntil: { lte: now } },
 			data: { status: 'PENDING', leaseToken: null, leaseUntil: null }
 		});
-		const candidates = await this.prisma.acceptanceOutbox.findMany({
-			where: { status: 'PENDING', ...this.due(now) },
+		const candidates = await this.prisma.widgetTransferOutbox.findMany({
+			where: { status: 'PENDING', availableAt: { lte: now } },
 			orderBy: [{ availableAt: 'asc' }, { id: 'asc' }],
 			take: 20,
 			select: { id: true }
@@ -53,35 +51,31 @@ export class AcceptancePublisher
 			const token = randomUUID();
 			const claimNow = await this.databaseNow();
 			const leaseUntil = new Date(claimNow.getTime() + 30000);
-			const claim = await this.prisma.acceptanceOutbox.updateMany({
+			const claim = await this.prisma.widgetTransferOutbox.updateMany({
 				where: {
 					id: candidate.id,
 					status: 'PENDING',
-					...this.due(claimNow)
+					availableAt: { lte: claimNow }
 				},
 				data: { status: 'PUBLISHING', leaseToken: token, leaseUntil }
 			});
 			if (claim.count !== 1) continue;
-			const row = await this.prisma.acceptanceOutbox.findUnique({
+			const row = await this.prisma.widgetTransferOutbox.findUnique({
 				where: { id: candidate.id }
 			});
 			if (!row || row.leaseToken !== token) continue;
 			try {
-				const event = parseAcceptanceEvent(row.payload);
+				const event = parseWidgetTransferEvent(row.payload);
 				if (event.eventId !== row.eventId)
 					throw new Error('INVALID_OUTBOX_BINDING');
-				// Legacy immutable RETRY_N rows are delivered directly, only after their
-				// original delay; no new publications use the classic TTL/DLX relay.
-				const legacy = /^RETRY_([123])$/.exec(row.route);
-				if (legacy && row.retryAttempt !== Number(legacy[1]))
-					throw new Error('INVALID_LEGACY_RETRY_BINDING');
 				await this.rabbit.publish(
 					event,
-					legacy ? 'MAIN' : row.route,
-					row.retryAttempt
+					row.route,
+					row.retryAttempt,
+					row.retryGeneration
 				);
 				const confirmedAt = await this.databaseNow();
-				await this.prisma.acceptanceOutbox.updateMany({
+				await this.prisma.widgetTransferOutbox.updateMany({
 					where: {
 						id: row.id,
 						status: 'PUBLISHING',
@@ -99,7 +93,7 @@ export class AcceptancePublisher
 				});
 			} catch {
 				const failedAt = await this.databaseNow();
-				await this.prisma.acceptanceOutbox.updateMany({
+				await this.prisma.widgetTransferOutbox.updateMany({
 					where: { id: row.id, status: 'PUBLISHING', leaseToken: token },
 					data: {
 						status: 'PENDING',
@@ -115,18 +109,6 @@ export class AcceptancePublisher
 				});
 			}
 		}
-	}
-	private due(now: Date): Prisma.AcceptanceOutboxWhereInput {
-		// Filter before LIMIT so future legacy rows cannot starve ready MAIN work.
-		return {
-			OR: [
-				{ route: { in: ['MAIN', 'DLQ'] }, availableAt: { lte: now } },
-				...ACCEPTANCE_RETRY_MS.map((delay, index) => ({
-					route: `RETRY_${index + 1}`,
-					availableAt: { lte: new Date(now.getTime() - delay) }
-				}))
-			]
-		};
 	}
 	private async databaseNow(): Promise<Date> {
 		const [clock] = await this.prisma.$queryRaw<

@@ -291,13 +291,22 @@ export class AcceptanceProcessor {
 					? 'WORKFLOW_REFERENCE_CONFLICT'
 					: 'WORKFLOW_DEPENDENCY_UNAVAILABLE';
 		return this.prisma.$transaction(async tx => {
+			const [clock] = await tx.$queryRaw<
+				Array<{ now: Date }>
+			>`SELECT clock_timestamp() AT TIME ZONE 'UTC' AS now`;
+			if (!clock || !Number.isFinite(clock.now.getTime()))
+				throw new Error('RETRY_CLOCK_UNAVAILABLE');
+			const now = clock.now;
+			const availableAt = new Date(
+				now.getTime() + (retry ? ACCEPTANCE_RETRY_MS[retryAttempt] : 0)
+			);
 			const receipt = await tx.acceptanceReceipt.updateMany({
 				where: {
 					eventId: event.eventId,
 					consumer: ACCEPTANCE_CONSUMER,
 					status: 'PROCESSING',
 					leaseToken: token,
-					leaseUntil: { gt: new Date() }
+					leaseUntil: { gt: now }
 				},
 				data: {
 					status: retry ? 'RETRY_SCHEDULED' : 'DEAD_LETTERED',
@@ -319,18 +328,16 @@ export class AcceptanceProcessor {
 					status: blocked ? 'BLOCKED' : retry ? 'RETRY_WAIT' : 'FAILED',
 					version: { increment: 1 },
 					lastErrorCode: code,
-					retryAt: retry
-						? new Date(Date.now() + ACCEPTANCE_RETRY_MS[retryAttempt])
-						: null
+					retryAt: retry ? availableAt : null
 				}
 			});
 			if (changed.count !== 1) return true;
 			await enqueueAcceptance(
 				tx,
 				event,
-				retry ? `RETRY_${retryAttempt + 1}` : 'DLQ',
+				retry ? 'MAIN' : 'DLQ',
 				`${event.eventId}:${retry ? 'retry' : 'dead'}:${retryAttempt + 1}`,
-				new Date(),
+				availableAt,
 				retry ? retryAttempt + 1 : retryAttempt
 			);
 			return true;

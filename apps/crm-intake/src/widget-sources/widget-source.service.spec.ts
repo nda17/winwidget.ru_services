@@ -61,7 +61,11 @@ function setup() {
 	};
 	const tx = {
 		$executeRawUnsafe: jest.fn(),
-		$queryRaw: jest.fn().mockResolvedValue([{ locked: true }]),
+		$queryRaw: jest
+			.fn()
+			.mockResolvedValue([
+				{ locked: true, now: new Date('2030-01-01T00:00:00.000Z') }
+			]),
 		managedWidgetSource: {
 			findFirst: jest.fn().mockResolvedValue(source),
 			findUnique: jest.fn().mockResolvedValue(source),
@@ -420,7 +424,11 @@ describe('Managed source fresh configure worker', () => {
 			)
 		).toBe(true);
 		expect(tx.widgetControlOutbox.create).toHaveBeenLastCalledWith({
-			data: expect.objectContaining({ route: 'RETRY_1', retryAttempt: 1 })
+			data: expect.objectContaining({
+				route: 'MAIN',
+				retryAttempt: 1,
+				availableAt: new Date('2030-01-01T00:00:05.000Z')
+			})
 		});
 		await processor.fail(
 			event,

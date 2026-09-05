@@ -6,6 +6,8 @@ import {
 import { CrmIntakePrismaService } from '../prisma/crm-intake-prisma.service';
 import { widgetControlEnabled } from '../widget-sources/widget-control.config';
 import { WidgetControlRabbit } from '../widget-sources/widget-control.messaging';
+import { WidgetTransferRabbit } from '../widget-transfers/widget-transfer.messaging';
+import { widgetTransfersEnabled } from '../widget-transfers/widget-transfer.config';
 import {
 	AcceptanceRabbit,
 	intakeProcessRole
@@ -19,7 +21,8 @@ export class CrmIntakeHealthService {
 	constructor(
 		private readonly prisma: CrmIntakePrismaService,
 		@Optional() private readonly rabbit?: AcceptanceRabbit,
-		@Optional() private readonly widgetRabbit?: WidgetControlRabbit
+		@Optional() private readonly widgetRabbit?: WidgetControlRabbit,
+		@Optional() private readonly transferRabbit?: WidgetTransferRabbit
 	) {}
 
 	liveness() {
@@ -40,6 +43,16 @@ export class CrmIntakeHealthService {
 	async readiness() {
 		try {
 			await this.prisma.$queryRaw`SELECT 1`;
+			// Reader schema stays required after transfers are disabled: received data remains readable.
+			await this.prisma
+				.$queryRaw`SELECT entry_id, workspace_id, source_id, transfer_id, event_id, payload, payload_hash, byte_count FROM crm_intake.widget_entry_snapshots LIMIT 0`;
+			await this.prisma
+				.$queryRaw`SELECT event_id, consumer, transfer_id, workspace_id, source_id, status, version, retry_generation, retry_attempt, lease_token, lease_until, entry_id FROM crm_intake.widget_transfer_receipts LIMIT 0`;
+			await this.prisma
+				.$queryRaw`SELECT widget_source_id FROM crm_intake.inbox_entries LIMIT 0`;
+			if (widgetTransfersEnabled())
+				await this.prisma
+					.$queryRaw`SELECT id, event_id, payload, status, retry_generation, retry_attempt, lease_token, lease_until FROM crm_intake.widget_transfer_outbox LIMIT 0`;
 			if (widgetControlEnabled()) {
 				await this.prisma
 					.$queryRaw`SELECT id, workspace_id, owner_subject, created_by_subject, current_command_id, version, control_version, generation, enabled, applied_control_version, applied_generation, sync_state FROM crm_intake.managed_widget_sources LIMIT 0`;
@@ -110,6 +123,18 @@ export class CrmIntakeHealthService {
 				'CRM Intake widget control messaging is not ready'
 			);
 
+		if (
+			widgetTransfersEnabled() &&
+			[
+				'all',
+				'widget-transfer-worker',
+				'widget-transfer-publisher'
+			].includes(role) &&
+			!this.transferRabbit?.ready(role !== 'widget-transfer-publisher')
+		)
+			throw new ServiceUnavailableException(
+				'CRM Intake widget transfer messaging is not ready'
+			);
 		return {
 			status: 'ready',
 			service: SERVICE_NAME,

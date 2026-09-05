@@ -24,7 +24,14 @@ const mockChannel = {
 	assertQueue: jest.fn(),
 	bindQueue: jest.fn(),
 	prefetch: jest.fn(),
-	consume: jest.fn().mockResolvedValue({ consumerTag: 'tag' })
+	consume: jest.fn((queue, deliver) => {
+		void queue;
+		void deliver;
+		return Promise.resolve({ consumerTag: 'tag' });
+	}),
+	ack: jest.fn(),
+	nack: jest.fn(),
+	cancel: jest.fn().mockResolvedValue(undefined)
 };
 const mockWrapper = {
 	on: jest.fn(),
@@ -92,6 +99,217 @@ describe('durable Widget control messaging', () => {
 		);
 		await rabbit.onApplicationShutdown();
 	});
+
+	it('declares only MAIN and DLQ topology, never recreates or deletes legacy retry queues', async () => {
+		process.env.CRM_INTAKE_RABBITMQ_ASSERT_TOPOLOGY = 'true';
+		const rabbit = new WidgetControlRabbit();
+		await rabbit.onModuleInit();
+		await new Promise(resolve => setImmediate(resolve));
+		expect(mockChannel.assertExchange).toHaveBeenCalledTimes(2);
+		expect(mockChannel.assertQueue).toHaveBeenCalledTimes(2);
+		expect(JSON.stringify(mockChannel.assertQueue.mock.calls)).not.toMatch(
+			/retry|ttl|dead-letter-exchange/
+		);
+		await expect(rabbit.publish(event(), 'RETRY_1', 1)).rejects.toThrow(
+			'INVALID_ROUTE'
+		);
+		await rabbit.onApplicationShutdown();
+	});
+	it.each([5000, 30000, 120000].map((delay, index) => [delay, index + 1]))(
+		'waits/resumes legacy retry delay %i using only the DB clock, preserving immutable route',
+		async (delay, attempt) => {
+			const start = new Date('2001-01-01T00:00:00.000Z');
+			let clock = new Date(start.getTime() + delay - 1);
+			const value = event();
+			const row = {
+				id: randomUUID(),
+				eventId: value.eventId,
+				payload: value,
+				route: `RETRY_${attempt}`,
+				retryAttempt: attempt,
+				attempts: 0,
+				leaseToken: '',
+				status: 'PENDING',
+				availableAt: start
+			};
+			const eligible = (where: any) =>
+				where.OR.some(
+					(option: any) =>
+						(typeof option.route === 'string'
+							? option.route === row.route
+							: option.route.in.includes(row.route)) &&
+						row.availableAt <= option.availableAt.lte
+				);
+			const prisma = {
+				$queryRaw: jest
+					.fn()
+					.mockImplementation(async () => [{ now: clock }]),
+				widgetControlOutbox: {
+					findMany: jest.fn(async (args: any) =>
+						row.status === 'PENDING' && eligible(args.where)
+							? [{ id: row.id }]
+							: []
+					),
+					updateMany: jest.fn(async (args: any) => {
+						if (args.data.status === 'PUBLISHING') {
+							if (!eligible(args.where)) return { count: 0 };
+							row.leaseToken = args.data.leaseToken;
+						}
+						if (args.where.id) row.status = args.data.status;
+						return { count: 1 };
+					}),
+					findUnique: jest.fn(async () => row)
+				}
+			};
+			const rabbit = { publish: jest.fn() };
+			await new WidgetControlPublisher(
+				prisma as never,
+				rabbit as never
+			).tick();
+			expect(rabbit.publish).not.toHaveBeenCalled();
+			clock = new Date(start.getTime() + delay);
+			await new WidgetControlPublisher(
+				prisma as never,
+				rabbit as never
+			).tick();
+			expect(rabbit.publish).toHaveBeenCalledWith(value, 'MAIN', attempt);
+			expect(row.route).toBe(`RETRY_${attempt}`);
+			expect(row.status).toBe('PUBLISHED');
+			expect(
+				prisma.widgetControlOutbox.findMany.mock.calls[0][0]
+			).toMatchObject({
+				take: 20,
+				where: {
+					OR: expect.arrayContaining([
+						{
+							route: { in: ['MAIN', 'DLQ'] },
+							availableAt: { lte: new Date(start.getTime() + delay - 1) }
+						}
+					])
+				}
+			});
+			expect(
+				prisma.widgetControlOutbox.updateMany
+			).toHaveBeenLastCalledWith(
+				expect.objectContaining({
+					data: expect.objectContaining({ publishedAt: clock })
+				})
+			);
+		}
+	);
+	it('selects MAIN due predicates before LIMIT and rechecks due after the claim clock advances', async () => {
+		const databaseNow = new Date('2001-01-01T00:00:00.000Z');
+		const prisma = {
+			$queryRaw: jest.fn().mockResolvedValue([{ now: databaseNow }]),
+			widgetControlOutbox: {
+				updateMany: jest.fn(),
+				findMany: jest.fn().mockResolvedValue([])
+			}
+		};
+		const rabbit = { publish: jest.fn() };
+		await new WidgetControlPublisher(
+			prisma as never,
+			rabbit as never
+		).tick();
+		expect(prisma.widgetControlOutbox.findMany).toHaveBeenCalledWith(
+			expect.objectContaining({
+				take: 20,
+				where: {
+					status: 'PENDING',
+					OR: expect.arrayContaining([
+						{
+							route: { in: ['MAIN', 'DLQ'] },
+							availableAt: { lte: databaseNow }
+						}
+					])
+				}
+			})
+		);
+		expect(rabbit.publish).not.toHaveBeenCalled();
+	});
+	it.each(['leased', 'database failure'])(
+		'holds %s rejection unacked for five seconds before requeue',
+		async reason => {
+			jest.useFakeTimers();
+			const rabbit = new WidgetControlRabbit();
+			try {
+				await rabbit.onModuleInit();
+				await rabbit.consume(async () => {
+					throw new Error(reason);
+				});
+				const deliver = mockChannel.consume.mock.calls[0][1];
+				const message = { content: Buffer.from('{}'), properties: {} };
+				deliver(message);
+				await jest.advanceTimersByTimeAsync(4999);
+				expect(mockChannel.ack).not.toHaveBeenCalled();
+				expect(mockChannel.nack).not.toHaveBeenCalled();
+				await jest.advanceTimersByTimeAsync(1);
+				expect(mockChannel.nack).toHaveBeenCalledWith(
+					message,
+					false,
+					true
+				);
+			} finally {
+				await rabbit.onApplicationShutdown();
+				jest.useRealTimers();
+			}
+		}
+	);
+	it('interrupts five unacked waits and tolerates cancel failure before shutdown drain', async () => {
+		jest.useFakeTimers();
+		const rabbit = new WidgetControlRabbit();
+		try {
+			await rabbit.onModuleInit();
+			await rabbit.consume(async () => {
+				throw new Error('leased');
+			});
+			const deliver = mockChannel.consume.mock.calls[0][1];
+			for (let i = 0; i < 5; i++)
+				deliver({ content: Buffer.from('{}'), properties: {} });
+			await jest.advanceTimersByTimeAsync(0);
+			expect(mockChannel.prefetch).toHaveBeenCalledWith(5, false);
+			mockChannel.cancel.mockRejectedValueOnce(new Error('closed'));
+			await rabbit.cancel();
+			expect(mockChannel.nack).toHaveBeenCalledTimes(5);
+			expect(mockChannel.ack).not.toHaveBeenCalled();
+			expect(jest.getTimerCount()).toBe(0);
+		} finally {
+			await rabbit.onApplicationShutdown();
+			jest.useRealTimers();
+		}
+	});
+	it('awaits the same cooldown when failure state could not commit', async () => {
+		const processor = {
+			claim: jest
+				.fn()
+				.mockResolvedValue({ state: 'CLAIMED', token: randomUUID() }),
+			run: jest.fn().mockRejectedValue(new Error('dependency')),
+			fail: jest.fn().mockResolvedValue(false),
+			renew: jest.fn()
+		};
+		const rabbit = {
+			ack: jest.fn(),
+			nack: jest.fn(),
+			nackAfterBackoff: jest.fn().mockResolvedValue(undefined)
+		};
+		const value = event();
+		const message = {
+			content: Buffer.from(JSON.stringify(value)),
+			properties: {
+				messageId: value.eventId,
+				type: CONTROL_EVENT_TYPE,
+				contentType: 'application/json'
+			}
+		};
+		await new WidgetControlWorker(
+			processor as never,
+			rabbit as never,
+			{} as never
+		).handle(message as never);
+		expect(rabbit.nackAfterBackoff).toHaveBeenCalledWith(message);
+		expect(rabbit.nack).not.toHaveBeenCalled();
+		expect(rabbit.ack).not.toHaveBeenCalled();
+	});
 	it('keeps Outbox PENDING indefinitely on a transport failure even after many attempts', async () => {
 		const value = event();
 		const row = {
@@ -104,6 +322,11 @@ describe('durable Widget control messaging', () => {
 			leaseToken: ''
 		};
 		const prisma = {
+			$queryRaw: jest
+				.fn()
+				.mockResolvedValue([
+					{ now: new Date('2030-01-01T00:00:00.000Z') }
+				]),
 			widgetControlOutbox: {
 				updateMany: jest.fn(async args => {
 					if (args.data.status === 'PUBLISHING')

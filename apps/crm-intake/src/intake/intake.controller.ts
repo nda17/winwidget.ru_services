@@ -4,6 +4,7 @@ import {
 	Controller,
 	Get,
 	Headers,
+	Header,
 	HttpCode,
 	Param,
 	ParseUUIDPipe,
@@ -62,6 +63,19 @@ export class IntakeController {
 			await this.authorization.authorize(bearer, query.workspaceId),
 			id,
 			query
+		);
+	}
+	@Get('inbox/:id/widget-details')
+	@Header('Cache-Control', 'no-store')
+	async widgetDetails(
+		@Headers('authorization') bearer: string | undefined,
+		@Param('id', new ParseUUIDPipe({ version: '4' })) id: string,
+		@Query() query: IntakeWorkspaceQuery
+	) {
+		return this.intake.widgetDetails(
+			await this.authorization.authorize(bearer, query.workspaceId),
+			query.workspaceId,
+			id
 		);
 	}
 	@Post('inbox')

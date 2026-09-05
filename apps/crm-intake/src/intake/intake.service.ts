@@ -13,6 +13,10 @@ import {
 } from '@prisma/crm-intake-client';
 import { createHash } from 'node:crypto';
 import {
+	parseWidgetLeadSnapshot,
+	transferHash
+} from '../widget-transfers/widget-transfer.contract';
+import {
 	assertIntakePermission,
 	IntakeAuthorization
 } from '../access/intake-authorization.client';
@@ -56,7 +60,8 @@ export function inboxEntryView(entry: InboxEntry) {
 		email: entry.email,
 		message: entry.message,
 		origin: entry.origin,
-		sourceId: entry.sourceId,
+		sourceId:
+			entry.origin === 'WIDGET' ? entry.widgetSourceId : entry.sourceId,
 		status: entry.status,
 		createdBySubject: entry.createdBySubject,
 		teamId: entry.teamId,
@@ -204,6 +209,41 @@ export class IntakeService {
 			pageSize: query.pageSize,
 			total
 		};
+	}
+
+	async widgetDetails(
+		context: IntakeAuthorization,
+		workspaceId: string,
+		id: string
+	) {
+		this.assertContext(context, workspaceId, 'intake:read');
+		const entry = await this.entry(this.prisma, context, id);
+		if (entry.origin !== 'WIDGET' || !entry.widgetSourceId)
+			throw new NotFoundException('Widget details not found');
+		const row = await this.prisma.widgetEntrySnapshot.findFirst({
+			where: { entryId: id, workspaceId, sourceId: entry.widgetSourceId }
+		});
+		try {
+			if (
+				!row ||
+				transferHash(row.payload) !== row.payloadHash ||
+				Buffer.byteLength(JSON.stringify(row.payload), 'utf8') !==
+					row.byteCount
+			)
+				throw new Error();
+			const payload = parseWidgetLeadSnapshot(row.payload);
+			return {
+				schemaVersion: 1,
+				workspaceId,
+				entryId: id,
+				sourceId: entry.widgetSourceId,
+				payload
+			};
+		} catch {
+			throw new ServiceUnavailableException(
+				'Widget snapshot is unavailable'
+			);
+		}
 	}
 
 	async createManual(

@@ -63,9 +63,9 @@ export function acceptanceView(row: Acceptance) {
 export async function enqueueAcceptance(
 	tx: Prisma.TransactionClient,
 	event: AcceptanceEvent,
-	route = 'MAIN',
+	route: 'MAIN' | 'DLQ' = 'MAIN',
 	deduplicationKey = `${event.workflowId}:${event.generation}:initial`,
-	availableAt = new Date(),
+	availableAt: Date | undefined = undefined,
 	retryAttempt = 0
 ) {
 	await tx.acceptanceOutbox.createMany({
@@ -158,13 +158,29 @@ export class AcceptanceService {
 				)
 					throw new ConflictException('Acceptance already exists');
 				const workflowId = randomUUID();
+				const missingWidgetName =
+					dto.contact.mode === 'CREATE_FROM_ENTRY' &&
+					entry.origin === 'WIDGET' &&
+					entry.name === null;
+				if (
+					missingWidgetName
+						? typeof dto.contact.name !== 'string' ||
+							!dto.contact.name.trim() ||
+							dto.contact.name !== dto.contact.name.trim() ||
+							dto.contact.name.length > 200 ||
+							/[\x00-\x1f\x7f\ufffd\ud800-\udfff]/u.test(dto.contact.name)
+						: dto.contact.name !== undefined
+				)
+					throw new BadRequestException(
+						'Explicit valid contact name is required only for unnamed widget entries'
+					);
 				const contactOperationId = randomUUID();
 				const contactPayload =
 					dto.contact.mode === 'EXISTING'
 						? { mode: 'EXISTING', contactId: dto.contact.contactId }
 						: {
 								mode: 'CREATE',
-								name: entry.name,
+								name: missingWidgetName ? dto.contact.name! : entry.name!,
 								phone: entry.phone,
 								email: entry.email,
 								teamId: entry.teamId

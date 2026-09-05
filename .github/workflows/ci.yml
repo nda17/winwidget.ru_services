@@ -955,8 +955,8 @@ jobs:
               receipt_tables='crm_customers.customer_commands, crm_customers.customer_activities, crm_customers.intake_operation_slots, crm_customers.intake_operation_commands, crm_customers.export_audit'
               ;;
             crm-intake)
-              mutable_tables='crm_intake.inbox_entries, crm_intake.intake_sources, crm_intake.acceptances, crm_intake.acceptance_outbox, crm_intake.acceptance_receipts, crm_intake.managed_widget_sources, crm_intake.widget_control_jobs, crm_intake.widget_control_receipts, crm_intake.widget_control_outbox'
-              receipt_tables='crm_intake.intake_commands, crm_intake.intake_activities, crm_intake.inbound_receipts, crm_intake.csv_imports, crm_intake.csv_import_rows, crm_intake.export_audit'
+              mutable_tables='crm_intake.inbox_entries, crm_intake.intake_sources, crm_intake.acceptances, crm_intake.acceptance_outbox, crm_intake.acceptance_receipts, crm_intake.managed_widget_sources, crm_intake.widget_control_jobs, crm_intake.widget_control_receipts, crm_intake.widget_control_outbox, crm_intake.widget_transfer_receipts, crm_intake.widget_transfer_outbox'
+              receipt_tables='crm_intake.intake_commands, crm_intake.intake_activities, crm_intake.inbound_receipts, crm_intake.csv_imports, crm_intake.csv_import_rows, crm_intake.export_audit, crm_intake.widget_entry_snapshots'
               docker exec "$POSTGRES_CONTAINER_ID" psql -U crm_domain_bootstrap_ci -d "$DOMAIN_DATABASE" -v ON_ERROR_STOP=1 -c 'GRANT SELECT, INSERT, UPDATE, DELETE ON crm_intake.ingestion_rate_buckets TO crm_domain_runtime_ci'
               ;;
             crm-sales)
@@ -1021,6 +1021,13 @@ jobs:
           CRM_INTAKE_TEST_MIGRATION_DATABASE_URL: ${{ env.DOMAIN_MIGRATION_URL }}
           CRM_INTAKE_TEST_RUNTIME_ROLE: crm_domain_runtime_ci
         run: pnpm --dir apps/crm-intake run test:integration:csv
+      - name: Restrict acceptance verification broker to its own topology
+        if: matrix.app == 'crm-intake'
+        env:
+          RABBITMQ_CONTAINER_ID: ${{ job.services.rabbitmq.id }}
+        run: |
+          acceptance_resources='^winwidget\.crm-intake\.(events|dead-letter|acceptance\.v1(\.dead-letter)?)$'
+          docker exec "$RABBITMQ_CONTAINER_ID" rabbitmqctl set_permissions -p winwidget_crm_acceptance_ci crm_workflow_ci "$acceptance_resources" "$acceptance_resources" "$acceptance_resources"
       - name: Prove Intake acceptance on PostgreSQL 18 and RabbitMQ
         if: matrix.app == 'crm-intake'
         env:
@@ -1037,7 +1044,7 @@ jobs:
         run: |
           docker exec "$RABBITMQ_CONTAINER_ID" rabbitmqctl add_vhost winwidget_crm_widget_control_ci
           docker exec "$RABBITMQ_CONTAINER_ID" rabbitmqctl add_user crm_widget_control_ci crm_widget_control_ci_password
-          control_resources='^winwidget\.crm-intake\.widget-control\.(events|retry|dead-letter|v1(\.dead-letter|\.retry\.[1-3])?)$'
+          control_resources='^winwidget\.crm-intake\.widget-control\.(events|dead-letter|v1(\.dead-letter)?)$'
           docker exec "$RABBITMQ_CONTAINER_ID" rabbitmqctl set_permissions -p winwidget_crm_widget_control_ci crm_widget_control_ci "$control_resources" "$control_resources" "$control_resources"
       - name: Prove native widget control on PostgreSQL 18 and scoped RabbitMQ
         if: matrix.app == 'crm-intake'
@@ -1048,6 +1055,32 @@ jobs:
           CRM_INTAKE_TEST_RUNTIME_ROLE: crm_domain_runtime_ci
           CRM_INTAKE_WIDGET_CONTROL_TEST_RABBITMQ_URL: amqp://crm_widget_control_ci:crm_widget_control_ci_password@127.0.0.1:5672/winwidget_crm_widget_control_ci
         run: pnpm --dir apps/crm-intake run test:integration:widget-control
+      - name: Prepare isolated widget transfer broker with separate runtime permissions
+        if: matrix.app == 'crm-intake'
+        env:
+          RABBITMQ_CONTAINER_ID: ${{ job.services.rabbitmq.id }}
+        run: |
+          docker exec "$RABBITMQ_CONTAINER_ID" rabbitmqctl add_vhost winwidget_crm_widget_transfer_ci
+          transfer_resources='^(winwidget\.events|winwidget\.crm-intake\.widget-transfer\.(events|dead-letter|v1(\.dead-letter)?))$'
+          transfer_event='^widgets\.wincrm\.lead-transfer\.requested\.v1$'
+          docker exec "$RABBITMQ_CONTAINER_ID" rabbitmqctl add_user crm_transfer_provisioner_ci crm_transfer_provisioner_ci_password
+          docker exec "$RABBITMQ_CONTAINER_ID" rabbitmqctl set_permissions -p winwidget_crm_widget_transfer_ci crm_transfer_provisioner_ci "$transfer_resources" "$transfer_resources" "$transfer_resources"
+          docker exec "$RABBITMQ_CONTAINER_ID" rabbitmqctl set_topic_permissions -p winwidget_crm_widget_transfer_ci crm_transfer_provisioner_ci winwidget.events "$transfer_event" "$transfer_event"
+          docker exec "$RABBITMQ_CONTAINER_ID" rabbitmqctl add_user crm_transfer_worker_ci crm_transfer_worker_ci_password
+          docker exec "$RABBITMQ_CONTAINER_ID" rabbitmqctl set_permissions -p winwidget_crm_widget_transfer_ci crm_transfer_worker_ci '^$' '^$' '^winwidget\.crm-intake\.widget-transfer\.v1$'
+          docker exec "$RABBITMQ_CONTAINER_ID" rabbitmqctl add_user crm_transfer_publisher_ci crm_transfer_publisher_ci_password
+          docker exec "$RABBITMQ_CONTAINER_ID" rabbitmqctl set_permissions -p winwidget_crm_widget_transfer_ci crm_transfer_publisher_ci '^$' '^winwidget\.crm-intake\.widget-transfer\.(events|dead-letter)$' '^$'
+      - name: Prove native widget Inbox on PostgreSQL 18 and least-privilege RabbitMQ
+        if: matrix.app == 'crm-intake'
+        env:
+          CRM_INTAKE_INTEGRATION_ALLOW_MUTATION: 'true'
+          CRM_INTAKE_TEST_DATABASE_URL: ${{ env.DOMAIN_RUNTIME_URL }}
+          CRM_INTAKE_TEST_MIGRATION_DATABASE_URL: ${{ env.DOMAIN_MIGRATION_URL }}
+          CRM_INTAKE_TEST_RUNTIME_ROLE: crm_domain_runtime_ci
+          CRM_INTAKE_WIDGET_TRANSFER_TEST_RABBITMQ_URL: amqp://crm_transfer_provisioner_ci:crm_transfer_provisioner_ci_password@127.0.0.1:5672/winwidget_crm_widget_transfer_ci
+          CRM_INTAKE_WIDGET_TRANSFER_TEST_WORKER_RABBITMQ_URL: amqp://crm_transfer_worker_ci:crm_transfer_worker_ci_password@127.0.0.1:5672/winwidget_crm_widget_transfer_ci
+          CRM_INTAKE_WIDGET_TRANSFER_TEST_PUBLISHER_RABBITMQ_URL: amqp://crm_transfer_publisher_ci:crm_transfer_publisher_ci_password@127.0.0.1:5672/winwidget_crm_widget_transfer_ci
+        run: pnpm --dir apps/crm-intake run test:integration:widget-transfer
 
   production-image:
     name: Production image / ${{ matrix.app }}

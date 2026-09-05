@@ -208,6 +208,58 @@ describe('native WinCRM bounded snapshots', () => {
 			answers
 		});
 	});
+	it.each(['RUB', 'EUR', 'USD'])(
+		'preserves valid scalar calculator currency %s',
+		currency => {
+			const result = captureLeadSnapshot({
+				type: WidgetType.CALCULATOR,
+				widget,
+				contactName: null,
+				lead: {
+					...baseLead,
+					calculatedPrice: new Prisma.Decimal('10.00'),
+					currency,
+					answers: []
+				},
+				config: {}
+			});
+			expect(result.state).toBe('READY');
+			if (result.state !== 'READY') throw new Error();
+			expect(result.payload.details).toEqual({
+				type: 'CALCULATOR',
+				calculatedPrice: '10.00',
+				currency,
+				answers: []
+			});
+			expect(() => assertLeadSnapshot(result.payload)).not.toThrow();
+		}
+	);
+	it.each([
+		{ currency: ['RUB'] },
+		{ currency: [['RUB']] },
+		{ currency: { code: 'RUB' } }
+	])('rejects nonscalar stored calculator currency %j', ({ currency }) => {
+		const result = captureLeadSnapshot({
+			type: WidgetType.CALCULATOR,
+			widget,
+			contactName: null,
+			lead: {
+				...baseLead,
+				calculatedPrice: new Prisma.Decimal('10.00'),
+				currency: 'RUB',
+				answers: []
+			},
+			config: {}
+		});
+		expect(result.state).toBe('READY');
+		if (result.state !== 'READY') throw new Error();
+		expect(() =>
+			assertLeadSnapshot({
+				...result.payload,
+				details: { ...result.payload.details, currency }
+			})
+		).toThrow();
+	});
 	it.each(['<b>имя</b>', '\u0000hidden'])(
 		'marks unsupported text visibly skipped without throwing or changing accepted raw data',
 		contactName => {

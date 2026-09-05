@@ -17,6 +17,7 @@ import {
 	readFile,
 	readdir,
 	realpath,
+	stat,
 	symlink,
 	writeFile
 } from 'node:fs/promises';
@@ -147,7 +148,7 @@ if (process.argv[2] === '--refresh-frontends') {
 
 const args = new Set(process.argv.slice(2));
 if (args.has('--help')) {
-	console.log(`Usage: WINCRM_LOCAL_STACK_ALLOW_MUTATION=true node apps/crm-access/test/integration/local-wincrm-stack.mjs [--backend-only] [--activate-owner] [--verify-domain] [--verify-acceptance-http] [--smoke-and-stop]
+	console.log(`Usage: WINCRM_LOCAL_STACK_ALLOW_MUTATION=true node apps/crm-access/test/integration/local-wincrm-stack.mjs [--backend-only] [--activate-owner] [--with-widgets] [--verify-native-widget-http] [--verify-domain] [--verify-acceptance-http] [--smoke-and-stop]
 
 Requires local Colima container wincrm-mvp-postgres18, PostgreSQL 18 on
 127.0.0.1:55440 with local test-only trust and bootstrap role crm_bootstrap_ci.
@@ -155,7 +156,15 @@ Creates fresh isolated test databases and restricted roles, migrates/builds
 current services, and starts real APIs plus temporary frontend mirrors.
 Default owner starts without WinCRM: use the real five-day Trial button.
 --activate-owner additionally activates Trial and installs universal-sales@1 via API.
+--with-widgets requires --activate-owner, adds a real Widgets API on loopback 4700,
+and seeds one synthetic published Quiz with a matching test-only EASY period.
+It verifies public candidates/create and one claimed control command via real HTTP.
+No payment, lead transfer, publisher or RabbitMQ transport is exercised by this profile.
+--verify-native-widget-http requires --with-widgets and four scoped local broker principals.
+It additionally proves public Quiz submit -> real Widgets Outbox publisher -> RabbitMQ
+-> real Intake worker/HTTP dependencies -> Inbox, without external provider delivery.
 --verify-domain runs Customers, Intake and Sales PostgreSQL 18 integration scenarios.
+It includes the service-owned native Widget transfer PostgreSQL gate.
 --verify-acceptance-http uses a separate normal test account and real HTTP downstream operations.
 It drives a claimed Intake event without a broker and does not prove RabbitMQ transport.
 Use --refresh-frontends /exact/private/browser-fixture.json to refresh source snapshots.
@@ -169,6 +178,8 @@ for (const arg of args) {
 		[
 			'--backend-only',
 			'--activate-owner',
+			'--with-widgets',
+			'--verify-native-widget-http',
 			'--verify-domain',
 			'--verify-acceptance-http',
 			'--smoke-and-stop'
@@ -176,6 +187,16 @@ for (const arg of args) {
 		'Unsupported local-stack argument'
 	);
 }
+const withWidgets = args.has('--with-widgets');
+const withNativeWidgetHttp = args.has('--verify-native-widget-http');
+assert.ok(
+	!withNativeWidgetHttp || withWidgets,
+	'--verify-native-widget-http requires --with-widgets'
+);
+assert.ok(
+	!withWidgets || args.has('--activate-owner'),
+	'--with-widgets requires explicit --activate-owner; the default owner Trial is never activated implicitly'
+);
 assert.equal(
 	process.env.WINCRM_LOCAL_STACK_ALLOW_MUTATION,
 	'true',
@@ -218,6 +239,9 @@ const jwksUrl = 'http://127.0.0.1:4900/api/v1/auth/.well-known/jwks.json';
 const serviceDefinitions = [
 	{ app: 'identity', schema: 'identity', port: 4900 },
 	{ app: 'billing', schema: 'billing', port: 4800 },
+	...(withWidgets
+		? [{ app: 'widgets', schema: 'widgets', port: 4700 }]
+		: []),
 	{ app: 'crm-access', schema: 'crm_access', port: 5300 },
 	{ app: 'crm-intake', schema: 'crm_intake', port: 5310 },
 	{ app: 'crm-customers', schema: 'crm_customers', port: 5320 },
@@ -344,6 +368,11 @@ async function assertFreePort(port) {
 }
 
 async function verifyLocalPostgres() {
+	assert.equal(
+		await execute('docker', ['context', 'show']),
+		'colima',
+		'Active Docker context must be local Colima'
+	);
 	const endpoint = await docker([
 		'context',
 		'inspect',
@@ -351,9 +380,28 @@ async function verifyLocalPostgres() {
 		'--format',
 		'{{json .Endpoints.docker.Host}}'
 	]);
-	assert.match(JSON.parse(endpoint), /^unix:\/\/.*\/\.colima\//);
+	const socket = JSON.parse(endpoint);
+	assert.match(socket, /^unix:\/\/.*\/\.colima\/[^\s]+\/docker\.sock$/);
+	assert.ok(
+		(await stat(socket.slice('unix://'.length))).isSocket(),
+		'Colima endpoint must be a local Unix socket'
+	);
 	const engine = await docker(['info', '--format', '{{.Name}}']);
 	assert.equal(engine, 'colima');
+	assert.equal(
+		await docker([
+			'inspect',
+			container,
+			'--format',
+			'{{index .Config.Labels "winwidget.test"}}'
+		]),
+		'crm-mvp',
+		'Expected explicit local test-container label'
+	);
+	assert.equal(
+		await docker(['inspect', container, '--format', '{{.State.Running}}']),
+		'true'
+	);
 	const detail = JSON.parse(
 		await docker([
 			'inspect',
@@ -521,6 +569,40 @@ async function grantRuntime(service) {
 			],
 			SELECT: ['settings', 'tariff_prices']
 		},
+		widgets: {
+			SELECT: [
+				'widgets',
+				'quizzes',
+				'callbacks',
+				'countdown_timers',
+				'stop_offers',
+				'calculators',
+				'leads',
+				'quiz_leads',
+				'callback_leads',
+				'countdown_timer_leads',
+				'stop_offer_leads',
+				'calculator_leads'
+			],
+			INSERT: ['quizzes', ...(withNativeWidgetHttp ? ['quiz_leads'] : [])],
+			...(withNativeWidgetHttp ? { UPDATE: ['outbox_events'] } : {}),
+			'SELECT, INSERT': [
+				'owner_projections',
+				'entitlement_projections',
+				'usage_ledger',
+				'outbox_events',
+				'wincrm_connector_commands',
+				'wincrm_transfer_intents'
+			],
+			'SELECT, INSERT, UPDATE': [
+				'usage_counters',
+				'wincrm_connectors',
+				'heartbeats',
+				...(withNativeWidgetHttp
+					? ['aggregate_versions', 'source_sequences']
+					: [])
+			]
+		},
 		'crm-access': {
 			'SELECT, INSERT, UPDATE': [
 				'crm_workspace_access',
@@ -546,7 +628,9 @@ async function grantRuntime(service) {
 				'managed_widget_sources',
 				'widget_control_jobs',
 				'widget_control_receipts',
-				'widget_control_outbox'
+				'widget_control_outbox',
+				'widget_transfer_receipts',
+				'widget_transfer_outbox'
 			],
 			'SELECT, INSERT': [
 				'intake_commands',
@@ -554,7 +638,8 @@ async function grantRuntime(service) {
 				'inbound_receipts',
 				'csv_imports',
 				'csv_import_rows',
-				'export_audit'
+				'export_audit',
+				'widget_entry_snapshots'
 			],
 			'SELECT, INSERT, UPDATE, DELETE': ['ingestion_rate_buckets']
 		},
@@ -598,6 +683,10 @@ async function grantRuntime(service) {
 		statements.push(
 			`GRANT USAGE, SELECT ON SEQUENCE crm_access.crm_admissions_position_seq TO ${service.runtimeRole};`
 		);
+	if (service.app === 'widgets')
+		statements.push(
+			`GRANT UPDATE(id) ON widgets.widgets, widgets.quizzes, widgets.callbacks, widgets.countdown_timers, widgets.stop_offers, widgets.calculators TO ${service.runtimeRole};`
+		);
 	await sql(service.database, statements.join('\n'));
 	const isolation = await sql(
 		service.database,
@@ -609,6 +698,32 @@ async function grantRuntime(service) {
 		service.runtimeRole
 	);
 	assert.equal(isolation, 't', `${service.app} runtime isolation failed`);
+	if (service.app === 'widgets') {
+		for (const [table, canUpdate] of [
+			['wincrm_connectors', true],
+			['wincrm_connector_commands', false],
+			['wincrm_transfer_intents', false]
+		]) {
+			const exact = await sql(
+				service.database,
+				`SELECT has_table_privilege(current_user, 'widgets.${table}', 'SELECT') AND has_table_privilege(current_user, 'widgets.${table}', 'INSERT') AND has_table_privilege(current_user, 'widgets.${table}', 'UPDATE') = ${canUpdate} AND NOT has_table_privilege(current_user, 'widgets.${table}', 'DELETE') AND NOT has_table_privilege(current_user, 'widgets.${table}', 'TRUNCATE');`,
+				service.runtimeRole
+			);
+			assert.equal(
+				exact,
+				't',
+				'Native Widgets evidence ACL must remain least privilege'
+			);
+		}
+		assert.equal(
+			await sql(
+				service.database,
+				"SELECT NOT has_function_privilege(current_user, 'widgets.guard_wincrm_connector_update()', 'EXECUTE') AND NOT has_function_privilege(current_user, 'widgets.reject_wincrm_evidence_mutation()', 'EXECUTE');",
+				service.runtimeRole
+			),
+			't'
+		);
+	}
 }
 
 async function verifyDomain() {
@@ -642,6 +757,11 @@ async function verifyDomain() {
 			'CRM_INTAKE'
 		],
 		[
+			'crm-intake',
+			'widget-transfer-postgres18.integration.mjs',
+			'CRM_INTAKE'
+		],
+		[
 			'crm-customers',
 			'export-postgres18.integration.mjs',
 			'CRM_CUSTOMERS'
@@ -655,6 +775,10 @@ async function verifyDomain() {
 			[join(service.root, 'test/integration', file)],
 			{
 				env: {
+					...optionalDomainTestBrokerEnvironment(file),
+					...(file === 'widget-transfer-postgres18.integration.mjs'
+						? nativeTransferTestBrokerEnvironment()
+						: {}),
 					[`${prefix}_INTEGRATION_ALLOW_MUTATION`]: 'true',
 					[`${prefix}_TEST_DATABASE_URL`]: databaseUrl(
 						service,
@@ -678,6 +802,129 @@ async function verifyDomain() {
 	}
 }
 
+function optionalDomainTestBrokerEnvironment(file) {
+	const name = {
+		'acceptance-postgres18.integration.mjs':
+			'CRM_INTAKE_ACCEPTANCE_TEST_RABBITMQ_URL',
+		'widget-control-postgres18.integration.mjs':
+			'CRM_INTAKE_WIDGET_CONTROL_TEST_RABBITMQ_URL'
+	}[file];
+	if (!name || process.env[name] === undefined) return {};
+	const value = process.env[name];
+	secrets.add(value);
+	try {
+		const url = new URL(value);
+		secrets.add(url.password);
+		secrets.add(decodeURIComponent(url.password));
+		assert.ok(
+			url.protocol === 'amqp:' &&
+				url.hostname === '127.0.0.1' &&
+				url.port === '5673' &&
+				decodeURIComponent(url.username) &&
+				decodeURIComponent(url.password) &&
+				!url.search &&
+				!url.hash
+		);
+		assert.match(
+			decodeURIComponent(url.pathname),
+			/^\/[a-z0-9_-]+_(test|ci)$/
+		);
+		return { [name]: value };
+	} catch {
+		throw new Error(
+			'Optional domain broker proof requires scoped credentials on a loopback 127.0.0.1:5673 test vhost; values suppressed'
+		);
+	}
+}
+
+function nativeTransferTestBrokerEnvironment() {
+	const names = [
+		'CRM_INTAKE_WIDGET_TRANSFER_TEST_RABBITMQ_URL',
+		'CRM_INTAKE_WIDGET_TRANSFER_TEST_WORKER_RABBITMQ_URL',
+		'CRM_INTAKE_WIDGET_TRANSFER_TEST_PUBLISHER_RABBITMQ_URL'
+	];
+	const supplied = names.map(name => process.env[name]);
+	if (supplied.every(value => value === undefined)) return {};
+	try {
+		const urls = supplied.map(value => new URL(value));
+		for (const url of urls) {
+			assert.ok(
+				url.protocol === 'amqp:' &&
+					url.hostname === '127.0.0.1' &&
+					url.port === '5673' &&
+					url.username &&
+					url.password &&
+					!url.search &&
+					!url.hash
+			);
+			assert.match(
+				decodeURIComponent(url.pathname),
+				/^\/[a-z0-9_-]+_(test|ci)$/
+			);
+			assert.equal(url.pathname, urls[0].pathname);
+		}
+		assert.equal(new Set(urls.map(url => url.username)).size, 3);
+		for (const [index, value] of supplied.entries()) {
+			secrets.add(value);
+			secrets.add(urls[index].password);
+			secrets.add(decodeURIComponent(urls[index].password));
+		}
+		return Object.fromEntries(
+			names.map((name, index) => [name, supplied[index]])
+		);
+	} catch {
+		throw new Error(
+			'Native transfer test requires three distinct scoped credentials for one loopback 127.0.0.1:5673 test vhost; values suppressed'
+		);
+	}
+}
+
+function nativeWidgetHttpBrokerEnvironment() {
+	const current = nativeTransferTestBrokerEnvironment();
+	const value =
+		process.env
+			.CRM_INTAKE_WIDGET_TRANSFER_TEST_WIDGETS_PUBLISHER_RABBITMQ_URL;
+	try {
+		const peers = [
+			current.CRM_INTAKE_WIDGET_TRANSFER_TEST_RABBITMQ_URL,
+			current.CRM_INTAKE_WIDGET_TRANSFER_TEST_WORKER_RABBITMQ_URL,
+			current.CRM_INTAKE_WIDGET_TRANSFER_TEST_PUBLISHER_RABBITMQ_URL,
+			value
+		].map(raw => new URL(raw));
+		assert.ok(
+			peers.every(
+				peer =>
+					peer.protocol === 'amqp:' &&
+					peer.hostname === '127.0.0.1' &&
+					peer.port === '5673' &&
+					peer.pathname === peers[0].pathname &&
+					peer.username &&
+					peer.password &&
+					!peer.search &&
+					!peer.hash
+			)
+		);
+		assert.equal(
+			new Set(peers.map(peer => decodeURIComponent(peer.username))).size,
+			4
+		);
+		secrets.add(value);
+		secrets.add(peers[3].password);
+		secrets.add(decodeURIComponent(peers[3].password));
+		return {
+			provisioner: current.CRM_INTAKE_WIDGET_TRANSFER_TEST_RABBITMQ_URL,
+			worker: current.CRM_INTAKE_WIDGET_TRANSFER_TEST_WORKER_RABBITMQ_URL,
+			publisher:
+				current.CRM_INTAKE_WIDGET_TRANSFER_TEST_PUBLISHER_RABBITMQ_URL,
+			widgetsPublisher: value
+		};
+	} catch {
+		throw new Error(
+			'Native Widget HTTP proof requires four distinct scoped principals on one local test vhost; values suppressed'
+		);
+	}
+}
+
 function environment() {
 	const tokens = {};
 	for (const key of [
@@ -696,6 +943,18 @@ function environment() {
 		'BILLING_CAMPAIGNS_TOKEN',
 		'BILLING_OPERATIONS_TOKEN',
 		'WIDGETS_INTERNAL_TOKEN',
+		...(withWidgets
+			? [
+					'WIDGETS_CRM_INTAKE_TOKEN',
+					'BILLING_WINCRM_WIDGETS_TOKEN',
+					'BILLING_WINCRM_CRM_INTAKE_TOKEN',
+					'WIDGETS_OPERATIONS_TOKEN',
+					'WIDGETS_CALLBACK_OTP_SECRET',
+					'WIDGETS_AI_SESSION_SECRET',
+					'CLOUDFLARE_API_TOKEN',
+					'CLOUDFLARE_TURNSTILE_SECRET_KEY'
+				]
+			: []),
 		'CRM_SALES_CRM_ACCESS_TOKEN',
 		'CRM_SALES_CRM_INTAKE_TOKEN',
 		'CRM_CUSTOMERS_CRM_SALES_TOKEN',
@@ -737,6 +996,24 @@ function environment() {
 		BILLING_PROCESS_ROLE: 'api',
 		CRM_ACCESS_PROCESS_ROLE: 'api',
 		CRM_INTAKE_PROCESS_ROLE: 'api',
+		BILLING_WINCRM_WIDGETS_ELIGIBILITY_ENABLED: String(withWidgets),
+		CRM_INTAKE_WIDGETS_ENABLED: String(withWidgets),
+		CRM_INTAKE_WIDGET_TRANSFERS_ENABLED: String(withNativeWidgetHttp),
+		...(withWidgets
+			? {
+					WIDGETS_PROCESS_ROLE: 'api',
+					WIDGETS_LISTEN_HOST: '127.0.0.1',
+					WIDGETS_PORT: '4700',
+					WIDGETS_WINCRM_CONNECTOR_ENABLED: 'true',
+					WIDGETS_ENTITLEMENT_MAX_STALENESS_MS: '86400000',
+					CLOUDFLARE_ACCOUNT_ID: 'local-qa-account',
+					CLOUDFLARE_AI_GATEWAY_ID: 'local-qa-gateway',
+					CLOUDFLARE_AI_MODEL: '@cf/local/disabled',
+					CLOUDFLARE_TURNSTILE_SITE_KEY: 'local-qa-disabled',
+					CLOUDFLARE_AI_API_ORIGIN: 'http://127.0.0.1:59991',
+					CLOUDFLARE_TURNSTILE_SITEVERIFY_ORIGIN: 'http://127.0.0.1:59991'
+				}
+			: {}),
 		WINCRM_INVITATION_EMAIL_ENABLED: 'false',
 		IDENTITY_LISTEN_HOST: '127.0.0.1',
 		BILLING_LISTEN_HOST: '127.0.0.1',
@@ -822,7 +1099,39 @@ function ownedEnvironment(app, values) {
 			'IDENTITY_BILLING_TOKEN',
 			'IDENTITY_INTERNAL_BASE_URL',
 			'WIDGETS_INTERNAL_TOKEN',
-			'WIDGETS_INTERNAL_BASE_URL'
+			'WIDGETS_INTERNAL_BASE_URL',
+			'BILLING_WINCRM_WIDGETS_ELIGIBILITY_ENABLED',
+			...(withWidgets
+				? [
+						'BILLING_WINCRM_WIDGETS_TOKEN',
+						'BILLING_WINCRM_CRM_INTAKE_TOKEN'
+					]
+				: [])
+		],
+		widgets: [
+			'WIDGETS_PROCESS_ROLE',
+			'WIDGETS_LISTEN_HOST',
+			'WIDGETS_PORT',
+			'WIDGETS_WINCRM_CONNECTOR_ENABLED',
+			'WIDGETS_ENTITLEMENT_MAX_STALENESS_MS',
+			'WIDGETS_CRM_INTAKE_TOKEN',
+			'BILLING_WINCRM_WIDGETS_TOKEN',
+			'BILLING_INTERNAL_BASE_URL',
+			'WIDGETS_INTERNAL_TOKEN',
+			'WIDGETS_IDENTITY_TOKEN',
+			'WIDGETS_OPERATIONS_TOKEN',
+			'IDENTITY_WIDGETS_TOKEN',
+			'IDENTITY_INTERNAL_BASE_URL',
+			'WIDGETS_CALLBACK_OTP_SECRET',
+			'WIDGETS_AI_SESSION_SECRET',
+			'CLOUDFLARE_ACCOUNT_ID',
+			'CLOUDFLARE_API_TOKEN',
+			'CLOUDFLARE_AI_GATEWAY_ID',
+			'CLOUDFLARE_AI_MODEL',
+			'CLOUDFLARE_TURNSTILE_SITE_KEY',
+			'CLOUDFLARE_TURNSTILE_SECRET_KEY',
+			'CLOUDFLARE_AI_API_ORIGIN',
+			'CLOUDFLARE_TURNSTILE_SITEVERIFY_ORIGIN'
 		],
 		'crm-access': [
 			'CRM_ACCESS_PROCESS_ROLE',
@@ -861,15 +1170,23 @@ function ownedEnvironment(app, values) {
 			'CRM_CUSTOMERS_INTERNAL_BASE_URL',
 			'CRM_CUSTOMERS_CRM_INTAKE_TOKEN',
 			'CRM_SALES_INTERNAL_BASE_URL',
-			'CRM_SALES_CRM_INTAKE_TOKEN'
+			'CRM_SALES_CRM_INTAKE_TOKEN',
+			'CRM_INTAKE_WIDGETS_ENABLED',
+			'CRM_INTAKE_WIDGET_TRANSFERS_ENABLED',
+			...(withWidgets
+				? ['WIDGETS_INTERNAL_BASE_URL', 'WIDGETS_CRM_INTAKE_TOKEN']
+				: [])
 		]
 	};
-	return Object.fromEntries(
-		['CORS_ALLOWED_ORIGINS', 'TRUST_PROXY', ...keys[app]].map(key => [
-			key,
-			values[key]
-		])
-	);
+	return {
+		...Object.fromEntries(
+			['CORS_ALLOWED_ORIGINS', 'TRUST_PROXY', ...keys[app]].map(key => [
+				key,
+				values[key]
+			])
+		),
+		...(app === 'widgets' ? { NODE_ENV: 'test' } : {})
+	};
 }
 
 async function seedIdentity() {
@@ -948,7 +1265,392 @@ async function seedIdentity() {
 	return accounts;
 }
 
+async function seedWidgets(account) {
+	assert.ok(
+		withWidgets && byApp.widgets,
+		'Widgets fixture requires its explicit profile'
+	);
+	assert.equal(account.userId, `wincrm-local-owner-${runId}`);
+	const widgets = byApp.widgets,
+		billing = byApp.billing;
+	const widgetsRequire = createRequire(join(widgets.root, 'package.json'));
+	const billingRequire = createRequire(join(billing.root, 'package.json'));
+	const widgetsDb = new (widgetsRequire(
+		'@prisma/widgets-client'
+	).PrismaClient)({
+		datasources: {
+			db: { url: databaseUrl(widgets, widgets.runtimeRole) }
+		},
+		log: []
+	});
+	const billingDb = new (billingRequire(
+		'@prisma/billing-client'
+	).PrismaClient)({
+		datasources: {
+			db: { url: databaseUrl(billing, billing.runtimeRole) }
+		},
+		log: []
+	});
+	try {
+		const now = new Date(),
+			startsAt = new Date(now.getTime() - 60000),
+			expiresAt = new Date(now.getTime() + 30 * 86400000);
+		assert.equal(
+			await billingDb.subscription.count({
+				where: { userId: account.userId }
+			}),
+			0,
+			'Synthetic owner must not already have a subscription'
+		);
+		// Isolated fixture, not checkout or a simulated payment. No shared DB access enters a runtime.
+		const subscription = await billingDb.subscription.create({
+			data: {
+				userId: account.userId,
+				plan: 'EASY',
+				billingPeriod: 'MONTHLY',
+				status: 'ACTIVE',
+				startsAt,
+				expiresAt,
+				periodResetsAt: expiresAt,
+				aggregateVersion: 1n,
+				sourceSequence: 1n
+			}
+		});
+		const { getWidgetDefinition, WidgetType } = widgetsRequire(
+			join(widgets.root, 'dist/src/domain/widgets-domain.types.js')
+		);
+		const config = getWidgetDefinition(WidgetType.QUIZ).defaultConfig();
+		const publicKey = randomBytes(6).toString('hex');
+		const quiz = await widgetsDb.$transaction(async tx => {
+			await tx.widgetOwnerProjection.create({
+				data: {
+					userId: account.userId,
+					status: 'ACTIVE',
+					aggregateVersion: 1n,
+					sourceSequence: 1n,
+					sourceOccurredAt: now
+				}
+			});
+			await tx.widgetEntitlementProjection.create({
+				data: {
+					// The projection key is the actual Billing subscription CUID, never a new local ID.
+					id: subscription.id,
+					userId: account.userId,
+					plan: subscription.plan,
+					billingPeriod: subscription.billingPeriod,
+					status: subscription.status,
+					startsAt: subscription.startsAt,
+					expiresAt: subscription.expiresAt,
+					periodResetsAt: subscription.periodResetsAt,
+					maxWidgets: 100,
+					maxLeadsPerPeriod: 100,
+					unlimited: false,
+					aggregateVersion: subscription.aggregateVersion,
+					sourceSequence: subscription.sourceSequence,
+					sourceOccurredAt: now,
+					sourceCreatedAt: subscription.createdAt,
+					sourceUpdatedAt: subscription.updatedAt
+				}
+			});
+			if (withNativeWidgetHttp)
+				await tx.widgetUsageCounter.create({
+					data: {
+						userId: account.userId,
+						widgetCount: 1,
+						leadCount: 0,
+						leadPeriodKey: expiresAt.toISOString(),
+						leadPeriodStartsAt: startsAt,
+						leadPeriodEndsAt: expiresAt,
+						entitlementVersion: subscription.aggregateVersion
+					}
+				});
+			return tx.quiz.create({
+				data: {
+					userId: account.userId,
+					publicKey,
+					name: 'WinCRM local QA Quiz',
+					isActive: true,
+					installDomain: 'localhost',
+					config,
+					draftRevision: 1,
+					publishedVersion: 1,
+					publishedFromDraftRevision: 1,
+					publishedAt: now
+				}
+			});
+		});
+		log(
+			'Seeded one synthetic published Quiz and matching Billing EASY/Widgets projection; no payment or historical lead import'
+		);
+		return {
+			widgetType: 'QUIZ',
+			widgetId: quiz.id,
+			publicKey,
+			workspaceId: account.workspaceId,
+			ownerSubject: account.userId,
+			subscriptionId: subscription.id,
+			subscriptionVersion: subscription.aggregateVersion.toString(),
+			startsAt: startsAt.toISOString(),
+			expiresAt: expiresAt.toISOString()
+		};
+	} catch {
+		throw new Error(
+			'Synthetic Widgets/Billing fixture creation failed; database details suppressed'
+		);
+	} finally {
+		await Promise.all([widgetsDb.$disconnect(), billingDb.$disconnect()]);
+	}
+}
+
+async function verifyWidgetsControlHttp(
+	account,
+	widget,
+	environmentValues
+) {
+	const intake = byApp['crm-intake'];
+	const intakeEnvironment = ownedEnvironment(
+		'crm-intake',
+		environmentValues
+	);
+	const previous = new Map(
+		Object.keys(intakeEnvironment).map(key => [key, process.env[key]])
+	);
+	for (const [key, value] of Object.entries(intakeEnvironment))
+		process.env[key] = value;
+	const require = createRequire(join(intake.root, 'package.json'));
+	require('reflect-metadata');
+	const { PrismaClient } = require('@prisma/crm-intake-client');
+	const prisma = new PrismaClient({
+		datasources: { db: { url: databaseUrl(intake, intake.runtimeRole) } },
+		log: []
+	});
+	const request = async (
+		path,
+		{ method = 'GET', token, body, expected = 200 } = {}
+	) => {
+		const response = await fetch(`${publicApi}${path}`, {
+			method,
+			redirect: 'error',
+			cache: 'no-store',
+			signal: AbortSignal.timeout(15000),
+			headers: {
+				'content-type': 'application/json',
+				...(token ? { authorization: `Bearer ${token}` } : {}),
+				...(body?.commandId ? { 'Idempotency-Key': body.commandId } : {})
+			},
+			...(body ? { body: JSON.stringify(body) } : {})
+		});
+		if (response.status !== expected) {
+			await response.body?.cancel();
+			throw new Error(
+				`Local Widget control HTTP expected ${expected}, received ${response.status}`
+			);
+		}
+		return response.json();
+	};
+	try {
+		const session = await request('/auth/login', {
+			method: 'POST',
+			body: { email: account.email, password: account.password }
+		});
+		assert.equal(session.user.id, account.userId);
+		assert.ok(
+			typeof session.accessToken === 'string' &&
+				session.accessToken.length > 100
+		);
+		secrets.add(session.accessToken);
+		const token = session.accessToken;
+		const candidatesPath = `/crm/intake/widget-sources/candidates?workspaceId=${account.workspaceId}&page=1&pageSize=25`;
+		const candidates = await request(candidatesPath, { token });
+		assert.equal(candidates.schemaVersion, 1);
+		assert.equal(candidates.workspaceId, account.workspaceId);
+		assert.equal(candidates.eligibility.eligible, true);
+		assert.equal(candidates.eligibility.plan, 'EASY');
+		assert.equal(candidates.items.length, 1);
+		assert.equal(candidates.items[0].widgetId, widget.widgetId);
+		assert.equal(candidates.items[0].widgetType, 'QUIZ');
+		assert.equal(candidates.items[0].connection, 'NONE');
+		const command = {
+			schemaVersion: 1,
+			workspaceId: account.workspaceId,
+			commandId: randomUUID(),
+			name: 'Local Quiz control proof',
+			widgetType: 'QUIZ',
+			widgetId: widget.widgetId,
+			teamId: null
+		};
+		const created = await request('/crm/intake/widget-sources', {
+			token,
+			method: 'POST',
+			body: command,
+			expected: 202
+		});
+		assert.equal(created.command.id, command.commandId);
+		assert.equal(created.command.state, 'QUEUED');
+		assert.equal(created.source.syncState, 'PENDING');
+		assert.equal(created.source.workspaceId, account.workspaceId);
+		const sourceId = created.source.id;
+		assert.match(
+			sourceId,
+			/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/
+		);
+		const job = await prisma.widgetControlJob.findUniqueOrThrow({
+			where: { commandId: command.commandId }
+		});
+		const outbox = await prisma.widgetControlOutbox.findFirstOrThrow({
+			where: { eventId: job.activeEventId, route: 'MAIN' }
+		});
+		assert.equal(outbox.status, 'PENDING');
+		assert.equal(outbox.publishedAt, null);
+		const { WidgetControlConfig } = require(
+			join(intake.root, 'dist/src/widget-sources/widget-control.config.js')
+		);
+		const { WidgetsControlClient } = require(
+			join(
+				intake.root,
+				'dist/src/widget-sources/widgets-control.client.js'
+			)
+		);
+		const { IntakeAuthorizationClient } = require(
+			join(intake.root, 'dist/src/access/intake-authorization.client.js')
+		);
+		const { WidgetControlProcessor } = require(
+			join(
+				intake.root,
+				'dist/src/widget-sources/widget-control.processor.js'
+			)
+		);
+		const { parseControlEvent } = require(
+			join(
+				intake.root,
+				'dist/src/widget-sources/widget-control.contract.js'
+			)
+		);
+		const event = parseControlEvent(outbox.payload);
+		assert.equal(event.sourceId, sourceId);
+		assert.equal(event.workspaceId, account.workspaceId);
+		const processor = new WidgetControlProcessor(
+			prisma,
+			new IntakeAuthorizationClient(),
+			new WidgetsControlClient(new WidgetControlConfig())
+		);
+		// Deliberately drive one real durable claim; no publisher, broker or PUBLISHED substitution.
+		const claim = await processor.claim(event, 0);
+		assert.equal(claim.state, 'CLAIMED');
+		await processor.run(event, claim.token);
+		assert.equal((await processor.claim(event, 0)).state, 'DONE');
+		const applied = await request(
+			`/crm/intake/widget-sources/${sourceId}?workspaceId=${account.workspaceId}`,
+			{ token }
+		);
+		assert.equal(applied.source.syncState, 'SYNCED');
+		assert.equal(applied.source.enabled, true);
+		assert.equal(applied.source.appliedControlVersion, 1);
+		assert.equal(applied.source.appliedGeneration, 1);
+		assert.equal(applied.source.widgetId, widget.widgetId);
+		const connected = await request(candidatesPath, { token });
+		assert.equal(connected.items[0].connection, 'THIS_WORKSPACE');
+		assert.equal(connected.items[0].sourceId, sourceId);
+		const retained = await prisma.widgetControlOutbox.findUniqueOrThrow({
+			where: { id: outbox.id }
+		});
+		assert.equal(retained.status, 'PENDING');
+		assert.equal(retained.publishedAt, null);
+		const replay = await request('/crm/intake/widget-sources', {
+			token,
+			method: 'POST',
+			body: command,
+			expected: 202
+		});
+		assert.deepEqual(
+			replay,
+			created,
+			'Replay must return the historical queued command, not the current synchronized state'
+		);
+		log(
+			'Widget control HTTP proof passed: fresh public candidates/create, real Widgets configure and durable Intake claim; no RabbitMQ or lead-transfer proof'
+		);
+		return {
+			...widget,
+			sourceId,
+			connectorId: job.connectorId,
+			controlCommandId: command.commandId,
+			controlEventId: event.eventId,
+			controlOutboxId: outbox.id,
+			controlHttpVerified: true,
+			outboxPublicationVerified: false,
+			leadTransfersVerified: false
+		};
+	} catch (error) {
+		throw new Error(
+			safeFailure(
+				'Local Widget control HTTP proof',
+				error?.message || 'FAILED'
+			)
+		);
+	} finally {
+		await prisma.$disconnect();
+		for (const [key, value] of previous) {
+			if (value === undefined) delete process.env[key];
+			else process.env[key] = value;
+		}
+	}
+}
+
 async function seedTeamFixtures(accounts, workspaceId) {
+	// A real Trial snapshot, not the mutable policy defaults, owns this capacity.
+	// Only the manager persona is needed by the HTTP workflow and browser seed.
+	const owner = Object.values(accounts).find(
+		account => account.workspaceId === workspaceId
+	);
+	assert.ok(
+		owner,
+		'The team fixture requires its synthetic workspace owner'
+	);
+	const request = async (path, { body, token } = {}) => {
+		const response = await fetch(`${publicApi}${path}`, {
+			method: body ? 'POST' : 'GET',
+			redirect: 'error',
+			cache: 'no-store',
+			signal: AbortSignal.timeout(15_000),
+			headers: {
+				'content-type': 'application/json',
+				...(token ? { authorization: `Bearer ${token}` } : {})
+			},
+			...(body ? { body: JSON.stringify(body) } : {})
+		});
+		if (response.status !== 200) {
+			await response.body?.cancel();
+			throw new Error(
+				'Team fixture authorization or capacity unavailable'
+			);
+		}
+		return response.json();
+	};
+	const session = await request('/auth/login', {
+		body: { email: owner.email, password: owner.password }
+	});
+	assert.equal(session.user.id, owner.userId);
+	assert.ok(
+		typeof session.accessToken === 'string' &&
+			session.accessToken.length > 100
+	);
+	secrets.add(session.accessToken);
+	const rosterPath = `/crm/access/team/members?workspaceId=${workspaceId}&page=1&pageSize=100`;
+	const before = await request(rosterPath, { token: session.accessToken });
+	assert.equal(before.schemaVersion, 1);
+	assert.equal(before.workspaceId, workspaceId);
+	assert.equal(before.ownerSubject, owner.userId);
+	assert.ok(
+		Number.isSafeInteger(before.quota?.seatLimit) &&
+			before.quota.seatLimit >= 2 &&
+			before.quota.seatLimit <= 10000
+	);
+	assert.equal(before.quota.usedSeats, 1);
+	assert.equal(before.quota.waitingCount, 0);
+	assert.equal(before.total, 0);
+	assert.deepEqual(before.items, []);
+	assert.ok(before.quota.seatLimit - before.quota.usedSeats >= 1);
 	const identity = byApp.identity;
 	const accessService = byApp['crm-access'];
 	const identityRequire = createRequire(
@@ -973,36 +1675,23 @@ async function seedTeamFixtures(accounts, workspaceId) {
 	});
 	const teamId = randomUUID();
 	try {
-		const members = [];
-		for (const [name, role] of [
-			['admin', 'CRM_ADMIN'],
-			['manager', 'MANAGER'],
-			['teamLead', 'TEAM_LEAD'],
-			['analyst', 'ANALYST']
-		]) {
-			const membership = await identityDb.workspaceMember.create({
-				data: {
-					workspaceId,
-					userId: accounts[name].userId,
-					role: 'MEMBER',
-					status: 'ACTIVE'
-				}
-			});
-			const memberId = randomUUID();
-			members.push({
-				id: memberId,
+		const membership = await identityDb.workspaceMember.create({
+			data: {
 				workspaceId,
-				subject: accounts[name].userId,
+				userId: accounts.manager.userId,
+				role: 'MEMBER',
+				status: 'ACTIVE'
+			}
+		});
+		const members = [
+			{
+				id: randomUUID(),
+				workspaceId,
+				subject: accounts.manager.userId,
 				membershipId: membership.id,
-				role
-			});
-			Object.assign(accounts[name], {
-				crmWorkspaceId: workspaceId,
-				crmMemberId: memberId,
-				crmTeamId: teamId,
-				...(name === 'manager' ? { workflowMemberId: memberId } : {})
-			});
-		}
+				role: 'MANAGER'
+			}
+		];
 		await accessDb.$transaction(async tx => {
 			await tx.crmTeam.create({
 				data: { id: teamId, workspaceId, name: 'Локальная команда QA' }
@@ -1016,8 +1705,31 @@ async function seedTeamFixtures(accounts, workspaceId) {
 				}))
 			});
 		});
+		const after = await request(rosterPath, {
+			token: session.accessToken
+		});
+		assert.equal(after.schemaVersion, 1);
+		assert.equal(after.workspaceId, workspaceId);
+		assert.equal(after.ownerSubject, owner.userId);
+		assert.deepEqual(after.quota, {
+			seatLimit: before.quota.seatLimit,
+			usedSeats: 2,
+			waitingCount: 0
+		});
+		assert.equal(after.total, 1);
+		assert.equal(after.items.length, 1);
+		assert.equal(after.items[0].id, members[0].id);
+		assert.equal(after.items[0].subject, accounts.manager.userId);
+		assert.equal(after.items[0].role, 'MANAGER');
+		assert.equal(after.items[0].disabledAt, null);
+		Object.assign(accounts.manager, {
+			crmWorkspaceId: workspaceId,
+			crmMemberId: members[0].id,
+			crmTeamId: teamId,
+			workflowMemberId: members[0].id
+		});
 		log(
-			'Seeded service-owned team joins for five CRM roles; invitation/admission/email delivery is not simulated'
+			`Seeded two-role CRM fixture (OWNER + MANAGER), 2/${before.quota.seatLimit} seats verified through public Access; other personas keep their own workspaces; invitation/admission/email delivery is not simulated`
 		);
 	} finally {
 		await Promise.all([identityDb.$disconnect(), accessDb.$disconnect()]);
@@ -1167,7 +1879,7 @@ async function smoke(accounts) {
 		401,
 		'Customer pricing must still require normal Identity login'
 	);
-	const customerToken = await login(accounts.workflow);
+	const customerToken = await login(accounts.workflow || accounts.manager);
 	const customerPricing = await fetch(
 		`${publicApi}/billing-settings/crm`,
 		{
@@ -1294,6 +2006,9 @@ process.once('SIGINT', () => void shutdown());
 process.once('SIGTERM', () => void shutdown());
 
 try {
+	const nativeWidgetBroker = withNativeWidgetHttp
+		? nativeWidgetHttpBrokerEnvironment()
+		: null;
 	await verifyLocalPostgres();
 	const ports = [
 		4100,
@@ -1304,6 +2019,9 @@ try {
 	for (const service of serviceDefinitions) await prepareDatabase(service);
 	if (args.has('--verify-domain')) await verifyDomain();
 	const accounts = await seedIdentity();
+	let widgetsFixture = withWidgets
+		? await seedWidgets(accounts.owner)
+		: null;
 	const common = environment();
 	for (const service of serviceDefinitions) {
 		start(
@@ -1378,6 +2096,37 @@ try {
 	);
 	await waitForHttp('api-gateway', 'http://127.0.0.1:4100/health/ready');
 	await smoke(accounts);
+	if (withWidgets)
+		widgetsFixture = await verifyWidgetsControlHttp(
+			accounts.owner,
+			widgetsFixture,
+			common
+		);
+	if (withNativeWidgetHttp) {
+		const { verifyNativeWidgetHttp } =
+			await import('./local-native-widget-http.integration.mjs');
+		const widgets = byApp.widgets;
+		const intake = byApp['crm-intake'];
+		const evidence = await verifyNativeWidgetHttp({
+			servicesRoot,
+			runId,
+			apiUrl: publicApi,
+			widgetsApiUrl: 'http://127.0.0.1:4700/api/v1',
+			account: accounts.owner,
+			widget: widgetsFixture,
+			widgetsDatabaseUrl: databaseUrl(widgets, widgets.runtimeRole),
+			intakeDatabaseUrl: databaseUrl(intake, intake.runtimeRole),
+			intakeEnvironment: ownedEnvironment('crm-intake', common),
+			broker: nativeWidgetBroker,
+			registerSecret: value => secrets.add(value),
+			log
+		});
+		widgetsFixture = {
+			...widgetsFixture,
+			leadTransfersVerified: true,
+			nativeLeadHttpBroker: evidence
+		};
+	}
 	if (args.has('--verify-acceptance-http')) {
 		const { verifyAcceptanceHttp } =
 			await import('./local-acceptance-http.integration.mjs');
@@ -1431,6 +2180,7 @@ try {
 				frontendSnapshots,
 				activatedOwner: args.has('--activate-owner'),
 				acceptanceHttpVerified: args.has('--verify-acceptance-http'),
+				widgets: widgetsFixture,
 				rabbitTransportVerified: false,
 				databases: serviceDefinitions.map(
 					({ app, database, migrationRole, runtimeRole }) => ({

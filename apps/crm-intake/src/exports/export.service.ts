@@ -115,6 +115,7 @@ export class IntakeExportService {
 										message: true,
 										origin: true,
 										sourceId: true,
+										widgetSourceId: true,
 										status: true,
 										createdBySubject: true,
 										teamId: true,
@@ -128,7 +129,18 @@ export class IntakeExportService {
 										rejectedAt: true
 									}
 								})
-							).map(row => exportItem(row, columns));
+							).map(row =>
+								exportItem(
+									{
+										...row,
+										sourceId:
+											row.origin === 'WIDGET'
+												? row.widgetSourceId
+												: row.sourceId
+									},
+									columns
+								)
+							);
 						}
 					});
 					return { ...file, snapshotAt };

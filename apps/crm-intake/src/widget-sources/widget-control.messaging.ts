@@ -10,7 +10,6 @@ import {
 } from 'amqp-connection-manager';
 import type { ConfirmChannel, ConsumeMessage } from 'amqplib';
 import { randomUUID } from 'node:crypto';
-import { CONTROL_RETRY_MS } from './widget-control.contract';
 import {
 	parseControlEvent,
 	type ControlEvent
@@ -18,13 +17,12 @@ import {
 
 export const CONTROL_EXCHANGE =
 	'winwidget.crm-intake.widget-control.events';
-export const CONTROL_RETRY_EXCHANGE =
-	'winwidget.crm-intake.widget-control.retry';
 export const CONTROL_DEAD_EXCHANGE =
 	'winwidget.crm-intake.widget-control.dead-letter';
 export const CONTROL_QUEUE = 'winwidget.crm-intake.widget-control.v1';
 export const CONTROL_EVENT_TYPE = 'crm.intake.widget-control.requested.v1';
 export const CONTROL_DEAD_QUEUE = `${CONTROL_QUEUE}.dead-letter`;
+export const CONTROL_REQUEUE_DELAY_MS = 5000;
 
 @Injectable()
 export class WidgetControlRabbit
@@ -37,6 +35,11 @@ export class WidgetControlRabbit
 	private stopping = false;
 	private channelReady = false;
 	private readonly returns = new Map<string, boolean>();
+	private readonly requeueWaits = new Map<
+		ConsumeMessage,
+		{ finish: () => void; promise: Promise<void> }
+	>();
+
 	private readonly deliveryChannels = new WeakMap<
 		ConsumeMessage,
 		ConfirmChannel
@@ -119,11 +122,7 @@ export class WidgetControlRabbit
 		}
 	}
 	private async topology(channel: ConfirmChannel) {
-		for (const exchange of [
-			CONTROL_EXCHANGE,
-			CONTROL_RETRY_EXCHANGE,
-			CONTROL_DEAD_EXCHANGE
-		])
+		for (const exchange of [CONTROL_EXCHANGE, CONTROL_DEAD_EXCHANGE])
 			await channel.assertExchange(exchange, 'direct', { durable: true });
 		await channel.assertQueue(CONTROL_QUEUE, { durable: true });
 		await channel.bindQueue(
@@ -137,22 +136,6 @@ export class WidgetControlRabbit
 			CONTROL_DEAD_EXCHANGE,
 			CONTROL_EVENT_TYPE
 		);
-		for (let i = 0; i < CONTROL_RETRY_MS.length; i++) {
-			const queue = `${CONTROL_QUEUE}.retry.${i + 1}`;
-			await channel.assertQueue(queue, {
-				durable: true,
-				arguments: {
-					'x-message-ttl': CONTROL_RETRY_MS[i],
-					'x-dead-letter-exchange': CONTROL_EXCHANGE,
-					'x-dead-letter-routing-key': CONTROL_EVENT_TYPE
-				}
-			});
-			await channel.bindQueue(
-				queue,
-				CONTROL_RETRY_EXCHANGE,
-				`widget-control.retry.${i + 1}`
-			);
-		}
 	}
 	ready(worker = false) {
 		return Boolean(
@@ -167,7 +150,7 @@ export class WidgetControlRabbit
 			throw new Error('PUBLISHER_UNAVAILABLE');
 		parseControlEvent(event);
 		if (
-			!['MAIN', 'RETRY_1', 'RETRY_2', 'RETRY_3', 'DLQ'].includes(route) ||
+			!['MAIN', 'DLQ'].includes(route) ||
 			!Number.isInteger(retryAttempt) ||
 			retryAttempt < 0 ||
 			retryAttempt > 3
@@ -179,14 +162,8 @@ export class WidgetControlRabbit
 		this.returns.set(publication, false);
 		try {
 			await this.channel.publish(
-				route === 'MAIN'
-					? CONTROL_EXCHANGE
-					: route === 'DLQ'
-						? CONTROL_DEAD_EXCHANGE
-						: CONTROL_RETRY_EXCHANGE,
-				route.startsWith('RETRY_')
-					? `widget-control.retry.${route.slice(-1)}`
-					: CONTROL_EVENT_TYPE,
+				route === 'MAIN' ? CONTROL_EXCHANGE : CONTROL_DEAD_EXCHANGE,
+				CONTROL_EVENT_TYPE,
 				body,
 				{
 					contentType: 'application/json',
@@ -214,6 +191,7 @@ export class WidgetControlRabbit
 			this.consumerTag = null;
 			channel.once('close', () => {
 				if (this.consumerChannel === channel) this.consumerTag = null;
+				this.interruptRequeues(channel);
 			});
 			await channel.prefetch(5, false);
 			const registration = await channel.consume(
@@ -226,10 +204,12 @@ export class WidgetControlRabbit
 					}
 					this.deliveryChannels.set(message, channel);
 					if (this.stopping) {
-						channel.nack(message, false, true);
+						this.nack(message);
 						return;
 					}
-					void handler(message).catch(() => this.nack(message));
+					void handler(message).catch(() =>
+						this.nackAfterBackoff(message)
+					);
 				},
 				{ noAck: false }
 			);
@@ -260,10 +240,43 @@ export class WidgetControlRabbit
 			}
 		}
 	}
+	async nackAfterBackoff(message: ConsumeMessage): Promise<void> {
+		if (this.stopping || !this.deliveryChannels.has(message)) {
+			this.nack(message);
+			return;
+		}
+		const pending = this.requeueWaits.get(message);
+		if (pending) return pending.promise;
+		let finish: () => void = () => {};
+		const promise = new Promise<void>(resolve => {
+			let settled = false;
+			const timer = setTimeout(() => finish(), CONTROL_REQUEUE_DELAY_MS);
+			timer.unref();
+			finish = () => {
+				if (settled) return;
+				settled = true;
+				clearTimeout(timer);
+				this.requeueWaits.delete(message);
+				this.nack(message);
+				resolve();
+			};
+		});
+		// The push channel's prefetch bounds these unacknowledged waits to five.
+		this.requeueWaits.set(message, { finish, promise });
+		return promise;
+	}
+	private interruptRequeues(channel?: ConfirmChannel) {
+		for (const [message, pending] of this.requeueWaits)
+			if (!channel || this.deliveryChannels.get(message) === channel)
+				pending.finish();
+	}
 	async cancel() {
 		this.stopping = true;
+		this.interruptRequeues();
 		if (this.consumerTag && this.consumerChannel)
-			await this.consumerChannel.cancel(this.consumerTag);
+			await this.consumerChannel
+				.cancel(this.consumerTag)
+				.catch(() => undefined);
 		this.consumerTag = null;
 	}
 	async onApplicationShutdown() {

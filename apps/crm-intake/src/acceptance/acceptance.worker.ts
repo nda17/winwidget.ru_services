@@ -91,7 +91,7 @@ export class AcceptanceWorker
 				await this.processor.fail(event, claim.token, retryAttempt, error)
 			)
 				this.rabbit.ack(message);
-			else this.rabbit.nack(message);
+			else await this.rabbit.nackAfterBackoff(message);
 		} finally {
 			clearInterval(timer);
 		}

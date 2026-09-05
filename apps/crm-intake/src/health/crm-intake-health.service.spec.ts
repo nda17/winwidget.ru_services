@@ -41,7 +41,39 @@ describe('CrmIntakeHealthService', () => {
 		).not.toMatch(
 			/managed_widget_sources|widget_control_jobs|widget_control_receipts|widget_control_outbox/
 		);
+		const sql = JSON.stringify((prisma.$queryRaw as jest.Mock).mock.calls);
+		expect(sql).toMatch(/widget_entry_snapshots/);
+		expect(sql).toMatch(/widget_transfer_receipts/);
+		expect(sql).not.toMatch(/widget_transfer_outbox/);
 	});
+	it.each(['widget-transfer-worker', 'widget-transfer-publisher'])(
+		'%s requires its own broker readiness',
+		async role => {
+			const previous = { ...process.env };
+			try {
+				process.env.CRM_INTAKE_PROCESS_ROLE = role;
+				process.env.CRM_INTAKE_WIDGETS_ENABLED = 'true';
+				process.env.CRM_INTAKE_WIDGET_TRANSFERS_ENABLED = 'true';
+				await expect(
+					new CrmIntakeHealthService(createPrisma()).readiness()
+				).rejects.toBeInstanceOf(ServiceUnavailableException);
+				const rabbit = { ready: jest.fn().mockReturnValue(true) };
+				await expect(
+					new CrmIntakeHealthService(
+						createPrisma(),
+						undefined,
+						undefined,
+						rabbit as never
+					).readiness()
+				).resolves.toMatchObject({ status: 'ready' });
+				expect(rabbit.ready).toHaveBeenCalledWith(
+					role === 'widget-transfer-worker'
+				);
+			} finally {
+				process.env = previous;
+			}
+		}
+	);
 
 	it('fails readiness for another service database', async () => {
 		const service = new CrmIntakeHealthService(

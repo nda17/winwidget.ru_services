@@ -55,7 +55,9 @@ function setup() {
 	});
 	const tx = {
 		$executeRaw: jest.fn(),
-		$queryRaw: jest.fn(),
+		$queryRaw: jest
+			.fn()
+			.mockResolvedValue([{ now: new Date('2030-01-01T00:00:00.000Z') }]),
 		acceptance: {
 			findFirst: jest.fn().mockResolvedValue(row),
 			findUnique: jest.fn().mockResolvedValue(row),
@@ -264,7 +266,11 @@ describe('Acceptance push consumer state machine', () => {
 		expect(c.tx.acceptanceOutbox.createMany).toHaveBeenCalledWith(
 			expect.objectContaining({
 				data: [
-					expect.objectContaining({ route: 'RETRY_1', retryAttempt: 1 })
+					expect.objectContaining({
+						route: 'MAIN',
+						retryAttempt: 1,
+						availableAt: new Date('2030-01-01T00:00:30.000Z')
+					})
 				]
 			})
 		);

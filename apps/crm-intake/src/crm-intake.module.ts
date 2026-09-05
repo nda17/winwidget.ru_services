@@ -36,6 +36,14 @@ import { WidgetControlProcessor } from './widget-sources/widget-control.processo
 import { WidgetControlRabbit } from './widget-sources/widget-control.messaging';
 import { WidgetControlWorker } from './widget-sources/widget-control.worker';
 import { WidgetControlPublisher } from './widget-sources/widget-control.publisher';
+import { widgetTransfersEnabled } from './widget-transfers/widget-transfer.config';
+import { WidgetTransferClient } from './widget-transfers/widget-transfer.client';
+import { WidgetTransferController } from './widget-transfers/widget-transfer.controller';
+import { WidgetTransferService } from './widget-transfers/widget-transfer.service';
+import { WidgetTransferProcessor } from './widget-transfers/widget-transfer.processor';
+import { WidgetTransferRabbit } from './widget-transfers/widget-transfer.messaging';
+import { WidgetTransferWorker } from './widget-transfers/widget-transfer.worker';
+import { WidgetTransferPublisher } from './widget-transfers/widget-transfer.publisher';
 
 const config = ConfigModule.forRoot({ isGlobal: true });
 const role = intakeProcessRole();
@@ -43,6 +51,11 @@ const api = role === 'api' || role === 'all';
 const worker = role === 'worker' || role === 'all';
 const publisher = role === 'publisher' || role === 'all';
 const widgets = widgetControlEnabled();
+const transfers = widgetTransfersEnabled();
+const transferWorker =
+	transfers && (role === 'widget-transfer-worker' || role === 'all');
+const transferPublisher =
+	transfers && (role === 'widget-transfer-publisher' || role === 'all');
 const controlWorker =
 	widgets && (role === 'widget-control-worker' || role === 'all');
 const controlPublisher =
@@ -59,14 +72,17 @@ const controlPublisher =
 					IntakeExportController,
 					IntakeIngestionController,
 					AcceptanceController,
-					IntakeCsvImportController
+					IntakeCsvImportController,
+					WidgetTransferController
 				]
 			: [])
 	],
 	providers: [
 		CrmIntakeHealthService,
-		...(api || worker || controlWorker ? [IntakeAuthorizationClient] : []),
-		...(widgets && (api || controlWorker)
+		...(api || worker || controlWorker || transferWorker
+			? [IntakeAuthorizationClient]
+			: []),
+		...(widgets && (api || controlWorker || transferWorker)
 			? [WidgetControlConfig, WidgetsControlClient]
 			: []),
 		...(widgets && api ? [WidgetSourceService] : []),
@@ -75,9 +91,19 @@ const controlPublisher =
 			? [WidgetControlProcessor, WidgetControlWorker]
 			: []),
 		...(controlPublisher ? [WidgetControlPublisher] : []),
+		...(transferWorker || transferPublisher ? [WidgetTransferRabbit] : []),
+		...(transferWorker
+			? [
+					WidgetTransferClient,
+					WidgetTransferProcessor,
+					WidgetTransferWorker
+				]
+			: []),
+		...(transferPublisher ? [WidgetTransferPublisher] : []),
 		...(api
 			? [
 					IntakeService,
+					WidgetTransferService,
 					IntakeExportService,
 					IntakeCsvImportService,
 					IntakeIngestionService,

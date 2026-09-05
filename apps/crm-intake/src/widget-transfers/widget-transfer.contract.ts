@@ -1,17 +1,192 @@
-import type { WidgetLeadRecord } from '../domain/widgets-domain.repository';
-import type { WidgetEntity } from '../domain/widgets-domain.types';
-import {
-	assertUnicode,
-	identifier,
-	integer,
-	iso,
-	LeadWidgetType,
-	plainText,
-	record,
-	SnapshotError,
-	SnapshotSkipReason,
-	widgetType
-} from './widgets-wincrm.contract';
+import { createHash } from 'node:crypto';
+export const WINCRM_TRANSFER_EVENT =
+	'widgets.wincrm.lead-transfer.requested.v1';
+export const LEAD_WIDGET_TYPES = [
+	'WHEEL',
+	'QUIZ',
+	'CALLBACK',
+	'TIMER',
+	'STOP_OFFER',
+	'CALCULATOR'
+] as const;
+export type WidgetLeadType = (typeof LEAD_WIDGET_TYPES)[number];
+export const SNAPSHOT_SKIP_REASONS = [
+	'PAYLOAD_TOO_LARGE',
+	'PAYLOAD_SHAPE_UNSUPPORTED',
+	'TEXT_UNSUPPORTED',
+	'SOURCE_PERIOD_INELIGIBLE',
+	'SOURCE_PERIOD_INVALID',
+	'BEFORE_ACTIVATION'
+] as const;
+export type SnapshotSkipReason = (typeof SNAPSHOT_SKIP_REASONS)[number];
+export type TransferReason =
+	| SnapshotSkipReason
+	| 'READY'
+	| 'CONNECTOR_DISABLED'
+	| 'GENERATION_CHANGED'
+	| 'WIDGET_UNAVAILABLE'
+	| 'LEAD_UNAVAILABLE'
+	| 'PERIOD_EXPIRED'
+	| 'BILLING_INELIGIBLE'
+	| 'BILLING_PERIOD_CHANGED';
+export const UUID_V4 =
+	/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+export type JsonObject = Record<string, unknown>;
+
+export function record(
+	value: unknown,
+	keys?: readonly string[]
+): JsonObject {
+	if (!value || typeof value !== 'object' || Array.isArray(value))
+		throw new Error('Invalid object');
+	const result = value as JsonObject;
+	if (
+		keys &&
+		(Object.keys(result).length !== keys.length ||
+			keys.some(key => !Object.prototype.hasOwnProperty.call(result, key)))
+	)
+		throw new Error('Invalid fields');
+	return result;
+}
+export function identifier(value: unknown, max = 255): string {
+	if (
+		typeof value !== 'string' ||
+		!value.length ||
+		value.length > max ||
+		/[\s\u0000-\u001f\u007f]/u.test(value)
+	)
+		throw new Error('Invalid identifier');
+	assertUnicode(value);
+	return value;
+}
+export function uuid(value: unknown): string {
+	if (typeof value !== 'string' || !UUID_V4.test(value))
+		throw new Error('Invalid UUID');
+	return value;
+}
+export function integer(
+	value: unknown,
+	max = 2_147_483_647,
+	min = 1
+): number {
+	if (
+		typeof value !== 'number' ||
+		!Number.isInteger(value) ||
+		value < min ||
+		value > max
+	)
+		throw new Error('Invalid integer');
+	return value;
+}
+export function iso(value: unknown): string {
+	if (
+		typeof value !== 'string' ||
+		value.length !== 24 ||
+		!Number.isFinite(Date.parse(value)) ||
+		new Date(value).toISOString() !== value
+	)
+		throw new Error('Invalid timestamp');
+	return value;
+}
+export function version(value: unknown): string {
+	if (
+		typeof value !== 'string' ||
+		!/^(0|[1-9][0-9]{0,18})$/.test(value) ||
+		BigInt(value) > 9_223_372_036_854_775_807n
+	)
+		throw new Error('Invalid version');
+	return value;
+}
+export function widgetType(value: unknown): WidgetLeadType {
+	if (!LEAD_WIDGET_TYPES.includes(value as WidgetLeadType))
+		throw new Error('Invalid widget type');
+	return value as WidgetLeadType;
+}
+export function plainText(value: unknown, max: number): string {
+	if (typeof value !== 'string' || value.length > max)
+		throw new SnapshotError('PAYLOAD_SHAPE_UNSUPPORTED');
+	assertUnicode(value);
+	// Legacy content remains untouched. Unsupported rich text is visible as a skipped transfer.
+	if (/[<>\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(value))
+		throw new SnapshotError('TEXT_UNSUPPORTED');
+	return value;
+}
+export function assertUnicode(value: string): void {
+	for (let index = 0; index < value.length; index++) {
+		const code = value.charCodeAt(index);
+		if (code === 0xfffd || (code >= 0xdc00 && code <= 0xdfff))
+			throw new SnapshotError('TEXT_UNSUPPORTED');
+		if (code >= 0xd800 && code <= 0xdbff) {
+			const next = value.charCodeAt(++index);
+			if (!(next >= 0xdc00 && next <= 0xdfff))
+				throw new SnapshotError('TEXT_UNSUPPORTED');
+		}
+	}
+}
+export class SnapshotError extends Error {
+	constructor(readonly reason: SnapshotSkipReason) {
+		super(reason);
+	}
+}
+
+export interface TransferEvent {
+	schemaVersion: 1;
+	eventType: typeof WINCRM_TRANSFER_EVENT;
+	eventId: string;
+	occurredAt: string;
+	transferId: string;
+	connectorId: string;
+	generation: number;
+	workspaceId: string;
+	sourceId: string;
+	originalSubscriptionId: string | null;
+	originalSubscriptionVersion: string | null;
+	originalPeriodStartsAt: string | null;
+	originalDeadline: string | null;
+}
+export function assertTransferEvent(
+	value: unknown,
+	messageId?: string
+): asserts value is TransferEvent {
+	const item = record(value, [
+		'schemaVersion',
+		'eventType',
+		'eventId',
+		'occurredAt',
+		'transferId',
+		'connectorId',
+		'generation',
+		'workspaceId',
+		'sourceId',
+		'originalSubscriptionId',
+		'originalSubscriptionVersion',
+		'originalPeriodStartsAt',
+		'originalDeadline'
+	]);
+	if (
+		item.schemaVersion !== 1 ||
+		item.eventType !== WINCRM_TRANSFER_EVENT ||
+		(messageId !== undefined && item.eventId !== messageId)
+	)
+		throw new Error('Invalid transfer event');
+	for (const key of [
+		'eventId',
+		'transferId',
+		'connectorId',
+		'workspaceId',
+		'sourceId'
+	])
+		uuid(item[key]);
+	iso(item.occurredAt);
+	integer(item.generation);
+	if (item.originalSubscriptionId !== null)
+		identifier(item.originalSubscriptionId);
+	if (item.originalSubscriptionVersion !== null)
+		version(item.originalSubscriptionVersion);
+	if (item.originalPeriodStartsAt !== null)
+		iso(item.originalPeriodStartsAt);
+	if (item.originalDeadline !== null) iso(item.originalDeadline);
+}
 
 export const MAX_SNAPSHOT_BYTES = 256 * 1024;
 const REDACTIONS = [
@@ -33,10 +208,10 @@ type CalculatorAnswer = {
 	value: number | string | string[];
 	valueLabel: string;
 };
-export interface LeadSnapshot {
+export interface WidgetLeadSnapshotV1 {
 	schemaVersion: 1;
 	widget: {
-		type: LeadWidgetType;
+		type: WidgetLeadType;
 		id: string;
 		name: string;
 		publishedVersion: number;
@@ -69,11 +244,6 @@ export interface LeadSnapshot {
 		  };
 }
 
-function nullableText(value: unknown, max: number): string | null {
-	return value === undefined || value === null
-		? null
-		: plainText(value, max);
-}
 function list(value: unknown): unknown[] {
 	if (!Array.isArray(value) || value.length > 20)
 		throw new SnapshotError('PAYLOAD_SHAPE_UNSUPPORTED');
@@ -115,124 +285,10 @@ function pageUrl(value: unknown): {
 	}
 }
 
-/** Only accepted lead fields and selected published labels enter this DTO, never config/OTP/IP. */
-export function captureLeadSnapshot(input: {
-	type: LeadWidgetType;
-	widget: WidgetEntity;
-	lead: WidgetLeadRecord;
-	contactName: unknown;
-	config: Record<string, unknown>;
-}):
-	| { state: 'READY'; payload: LeadSnapshot }
-	| { state: 'SKIPPED'; reason: SnapshotSkipReason } {
-	try {
-		const { type, widget, lead, config } = input;
-		const phoneRaw = nullableText(lead.phone, 200);
-		const payload: LeadSnapshot = {
-			schemaVersion: 1,
-			widget: {
-				type,
-				id: identifier(widget.id),
-				name: plainText(widget.name, 200),
-				publishedVersion: integer(widget.publishedVersion)
-			},
-			lead: {
-				id: identifier(lead.id),
-				createdAt: iso(lead.createdAt.toISOString()),
-				contactName: nullableText(input.contactName, 200),
-				contactRaw: nullableText(lead.contact, 200),
-				phoneRaw,
-				phoneE164:
-					phoneRaw && /^\+[1-9][0-9]{7,14}$/.test(phoneRaw)
-						? phoneRaw
-						: null,
-				email: nullableText(lead.email, 254),
-				...pageUrl(lead.url)
-			},
-			details: { type: 'TIMER' }
-		};
-		switch (type) {
-			case 'WHEEL':
-				payload.details = { type, bonus: nullableText(lead.bonus, 200) };
-				break;
-			case 'CALLBACK':
-				payload.details = {
-					type,
-					timeSlot: nullableText(lead.timeSlot, 100),
-					timezone: nullableText(lead.timezone, 100)
-				};
-				break;
-			case 'TIMER':
-			case 'STOP_OFFER':
-				payload.details = { type };
-				break;
-			case 'QUIZ': {
-				const questions = list(config.questions).map(item => record(item));
-				unique(questions.map(question => identifier(question.id, 64)));
-				const answers = list(lead.answers).map(raw => {
-					const answer = record(raw, ['questionId', 'optionIds']);
-					const questionId = identifier(answer.questionId, 64);
-					const question = questions.find(item => item.id === questionId);
-					if (!question)
-						throw new SnapshotError('PAYLOAD_SHAPE_UNSUPPORTED');
-					const options = list(question.options).map(item => record(item));
-					unique(options.map(option => identifier(option.id, 1024)));
-					const selected = list(answer.optionIds).map(rawId => {
-						const id = identifier(rawId, 1024);
-						const option = options.find(item => item.id === id);
-						if (!option)
-							throw new SnapshotError('PAYLOAD_SHAPE_UNSUPPORTED');
-						return { id, text: nullableText(option.text, 10000) };
-					});
-					unique(selected.map(option => option.id));
-					return {
-						questionId,
-						questionText: nullableText(question.text, 10000),
-						options: selected
-					};
-				});
-				payload.details = {
-					type,
-					result: nullableText(lead.result, 10000),
-					answers
-				};
-				break;
-			}
-			case 'CALCULATOR': {
-				if (
-					!lead.calculatedPrice ||
-					!lead.calculatedPrice.isFinite() ||
-					lead.calculatedPrice.isNegative() ||
-					lead.calculatedPrice.decimalPlaces() > 2 ||
-					lead.calculatedPrice.greaterThan('999999999999.99')
-				)
-					throw new SnapshotError('PAYLOAD_SHAPE_UNSUPPORTED');
-				payload.details = {
-					type,
-					calculatedPrice: lead.calculatedPrice.toFixed(2),
-					currency: plainText(lead.currency, 3),
-					answers: list(lead.answers) as CalculatorAnswer[]
-				};
-				break;
-			}
-		}
-		assertLeadSnapshot(payload);
-		return { state: 'READY', payload };
-	} catch (error) {
-		return {
-			state: 'SKIPPED',
-			reason:
-				error instanceof SnapshotError
-					? error.reason
-					: 'PAYLOAD_SHAPE_UNSUPPORTED'
-		};
-	}
-}
-
 /** Validate durable JSON again before exposing it to a different service. */
-export function assertLeadSnapshot(
+export function assertWidgetLeadSnapshotV1(
 	value: unknown
-): asserts value is LeadSnapshot {
+): asserts value is WidgetLeadSnapshotV1 {
 	if (
 		Buffer.byteLength(JSON.stringify(value), 'utf8') > MAX_SNAPSHOT_BYTES
 	)
@@ -372,4 +428,36 @@ export function assertLeadSnapshot(
 		default:
 			throw new Error('Invalid snapshot details');
 	}
+}
+
+export function parseWidgetTransferEvent(
+	value: unknown,
+	messageId?: string
+): TransferEvent {
+	assertTransferEvent(value, messageId);
+	return value;
+}
+export function parseWidgetLeadSnapshot(
+	value: unknown
+): WidgetLeadSnapshotV1 {
+	assertWidgetLeadSnapshotV1(value);
+	return value;
+}
+export const TRANSFER_CONSUMER = 'crm-intake.widget-transfer.v1';
+export const TRANSFER_RETRY_MS = [5000, 30000, 120000] as const;
+export const transferHash = (value: unknown): string =>
+	createHash('sha256').update(canonical(value)).digest('hex');
+function canonical(value: unknown): string {
+	if (Array.isArray(value))
+		return '[' + value.map(canonical).join(',') + ']';
+	if (value && typeof value === 'object')
+		return (
+			'{' +
+			Object.entries(value)
+				.sort(([a], [b]) => a.localeCompare(b))
+				.map(([k, v]) => JSON.stringify(k) + ':' + canonical(v))
+				.join(',') +
+			'}'
+		);
+	return JSON.stringify(value);
 }

@@ -355,7 +355,15 @@ export class WidgetControlProcessor {
 		const transient = ![400, 403, 404, 409].includes(status);
 		const retry = transient && retryAttempt < CONTROL_RETRY_MS.length;
 		return this.transaction(async tx => {
-			const now = new Date();
+			const [clock] = await tx.$queryRaw<
+				Array<{ now: Date }>
+			>`SELECT clock_timestamp() AT TIME ZONE 'UTC' AS now`;
+			if (!clock || !Number.isFinite(clock.now.getTime()))
+				throw new Error('RETRY_CLOCK_UNAVAILABLE');
+			const now = clock.now;
+			const availableAt = new Date(
+				now.getTime() + (retry ? CONTROL_RETRY_MS[retryAttempt] : 0)
+			);
 			const changed = await tx.widgetControlJob.updateMany({
 				where: {
 					commandId: event.commandId,
@@ -401,10 +409,11 @@ export class WidgetControlProcessor {
 				data: {
 					...controlOutbox(
 						event,
-						retry ? 'RETRY_' + (retryAttempt + 1) : 'DLQ',
+						retry ? 'MAIN' : 'DLQ',
 						retry ? retryAttempt + 1 : retryAttempt,
 						retry ? 'retry:' + (retryAttempt + 1) : 'dlq'
 					),
+					availableAt,
 					lastErrorCode: code
 				}
 			});

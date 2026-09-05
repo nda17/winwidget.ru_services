@@ -92,6 +92,66 @@ function setup() {
 	};
 }
 describe('durable Acceptance intent', () => {
+	it('requires explicit name for unnamed WIDGET without rewriting the source snapshot', async () => {
+		const c = setup();
+		Object.assign(c.entry, { origin: 'WIDGET', name: null });
+		await expect(
+			c.service.accept(c.context, c.entry.id, c.dto)
+		).rejects.toMatchObject({ status: 400 });
+		const named = {
+			...c.dto,
+			contact: { ...c.dto.contact, name: 'Подтверждённое имя' }
+		};
+		await c.service.accept(c.context, c.entry.id, named);
+		expect(
+			c.tx.acceptance.create.mock.calls[0][0].data.contactPayload
+		).toMatchObject({ mode: 'CREATE', name: 'Подтверждённое имя' });
+		expect(c.entry.name).toBeNull();
+		expect(c.tx.inboxEntry.updateMany).toHaveBeenCalledWith(
+			expect.objectContaining({ data: { version: { increment: 1 } } })
+		);
+	});
+	it.each(['', '  ', ' leading', 'bad\u0000', null])(
+		'rejects invalid explicit widget name without downstream writes',
+		async name => {
+			const c = setup();
+			Object.assign(c.entry, { origin: 'WIDGET', name: null });
+			await expect(
+				c.service.accept(c.context, c.entry.id, {
+					...c.dto,
+					contact: { ...c.dto.contact, name }
+				} as never)
+			).rejects.toMatchObject({ status: 400 });
+			expect(c.tx.acceptance.create).not.toHaveBeenCalled();
+		}
+	);
+	it('forbids extra name in legacy and existing-contact choices', async () => {
+		const c = setup();
+		await expect(
+			c.service.accept(c.context, c.entry.id, {
+				...c.dto,
+				contact: { ...c.dto.contact, name: 'Different' }
+			})
+		).rejects.toMatchObject({ status: 400 });
+		Object.assign(c.entry, { origin: 'WIDGET', name: null });
+		await expect(
+			c.service.accept(c.context, c.entry.id, {
+				...c.dto,
+				contact: {
+					mode: 'EXISTING',
+					contactId: randomUUID(),
+					name: 'Different'
+				}
+			})
+		).rejects.toMatchObject({ status: 400 });
+		await c.service.accept(c.context, c.entry.id, {
+			...c.dto,
+			contact: { mode: 'EXISTING', contactId: randomUUID() }
+		});
+		expect(
+			c.tx.acceptance.create.mock.calls[0][0].data.contactPayload
+		).toEqual({ mode: 'EXISTING', contactId: expect.any(String) });
+	});
 	it('atomically reserves Inbox and stores immutable payload bindings, audit, receipt and metadata-only Outbox', async () => {
 		const c = setup();
 		const result = await c.service.accept(c.context, c.entry.id, c.dto);

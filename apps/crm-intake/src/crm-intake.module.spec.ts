@@ -5,6 +5,10 @@ import { CrmIntakePrismaService } from './prisma/crm-intake-prisma.service';
 import { WidgetSourceController } from './widget-sources/widget-source.controller';
 import { WidgetControlConfig } from './widget-sources/widget-control.config';
 import { WidgetsControlClient } from './widget-sources/widgets-control.client';
+import { WidgetTransferClient } from './widget-transfers/widget-transfer.client';
+import { WidgetTransferWorker } from './widget-transfers/widget-transfer.worker';
+import { WidgetTransferPublisher } from './widget-transfers/widget-transfer.publisher';
+import { WidgetTransferController } from './widget-transfers/widget-transfer.controller';
 
 describe('CrmIntakeModule', () => {
 	it('does not instantiate Widgets controllers or credentials when default off', () => {
@@ -17,6 +21,13 @@ describe('CrmIntakeModule', () => {
 		);
 		expect(providers).not.toContain(WidgetControlConfig);
 		expect(providers).not.toContain(WidgetsControlClient);
+		expect(providers).not.toContain(WidgetTransferClient);
+		expect(providers).not.toContain(WidgetTransferWorker);
+		expect(providers).not.toContain(WidgetTransferPublisher);
+		// Previously delivered data remains readable even when new transfers are disabled.
+		expect(
+			Reflect.getMetadata(MODULE_METADATA.CONTROLLERS, CrmIntakeModule)
+		).toContain(WidgetTransferController);
 	});
 	it('imports the global Prisma module exactly once at the root', () => {
 		const imports = Reflect.getMetadata(

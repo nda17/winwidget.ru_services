@@ -8,23 +8,23 @@ import type { ConsumeMessage } from 'amqplib';
 import { randomUUID, createHash } from 'node:crypto';
 import { CrmIntakePrismaService } from '../prisma/crm-intake-prisma.service';
 import {
-	WidgetControlRabbit,
-	CONTROL_EVENT_TYPE
-} from './widget-control.messaging';
+	WidgetTransferRabbit,
+	TRANSFER_EVENT_TYPE
+} from './widget-transfer.messaging';
 import {
-	parseControlEvent,
-	type ControlEvent
-} from './widget-control.contract';
-import { WidgetControlProcessor } from './widget-control.processor';
+	parseWidgetTransferEvent,
+	type TransferEvent
+} from './widget-transfer.contract';
+import { WidgetTransferProcessor } from './widget-transfer.processor';
 
 @Injectable()
-export class WidgetControlWorker
+export class WidgetTransferWorker
 	implements OnApplicationBootstrap, BeforeApplicationShutdown
 {
 	private readonly running = new Set<Promise<void>>();
 	constructor(
-		private readonly processor: WidgetControlProcessor,
-		private readonly rabbit: WidgetControlRabbit,
+		private readonly processor: WidgetTransferProcessor,
+		private readonly rabbit: WidgetTransferRabbit,
 		private readonly prisma: CrmIntakePrismaService
 	) {}
 	async onApplicationBootstrap() {
@@ -35,24 +35,32 @@ export class WidgetControlWorker
 		});
 	}
 	async handle(message: ConsumeMessage) {
-		let event: ControlEvent;
+		let event: TransferEvent;
 		let retryAttempt: number;
+		let retryGeneration: number;
 		try {
 			if (
 				message.content.length > 16384 ||
-				message.properties.type !== CONTROL_EVENT_TYPE ||
+				message.properties.type !== TRANSFER_EVENT_TYPE ||
 				message.properties.contentType !== 'application/json'
 			)
 				throw new Error('INVALID_EVENT');
-			event = parseControlEvent(
+			event = parseWidgetTransferEvent(
 				JSON.parse(message.content.toString('utf8'))
 			);
 			retryAttempt = message.properties.headers?.['x-retry-attempt'] ?? 0;
+			retryGeneration =
+				message.properties.headers?.[
+					'x-wincrm-transfer-retry-generation'
+				] ?? 0;
 			if (
 				message.properties.messageId !== event.eventId ||
 				!Number.isInteger(retryAttempt) ||
 				retryAttempt < 0 ||
-				retryAttempt > 3
+				retryAttempt > 3 ||
+				!Number.isSafeInteger(retryGeneration) ||
+				retryGeneration < 0 ||
+				retryGeneration > 2147483646
 			)
 				throw new Error('INVALID_EVENT');
 		} catch {
@@ -61,7 +69,7 @@ export class WidgetControlWorker
 			return;
 		}
 		const claim = await this.processor
-			.claim(event, retryAttempt)
+			.claim(event, retryAttempt, retryGeneration)
 			.catch(async error => {
 				if (!(error instanceof ConflictException)) throw error;
 				await this.quarantine(message);
@@ -72,10 +80,11 @@ export class WidgetControlWorker
 			return;
 		}
 		let renewing = false;
+		let renewal: Promise<unknown> | null = null;
 		const timer = setInterval(() => {
 			if (renewing) return;
 			renewing = true;
-			void this.processor
+			renewal = this.processor
 				.renew(event, claim.token)
 				.catch(() => false)
 				.finally(() => {
@@ -94,6 +103,7 @@ export class WidgetControlWorker
 			else await this.rabbit.nackAfterBackoff(message);
 		} finally {
 			clearInterval(timer);
+			if (renewal) await renewal;
 		}
 	}
 	private async quarantine(message: ConsumeMessage) {
@@ -102,7 +112,7 @@ export class WidgetControlWorker
 		const digest = createHash('sha256')
 			.update(message.content)
 			.digest('hex');
-		await this.prisma.widgetControlOutbox.createMany({
+		await this.prisma.widgetTransferOutbox.createMany({
 			data: [
 				{
 					id,
@@ -111,11 +121,17 @@ export class WidgetControlWorker
 					route: 'DLQ',
 					payload: {
 						schemaVersion: 1,
+						eventType: TRANSFER_EVENT_TYPE,
+						occurredAt: new Date().toISOString(),
+						transferId: id,
+						connectorId: id,
+						originalSubscriptionId: null,
+						originalSubscriptionVersion: null,
+						originalPeriodStartsAt: null,
+						originalDeadline: null,
 						eventId: id,
 						workspaceId: id,
 						sourceId: id,
-						commandId: id,
-						controlVersion: 1,
 						generation: 1
 					},
 					lastErrorCode: 'INVALID_EVENT'

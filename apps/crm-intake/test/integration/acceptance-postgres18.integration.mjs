@@ -322,6 +322,65 @@ try {
 		() => processor.run(retry.event, retryClaim.token),
 		status(503)
 	);
+
+	// A fault after the actual Outbox INSERT must roll back receipt and workflow/source together.
+	let retryInsertReached = false;
+	const faultPrisma = new Proxy(runtime, {
+		get(target, key) {
+			if (key !== '$transaction') return target[key];
+			return (callback, options) =>
+				target.$transaction(
+					tx =>
+						callback(
+							new Proxy(tx, {
+								get(current, property) {
+									if (property !== 'acceptanceOutbox')
+										return current[property];
+									return new Proxy(current[property], {
+										get(delegate, operation) {
+											if (operation !== 'createMany')
+												return delegate[operation];
+											return async args => {
+												await delegate.createMany(args);
+												retryInsertReached = true;
+												throw new Error('INJECTED_RETRY_AFTER_INSERT');
+											};
+										}
+									});
+								}
+							})
+						),
+					options
+				);
+		}
+	});
+	const failureSnapshot = await runtime.acceptanceReceipt.findFirst({
+		where: { eventId: retry.event.eventId }
+	});
+	await assert.rejects(
+		new AcceptanceProcessor(faultPrisma, access, operations).fail(
+			retry.event,
+			retryClaim.token,
+			0,
+			new ServiceUnavailableException()
+		),
+		/INJECTED_RETRY_AFTER_INSERT/
+	);
+	assert.equal(retryInsertReached, true);
+	assert.deepEqual(
+		await runtime.acceptanceReceipt.findFirst({
+			where: { eventId: retry.event.eventId }
+		}),
+		failureSnapshot
+	);
+	assert.equal(
+		await runtime.acceptanceOutbox.count({
+			where: { eventId: retry.event.eventId, retryAttempt: 1 }
+		}),
+		0
+	);
+	const [beforeRetryClock] =
+		await runtime.$queryRaw`SELECT clock_timestamp() AT TIME ZONE 'UTC' AS now`;
 	assert.equal(
 		await processor.fail(
 			retry.event,
@@ -331,15 +390,42 @@ try {
 		),
 		true
 	);
+
+	const [afterRetryClock] =
+		await runtime.$queryRaw`SELECT clock_timestamp() AT TIME ZONE 'UTC' AS now`;
+	const scheduledRetry = await runtime.acceptanceOutbox.findFirstOrThrow({
+		where: { eventId: retry.event.eventId, retryAttempt: 1 }
+	});
+	assert.equal(scheduledRetry.route, 'MAIN');
+	assert.ok(
+		scheduledRetry.availableAt.getTime() >=
+			beforeRetryClock.now.getTime() + 30000
+	);
+	assert.ok(
+		scheduledRetry.availableAt.getTime() <=
+			afterRetryClock.now.getTime() + 30000 + 1
+	);
+	let prematurePublish = false;
+	const onlyRetry = scopedOutbox([scheduledRetry.id]);
+	await new AcceptancePublisher(onlyRetry, {
+		publish: async () => {
+			prematurePublish = true;
+		}
+	}).tick();
+	assert.equal(prematurePublish, false);
 	row = await runtime.acceptance.findUnique({
 		where: { id: retry.response.acceptance.id }
 	});
 	assert.equal(row.status, 'RETRY_WAIT');
 	assert.equal(
+		row.retryAt.getTime(),
+		scheduledRetry.availableAt.getTime()
+	);
+	assert.equal(
 		await runtime.acceptanceOutbox.count({
 			where: {
 				eventId: retry.event.eventId,
-				route: 'RETRY_1',
+				route: 'MAIN',
 				retryAttempt: 1
 			}
 		}),
@@ -353,6 +439,7 @@ try {
 	const retryAgain = await processor.claim(retry.event, 1);
 	await processor.run(retry.event, retryAgain.token);
 
+	await verifyDelayedPublisher();
 	const broker = process.env.CRM_INTAKE_ACCEPTANCE_TEST_RABBITMQ_URL;
 	if (broker) {
 		const url = new URL(broker);
@@ -371,11 +458,7 @@ try {
 		process.env.CRM_INTAKE_RABBITMQ_ASSERT_TOPOLOGY = 'true';
 		rabbit = new AcceptanceRabbit();
 		await rabbit.onModuleInit();
-		for (const queue of [
-			ACCEPTANCE_QUEUE,
-			ACCEPTANCE_DEAD_QUEUE,
-			...[1, 2, 3].map(i => `${ACCEPTANCE_QUEUE}.retry.${i}`)
-		]) {
+		for (const queue of [ACCEPTANCE_QUEUE, ACCEPTANCE_DEAD_QUEUE]) {
 			const state = await inspectorChannel.checkQueue(queue);
 			assert.equal(state.messageCount, 0);
 			assert.equal(state.consumerCount, 0);
@@ -390,20 +473,59 @@ try {
 				leaseUntil: null
 			}
 		});
+		failSales = true;
 		const live = await intent();
 		worker = new AcceptanceWorker(processor, rabbit, runtime);
 		publisher = new AcceptancePublisher(runtime, rabbit);
 		await worker.onApplicationBootstrap();
 		assert.equal(rabbit.ready(true), true);
+
 		await publisher.tick();
-		await until(
-			async () =>
-				(
-					await runtime.acceptance.findUnique({
-						where: { id: live.response.acceptance.id }
-					})
-				).status === 'COMPLETED'
+		await until(async () =>
+			Boolean(
+				await runtime.acceptanceOutbox.findFirst({
+					where: { eventId: live.event.eventId, retryAttempt: 1 }
+				})
+			)
 		);
+		const liveRetry = await runtime.acceptanceOutbox.findFirstOrThrow({
+			where: { eventId: live.event.eventId, retryAttempt: 1 }
+		});
+		assert.equal(liveRetry.route, 'MAIN');
+		failSales = false;
+		await publisher.tick();
+		assert.equal(
+			(
+				await runtime.acceptanceOutbox.findUniqueOrThrow({
+					where: { id: liveRetry.id }
+				})
+			).status,
+			'PENDING'
+		);
+		// A fresh publisher process resumes the persisted delay; no shortened business clock or TTL relay.
+		await publisher.beforeApplicationShutdown();
+		publisher = new AcceptancePublisher(runtime, rabbit);
+		await until(
+			async () => {
+				await publisher.tick();
+				return (
+					(
+						await runtime.acceptance.findUniqueOrThrow({
+							where: { id: live.response.acceptance.id }
+						})
+					).status === 'COMPLETED'
+				);
+			},
+			50000,
+			1000
+		);
+		const deliveredRetry =
+			await runtime.acceptanceOutbox.findUniqueOrThrow({
+				where: { id: liveRetry.id }
+			});
+		assert.equal(deliveredRetry.status, 'PUBLISHED');
+		assert.ok(deliveredRetry.publishedAt >= liveRetry.availableAt);
+
 		const liveCount = { ...writes };
 		await rabbit.publish(live.event, 'MAIN', 0);
 		await until(
@@ -433,7 +555,7 @@ try {
 		await worker.beforeApplicationShutdown();
 		worker = null;
 		console.log(
-			'CRM Intake real RabbitMQ: owned push consume, confirm+mandatory, duplicate delivery, durable receipts and drain passed'
+			'CRM Intake real RabbitMQ: owned push consume, confirm+mandatory, duplicate delivery, durable receipts, PG-delayed retry across publisher restart and drain passed'
 		);
 	}
 	console.log(
@@ -525,11 +647,137 @@ function local(value) {
 		throw new Error('Isolated loopback Intake test database required');
 	return `${url.hostname}:${url.port}${url.pathname}`;
 }
-async function until(check) {
-	const deadline = Date.now() + 20000;
+async function until(check, timeout = 20000, interval = 50) {
+	const deadline = Date.now() + timeout;
 	while (Date.now() < deadline) {
 		if (await check()) return;
-		await new Promise(resolve => setTimeout(resolve, 50));
+		await new Promise(resolve => setTimeout(resolve, interval));
 	}
 	throw new Error('Acceptance test deadline exceeded');
+}
+
+function scopedOutbox(ids) {
+	return {
+		$queryRaw: runtime.$queryRaw.bind(runtime),
+		acceptanceOutbox: {
+			findMany: args =>
+				runtime.acceptanceOutbox.findMany({
+					...args,
+					where: { AND: [args.where, { id: { in: ids } }] }
+				}),
+			updateMany: args =>
+				runtime.acceptanceOutbox.updateMany({
+					...args,
+					where: { AND: [args.where, { id: { in: ids } }] }
+				}),
+			findUnique: args => {
+				assert.ok(ids.includes(args.where.id));
+				return runtime.acceptanceOutbox.findUnique(args);
+			}
+		}
+	};
+}
+async function verifyDelayedPublisher() {
+	const [clock] =
+		await runtime.$queryRaw`SELECT clock_timestamp() AT TIME ZONE 'UTC' AS now`;
+	const now = clock.now.getTime(),
+		ids = [],
+		eligibleIds = [],
+		waitingIds = [];
+	const seed = async (route, attempt, availableAt, extra = {}) => {
+		const id = randomUUID(),
+			eventId = randomUUID();
+		const payload = {
+			schemaVersion: 1,
+			eventId,
+			workspaceId,
+			workflowId: randomUUID(),
+			generation: 1,
+			mode: 'EXECUTE'
+		};
+		await runtime.acceptanceOutbox.create({
+			data: {
+				id,
+				eventId,
+				deduplicationKey: id,
+				route,
+				retryAttempt: attempt,
+				availableAt: new Date(availableAt),
+				payload,
+				...extra
+			}
+		});
+		ids.push(id);
+		return id;
+	};
+	// More than LIMIT future legacy rows sort before an eligible MAIN. They must not starve it.
+	for (let i = 0; i < 25; i++)
+		waitingIds.push(await seed('RETRY_3', 3, now - 60000));
+	for (const [index, delay] of [30000, 300000, 1800000].entries())
+		eligibleIds.push(
+			await seed('RETRY_' + (index + 1), index + 1, now - delay - 1000)
+		);
+	eligibleIds.push(await seed('MAIN', 1, now - 1000));
+	eligibleIds.push(
+		await seed('MAIN', 0, now - 1000, {
+			status: 'PUBLISHING',
+			leaseToken: randomUUID(),
+			leaseUntil: new Date(now - 100)
+		})
+	);
+	const futureId = await seed('MAIN', 1, now + 60000);
+	waitingIds.push(futureId);
+	const deliveries = [];
+	const publish = async (event, route, attempt) => {
+		assert.equal(route, 'MAIN');
+		deliveries.push({ eventId: event.eventId, attempt });
+	};
+	const scoped = scopedOutbox(ids);
+	await new AcceptancePublisher(scoped, { publish }).tick();
+	assert.equal(deliveries.length, eligibleIds.length);
+	for (const id of eligibleIds)
+		assert.equal(
+			(await runtime.acceptanceOutbox.findUniqueOrThrow({ where: { id } }))
+				.status,
+			'PUBLISHED'
+		);
+	for (const id of waitingIds)
+		assert.equal(
+			(await runtime.acceptanceOutbox.findUniqueOrThrow({ where: { id } }))
+				.status,
+			'PENDING'
+		);
+	await new AcceptancePublisher(scoped, { publish }).tick();
+	assert.equal(deliveries.length, eligibleIds.length);
+	// Advance only a synthetic test envelope, never a saved business retry or the DB/system clock.
+	await runtime.acceptanceOutbox.update({
+		where: { id: futureId },
+		data: { availableAt: clock.now }
+	});
+	await new AcceptancePublisher(scoped, { publish }).tick();
+	assert.equal(deliveries.length, eligibleIds.length + 1);
+	// Transport errors remain retryable after arbitrarily many prior attempts, using database time.
+	const failureId = await seed('MAIN', 0, now - 1000, {
+		attempts: 100000
+	});
+	const [before] =
+		await runtime.$queryRaw`SELECT clock_timestamp() AT TIME ZONE 'UTC' AS now`;
+	await new AcceptancePublisher(scopedOutbox([failureId]), {
+		publish: async () => {
+			throw new Error('TEST_UNCONFIRMED');
+		}
+	}).tick();
+	const [after] =
+		await runtime.$queryRaw`SELECT clock_timestamp() AT TIME ZONE 'UTC' AS now`;
+	const failed = await runtime.acceptanceOutbox.findUniqueOrThrow({
+		where: { id: failureId }
+	});
+	assert.equal(failed.status, 'PENDING');
+	assert.equal(failed.attempts, 100001);
+	assert.equal(failed.lastErrorCode, 'PUBLICATION_UNCONFIRMED');
+	assert.ok(failed.availableAt.getTime() >= before.now.getTime() + 60000);
+	assert.ok(failed.availableAt.getTime() <= after.now.getTime() + 60001);
+	console.log(
+		'Acceptance PG delayed retry: new delay/rollback, legacy MAIN resume, no starvation, expired claim and unbounded transport retry passed'
+	);
 }

@@ -63,7 +63,7 @@ export async function widgetControlConstraints(
 }
 export function controlOutbox(
 	event: ControlEvent,
-	route = 'MAIN',
+	route: 'MAIN' | 'DLQ' = 'MAIN',
 	retryAttempt = 0,
 	suffix = 'main'
 ) {

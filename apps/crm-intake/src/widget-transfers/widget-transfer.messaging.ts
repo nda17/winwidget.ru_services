@@ -11,62 +11,23 @@ import {
 import type { ConfirmChannel, ConsumeMessage } from 'amqplib';
 import { randomUUID } from 'node:crypto';
 import {
-	parseAcceptanceEvent,
-	type AcceptanceEvent
-} from './acceptance.contract';
+	parseWidgetTransferEvent,
+	type TransferEvent
+} from './widget-transfer.contract';
 
-export type IntakeProcessRole =
-	| 'api'
-	| 'worker'
-	| 'publisher'
-	| 'all'
-	| 'widget-control-worker'
-	| 'widget-control-publisher'
-	| 'widget-transfer-worker'
-	| 'widget-transfer-publisher';
-export function intakeProcessRole(): IntakeProcessRole {
-	const role = process.env.CRM_INTAKE_PROCESS_ROLE || 'api';
-	if (
-		![
-			'api',
-			'worker',
-			'publisher',
-			'all',
-			'widget-control-worker',
-			'widget-control-publisher',
-			'widget-transfer-worker',
-			'widget-transfer-publisher'
-		].includes(role)
-	)
-		throw new Error(
-			'CRM_INTAKE_PROCESS_ROLE must be api, worker, publisher, all, widget-control-worker, widget-control-publisher, widget-transfer-worker or widget-transfer-publisher'
-		);
-	if (
-		role.startsWith('widget-control-') &&
-		process.env.CRM_INTAKE_WIDGETS_ENABLED !== 'true'
-	)
-		throw new Error(
-			'Widget control process requires CRM_INTAKE_WIDGETS_ENABLED=true'
-		);
-	if (
-		role.startsWith('widget-transfer-') &&
-		(process.env.CRM_INTAKE_WIDGETS_ENABLED !== 'true' ||
-			process.env.CRM_INTAKE_WIDGET_TRANSFERS_ENABLED !== 'true')
-	)
-		throw new Error(
-			'Widget transfer process requires both managed Widgets and transfers enabled'
-		);
-	return role as IntakeProcessRole;
-}
-export const ACCEPTANCE_EXCHANGE = 'winwidget.crm-intake.events';
-export const ACCEPTANCE_DEAD_EXCHANGE = 'winwidget.crm-intake.dead-letter';
-export const ACCEPTANCE_QUEUE = 'winwidget.crm-intake.acceptance.v1';
-export const ACCEPTANCE_EVENT_TYPE = 'crm.intake.acceptance.requested.v1';
-export const ACCEPTANCE_DEAD_QUEUE = `${ACCEPTANCE_QUEUE}.dead-letter`;
-export const ACCEPTANCE_REQUEUE_DELAY_MS = 5000;
+export const TRANSFER_EXCHANGE =
+	'winwidget.crm-intake.widget-transfer.events';
+export const TRANSFER_DEAD_EXCHANGE =
+	'winwidget.crm-intake.widget-transfer.dead-letter';
+export const TRANSFER_QUEUE = 'winwidget.crm-intake.widget-transfer.v1';
+export const TRANSFER_EVENT_TYPE =
+	'widgets.wincrm.lead-transfer.requested.v1';
+export const TRANSFER_UPSTREAM_EXCHANGE = 'winwidget.events';
+export const TRANSFER_DEAD_QUEUE = `${TRANSFER_QUEUE}.dead-letter`;
+export const TRANSFER_REQUEUE_DELAY_MS = 5000;
 
 @Injectable()
-export class AcceptanceRabbit
+export class WidgetTransferRabbit
 	implements OnModuleInit, OnApplicationShutdown
 {
 	private connection: AmqpConnectionManager | null = null;
@@ -80,7 +41,6 @@ export class AcceptanceRabbit
 		ConsumeMessage,
 		{ finish: () => void; promise: Promise<void> }
 	>();
-
 	private readonly deliveryChannels = new WeakMap<
 		ConsumeMessage,
 		ConfirmChannel
@@ -163,19 +123,27 @@ export class AcceptanceRabbit
 		}
 	}
 	private async topology(channel: ConfirmChannel) {
-		for (const exchange of [ACCEPTANCE_EXCHANGE, ACCEPTANCE_DEAD_EXCHANGE])
+		for (const exchange of [TRANSFER_EXCHANGE, TRANSFER_DEAD_EXCHANGE])
 			await channel.assertExchange(exchange, 'direct', { durable: true });
-		await channel.assertQueue(ACCEPTANCE_QUEUE, { durable: true });
+		await channel.assertExchange(TRANSFER_UPSTREAM_EXCHANGE, 'topic', {
+			durable: true
+		});
+		await channel.assertQueue(TRANSFER_QUEUE, { durable: true });
 		await channel.bindQueue(
-			ACCEPTANCE_QUEUE,
-			ACCEPTANCE_EXCHANGE,
-			ACCEPTANCE_EVENT_TYPE
+			TRANSFER_QUEUE,
+			TRANSFER_UPSTREAM_EXCHANGE,
+			TRANSFER_EVENT_TYPE
 		);
-		await channel.assertQueue(ACCEPTANCE_DEAD_QUEUE, { durable: true });
 		await channel.bindQueue(
-			ACCEPTANCE_DEAD_QUEUE,
-			ACCEPTANCE_DEAD_EXCHANGE,
-			ACCEPTANCE_EVENT_TYPE
+			TRANSFER_QUEUE,
+			TRANSFER_EXCHANGE,
+			TRANSFER_EVENT_TYPE
+		);
+		await channel.assertQueue(TRANSFER_DEAD_QUEUE, { durable: true });
+		await channel.bindQueue(
+			TRANSFER_DEAD_QUEUE,
+			TRANSFER_DEAD_EXCHANGE,
+			TRANSFER_EVENT_TYPE
 		);
 	}
 	ready(worker = false) {
@@ -187,18 +155,22 @@ export class AcceptanceRabbit
 		);
 	}
 	async publish(
-		event: AcceptanceEvent,
+		event: TransferEvent,
 		route: string,
-		retryAttempt: number
+		retryAttempt: number,
+		retryGeneration = 0
 	) {
 		if (!this.channel || this.stopping)
 			throw new Error('PUBLISHER_UNAVAILABLE');
-		parseAcceptanceEvent(event);
+		parseWidgetTransferEvent(event);
 		if (
 			!['MAIN', 'DLQ'].includes(route) ||
 			!Number.isInteger(retryAttempt) ||
 			retryAttempt < 0 ||
-			retryAttempt > 3
+			retryAttempt > 3 ||
+			!Number.isSafeInteger(retryGeneration) ||
+			retryGeneration < 0 ||
+			retryGeneration > 2147483646
 		)
 			throw new Error('INVALID_ROUTE');
 		const body = Buffer.from(JSON.stringify(event));
@@ -207,8 +179,8 @@ export class AcceptanceRabbit
 		this.returns.set(publication, false);
 		try {
 			await this.channel.publish(
-				route === 'MAIN' ? ACCEPTANCE_EXCHANGE : ACCEPTANCE_DEAD_EXCHANGE,
-				ACCEPTANCE_EVENT_TYPE,
+				route === 'MAIN' ? TRANSFER_EXCHANGE : TRANSFER_DEAD_EXCHANGE,
+				TRANSFER_EVENT_TYPE,
 				body,
 				{
 					contentType: 'application/json',
@@ -216,10 +188,11 @@ export class AcceptanceRabbit
 					persistent: true,
 					mandatory: true,
 					messageId: event.eventId,
-					type: ACCEPTANCE_EVENT_TYPE,
+					type: TRANSFER_EVENT_TYPE,
 					headers: {
 						'x-publication-token': publication,
-						'x-retry-attempt': retryAttempt
+						'x-retry-attempt': retryAttempt,
+						'x-wincrm-transfer-retry-generation': retryGeneration
 					}
 				}
 			);
@@ -240,7 +213,7 @@ export class AcceptanceRabbit
 			});
 			await channel.prefetch(5, false);
 			const registration = await channel.consume(
-				ACCEPTANCE_QUEUE,
+				TRANSFER_QUEUE,
 				message => {
 					if (!message) {
 						this.consumerTag = null;
@@ -295,10 +268,7 @@ export class AcceptanceRabbit
 		let finish: () => void = () => {};
 		const promise = new Promise<void>(resolve => {
 			let settled = false;
-			const timer = setTimeout(
-				() => finish(),
-				ACCEPTANCE_REQUEUE_DELAY_MS
-			);
+			const timer = setTimeout(() => finish(), TRANSFER_REQUEUE_DELAY_MS);
 			timer.unref();
 			finish = () => {
 				if (settled) return;
