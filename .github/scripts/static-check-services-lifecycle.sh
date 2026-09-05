@@ -419,7 +419,7 @@ exactFiles('deploy', ['docker-compose.prod.yml']);
 
 const servicesWorkflow = readFileSync('.github/workflows/ci.yml', 'utf8');
 const pinnedInfraRevision =
-	'd3e8d5a6dc0cca058d1696b8718b2e839d029dde';
+	'b6f2392d53eaf250d0472140d61b6cf1fa4f9c5a';
 const identityEnvSha256 = '50233f31f2121046847c96bf0959cddf8c83fc3cc2e6ebd01cda759fbbaf83bc';
 if (!/^[a-f0-9]{64}$/.test(identityEnvSha256)) {
 	throw new Error('Identity owner env must be synchronized and its exact hash reviewed before release');
