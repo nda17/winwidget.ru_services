@@ -191,88 +191,99 @@ describe('CrmEntitlementService', () => {
 		});
 	});
 
-	it('activates exactly one five-day trial and emits a PII-minimal outbox event', async () => {
-		jest.useFakeTimers().setSystemTime(NOW);
-		const created = entitlement();
-		const transaction = {
-			$executeRaw: jest.fn().mockResolvedValue(1),
-			crmCommercialPolicy: {
-				findFirst: jest.fn().mockResolvedValue({
-					version: 1,
-					trialSeatLimit: 5,
-					trialDays: 5,
-					graceDays: 3
+	it.each([2, 5])(
+		'activates exactly one five-day trial with the configured %i seats and emits a PII-minimal outbox event',
+		async trialSeatLimit => {
+			jest.useFakeTimers().setSystemTime(NOW);
+			const created = entitlement({
+				policyVersion: 2,
+				seatLimit: trialSeatLimit,
+				graceUntil: new Date('2026-09-10T10:00:00.000Z')
+			});
+			const transaction = {
+				$executeRaw: jest.fn().mockResolvedValue(1),
+				crmCommercialPolicy: {
+					findFirst: jest.fn().mockResolvedValue({
+						version: 2,
+						trialSeatLimit,
+						trialDays: 5,
+						graceDays: 3
+					})
+				},
+				billingCommandReceipt: {
+					findUnique: jest.fn().mockResolvedValue(null),
+					create: jest.fn().mockResolvedValue({})
+				},
+				crmEntitlement: {
+					findUnique: jest.fn().mockResolvedValue(null),
+					create: jest.fn().mockResolvedValue(created)
+				},
+				billingSourceSequence: {
+					upsert: jest.fn().mockResolvedValue({ nextValue: 2n })
+				},
+				outboxEvent: { create: jest.fn().mockResolvedValue({}) }
+			};
+			const prisma = {
+				$transaction: jest.fn(async callback => callback(transaction))
+			};
+			const service = new CrmEntitlementService(prisma as never);
+
+			const result = await service.activateTrial(command());
+
+			expect(result).toMatchObject({
+				activated: true,
+				status: CrmEntitlementStatus.ACTIVE,
+				entitlement: {
+					workspaceId: WORKSPACE_ID,
+					policyVersion: 2,
+					seatLimit: trialSeatLimit,
+					trialStartedAt: NOW.toISOString(),
+					effectiveUntil: '2026-09-07T10:00:00.000Z',
+					provisioningCommandId: COMMAND_ID,
+					provisioningCommandType: PROVISIONING_COMMAND_TYPE,
+					activatedByUserId: 'user-1'
+				}
+			});
+			expect(transaction.crmEntitlement.create).toHaveBeenCalledWith({
+				data: expect.objectContaining({
+					workspaceId: WORKSPACE_ID,
+					productCode: 'WINCRM',
+					planCode: 'TRIAL',
+					seatLimit: trialSeatLimit,
+					policyVersion: 2,
+					graceUntil: new Date('2026-09-10T10:00:00.000Z'),
+					trialStartedAt: NOW,
+					effectiveUntil: new Date('2026-09-07T10:00:00.000Z'),
+					provisioningCommandId: COMMAND_ID,
+					provisioningCommandType: PROVISIONING_COMMAND_TYPE,
+					activatedByUserId: 'user-1'
 				})
-			},
-			billingCommandReceipt: {
-				findUnique: jest.fn().mockResolvedValue(null),
-				create: jest.fn().mockResolvedValue({})
-			},
-			crmEntitlement: {
-				findUnique: jest.fn().mockResolvedValue(null),
-				create: jest.fn().mockResolvedValue(created)
-			},
-			billingSourceSequence: {
-				upsert: jest.fn().mockResolvedValue({ nextValue: 2n })
-			},
-			outboxEvent: { create: jest.fn().mockResolvedValue({}) }
-		};
-		const prisma = {
-			$transaction: jest.fn(async callback => callback(transaction))
-		};
-		const service = new CrmEntitlementService(prisma as never);
-
-		const result = await service.activateTrial(command());
-
-		expect(result).toMatchObject({
-			activated: true,
-			status: CrmEntitlementStatus.ACTIVE,
-			entitlement: {
-				workspaceId: WORKSPACE_ID,
-				trialStartedAt: NOW.toISOString(),
-				effectiveUntil: '2026-09-07T10:00:00.000Z',
-				provisioningCommandId: COMMAND_ID,
-				provisioningCommandType: PROVISIONING_COMMAND_TYPE,
-				activatedByUserId: 'user-1'
-			}
-		});
-		expect(transaction.crmEntitlement.create).toHaveBeenCalledWith({
-			data: expect.objectContaining({
-				workspaceId: WORKSPACE_ID,
-				productCode: 'WINCRM',
-				planCode: 'TRIAL',
-				seatLimit: 5,
-				policyVersion: 1,
-				graceUntil: new Date('2026-09-10T10:00:00.000Z'),
-				trialStartedAt: NOW,
-				effectiveUntil: new Date('2026-09-07T10:00:00.000Z'),
-				provisioningCommandId: COMMAND_ID,
-				provisioningCommandType: PROVISIONING_COMMAND_TYPE,
-				activatedByUserId: 'user-1'
-			})
-		});
-		expect(transaction.billingCommandReceipt.create).toHaveBeenCalledWith({
-			data: expect.objectContaining({
-				commandId: COMMAND_ID,
-				commandType: PROVISIONING_COMMAND_TYPE,
-				requestHashVersion: 1,
-				result: expect.objectContaining({
-					activated: true,
-					entitlement: expect.objectContaining({
-						provisioningCommandId: COMMAND_ID,
-						provisioningCommandType: PROVISIONING_COMMAND_TYPE,
-						activatedByUserId: 'user-1'
+			});
+			expect(
+				transaction.billingCommandReceipt.create
+			).toHaveBeenCalledWith({
+				data: expect.objectContaining({
+					commandId: COMMAND_ID,
+					commandType: PROVISIONING_COMMAND_TYPE,
+					requestHashVersion: 1,
+					result: expect.objectContaining({
+						activated: true,
+						entitlement: expect.objectContaining({
+							provisioningCommandId: COMMAND_ID,
+							provisioningCommandType: PROVISIONING_COMMAND_TYPE,
+							activatedByUserId: 'user-1'
+						})
 					})
 				})
-			})
-		});
-		const event =
-			transaction.outboxEvent.create.mock.calls[0][0].data.payload;
-		expect(event.state).not.toHaveProperty('activatedByUserId');
-		expect(event.state).not.toHaveProperty('provisioningCommandId');
-		expect(event.state).not.toHaveProperty('provisioningCommandType');
-		expect(JSON.stringify(event)).not.toContain('user-1');
-	});
+			});
+			const event =
+				transaction.outboxEvent.create.mock.calls[0][0].data.payload;
+			expect(event.state).not.toHaveProperty('activatedByUserId');
+			expect(event.state).not.toHaveProperty('provisioningCommandId');
+			expect(event.state).not.toHaveProperty('provisioningCommandType');
+			expect(JSON.stringify(event)).not.toContain('user-1');
+		}
+	);
 
 	it('does not restart a previously created trial under a new command', async () => {
 		jest
@@ -530,6 +541,61 @@ describe('WinCRM entitlement provisioning provenance migration', () => {
 		);
 		expect(migration).toContain(
 			'CREATE UNIQUE INDEX "crm_entitlements_provisioning_command_id_key"'
+		);
+	});
+});
+
+describe('WinCRM two-seat default migration safety', () => {
+	const migration = readFileSync(
+		join(
+			__dirname,
+			'../../prisma/migrations/20260908090000_set_default_crm_trial_seats_two/migration.sql'
+		),
+		'utf8'
+	);
+
+	it('appends only over the exact original seed under the policy publication fence', () => {
+		expect(migration).toContain(
+			"hashtextextended('billing-wincrm-commercial-policy', 0)"
+		);
+		expect(migration).toContain(
+			'INSERT INTO "billing"."crm_commercial_policies"'
+		);
+		expect(migration).toContain(
+			'"seed"."included_seats", 2, "seed"."trial_days", "seed"."grace_days"'
+		);
+		expect(migration).toContain('"seed"."version" = 1');
+		expect(migration).toContain('"seed"."created_by_user_id" IS NULL');
+		for (const [field, value] of Object.entries({
+			monthly_price_minor: 99000,
+			yearly_price_minor: 990000,
+			additional_seat_monthly_price_minor: 29000,
+			additional_seat_yearly_price_minor: 290000,
+			included_seats: 2,
+			trial_seat_limit: 5,
+			trial_days: 5,
+			grace_days: 3
+		}))
+			expect(migration).toContain(`"seed"."${field}" = ${value}`);
+		expect(migration).toMatch(/NOT EXISTS \([\s\S]*WHERE "version" <> 1/);
+	});
+
+	it('does not rewrite published policies, command receipts, or existing entitlement snapshots', () => {
+		const statements = migration.replace(/--[^\n]*/g, '');
+		expect(statements).not.toMatch(
+			/\b(?:UPDATE|DELETE|TRUNCATE|ALTER|DROP)\b/i
+		);
+		expect(statements).not.toMatch(/crm_entitlements|command_receipts/i);
+		expect(statements.trim()).toMatch(/^BEGIN;[\s\S]*COMMIT;$/);
+		const historicalMigration = readFileSync(
+			join(
+				__dirname,
+				'../../prisma/migrations/20260905120000_add_crm_commercial_policy/migration.sql'
+			),
+			'utf8'
+		);
+		expect(historicalMigration).toContain(
+			'VALUES (1, 99000, 990000, 29000, 290000, 2, 5, 5, 3)'
 		);
 	});
 });

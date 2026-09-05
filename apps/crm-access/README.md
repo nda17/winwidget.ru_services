@@ -117,7 +117,9 @@ Access сохраняет admission. Обычный Identity MEMBER сам по 
 
 Допуск проверяет свежие Identity/Billing/CRM-права и атомарно использует
 квоту workspace: `1 + enabled CRM members <= Billing seatLimit`. Минимум 2
-включает владельца; текущий Trial snapshot по умолчанию 5. Pending и disabled
+включает владельца; новый Trial по умолчанию получает 2 места вместе с владельцем.
+Лимит берётся из опубликованной Billing policy (настраивается от 2); начатые
+Trial сохраняют исходный snapshot, в том числе ранее выданные 5 мест. Pending и disabled
 не занимают места. Очередь FIFO по durable sequence; `enable` лишь создаёт
 WAITING admission и не обходит ранее принятые приглашения. Revoke выигрывает
 у позднего acceptance event. Изменение платной квоты посреди периода не

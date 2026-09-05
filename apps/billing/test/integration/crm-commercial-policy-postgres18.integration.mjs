@@ -84,20 +84,29 @@ try {
 		{
 			schemaVersion: 1,
 			productCode: 'WINCRM',
-			version: 1,
+			version: 2,
 			currency: 'RUB',
 			monthlyPriceMinor: 99000,
 			yearlyPriceMinor: 990000,
 			additionalSeatMonthlyPriceMinor: 29000,
 			additionalSeatYearlyPriceMinor: 290000,
 			includedSeats: 2,
-			trialSeatLimit: 5,
+			trialSeatLimit: 2,
 			trialDays: 5,
 			graceDays: 3,
 			createdAt: undefined
 		},
-		'The test requires a freshly migrated database with seeded policy v1'
+		'The test requires a freshly migrated database with seeded policy v2'
 	);
+	const initialPolicyCount = 2;
+	const historicalSeed =
+		await prisma.crmCommercialPolicy.findUniqueOrThrow({
+			where: { version: 1 }
+		});
+	assert.equal(historicalSeed.trialSeatLimit, 5);
+	assert.equal(historicalSeed.includedSeats, 2);
+	assert.equal(historicalSeed.trialDays, 5);
+	assert.equal(historicalSeed.createdByUserId, null);
 	assert.equal(await prisma.crmEntitlement.count(), 0);
 	assert.equal(await prisma.billingCommandReceipt.count(), 0);
 
@@ -110,21 +119,29 @@ try {
 			['P0001', '42501'].includes(error?.meta?.code)
 		);
 	}
-	await assert.rejects(
-		prisma.$executeRaw`
+	for (const [includedSeats, trialSeatLimit] of [
+		[1, 2],
+		[2, 1]
+	]) {
+		await assert.rejects(
+			prisma.$executeRaw`
 			INSERT INTO billing.crm_commercial_policies
 			(version, monthly_price_minor, yearly_price_minor,
 			 additional_seat_monthly_price_minor, additional_seat_yearly_price_minor,
 			 included_seats, trial_seat_limit, trial_days, grace_days)
-			VALUES (2, 1, 1, 1, 1, 1, 5, 5, 3)
+			VALUES (3, 1, 1, 1, 1, ${includedSeats}, ${trialSeatLimit}, 5, 3)
 		`,
-		error =>
-			error?.meta?.code === '23514' &&
-			String(error?.meta?.message).includes(
-				'crm_commercial_policies_seats_check'
-			)
+			error =>
+				error?.meta?.code === '23514' &&
+				String(error?.meta?.message).includes(
+					'crm_commercial_policies_seats_check'
+				)
+		);
+	}
+	assert.equal(
+		await prisma.crmCommercialPolicy.count(),
+		initialPolicyCount
 	);
-	assert.equal(await prisma.crmCommercialPolicy.count(), 1);
 
 	const trialCommand = {
 		schemaVersion: 1,
@@ -134,8 +151,8 @@ try {
 	};
 	const firstTrial = await entitlementService.activateTrial(trialCommand);
 	assert.equal(firstTrial.activated, true);
-	assert.equal(firstTrial.entitlement.policyVersion, 1);
-	assert.equal(firstTrial.entitlement.seatLimit, 5);
+	assert.equal(firstTrial.entitlement.policyVersion, initial.version);
+	assert.equal(firstTrial.entitlement.seatLimit, 2);
 	assert.equal(
 		Date.parse(firstTrial.entitlement.effectiveUntil) -
 			Date.parse(firstTrial.entitlement.effectiveFrom),
@@ -150,7 +167,7 @@ try {
 	const command = {
 		schemaVersion: 1,
 		commandId: randomUUID(),
-		expectedVersion: 1,
+		expectedVersion: initial.version,
 		monthlyPriceMinor: 199000,
 		yearlyPriceMinor: 1990000,
 		additionalSeatMonthlyPriceMinor: 39000,
@@ -163,8 +180,11 @@ try {
 		policyService.update(command, context)
 	]);
 	assert.deepEqual(concurrentReplay[0], concurrentReplay[1]);
-	assert.equal(concurrentReplay[0].version, 2);
-	assert.equal(await prisma.crmCommercialPolicy.count(), 2);
+	assert.equal(concurrentReplay[0].version, initial.version + 1);
+	assert.equal(
+		await prisma.crmCommercialPolicy.count(),
+		initialPolicyCount + 1
+	);
 	assert.equal(
 		await prisma.outboxEvent.count({
 			where: { aggregateType: 'billing.admin-audit' }
@@ -199,20 +219,20 @@ try {
 		commandId: randomUUID(),
 		workspaceId: randomUUID()
 	});
-	assert.equal(newTrial.entitlement.policyVersion, 2);
+	assert.equal(newTrial.entitlement.policyVersion, initial.version + 1);
 	assert.equal(newTrial.entitlement.seatLimit, 7);
 
 	const competingCommands = [
 		{
 			...command,
 			commandId: randomUUID(),
-			expectedVersion: 2,
+			expectedVersion: initial.version + 1,
 			includedSeats: 4
 		},
 		{
 			...command,
 			commandId: randomUUID(),
-			expectedVersion: 2,
+			expectedVersion: initial.version + 1,
 			includedSeats: 5
 		}
 	];
@@ -228,7 +248,10 @@ try {
 		rejected.reason.response.code,
 		'crm_commercial_policy_version_conflict'
 	);
-	assert.equal(await prisma.crmCommercialPolicy.count(), 3);
+	assert.equal(
+		await prisma.crmCommercialPolicy.count(),
+		initialPolicyCount + 2
+	);
 	assert.deepEqual(
 		await policyService.update(command, context),
 		concurrentReplay[0],
@@ -238,7 +261,7 @@ try {
 	const rollbackCommand = {
 		...command,
 		commandId: randomUUID(),
-		expectedVersion: 3
+		expectedVersion: initial.version + 2
 	};
 	const failingPrisma = {
 		$transaction: (callback, options) =>
@@ -270,7 +293,10 @@ try {
 		),
 		/intentional audit failure/
 	);
-	assert.equal(await prisma.crmCommercialPolicy.count(), 3);
+	assert.equal(
+		await prisma.crmCommercialPolicy.count(),
+		initialPolicyCount + 2
+	);
 	assert.equal(
 		await prisma.billingCommandReceipt.count({
 			where: { commandId: rollbackCommand.commandId }
@@ -320,6 +346,17 @@ try {
 	assert.equal(
 		(await entitlementService.get(aged.workspaceId)).status,
 		'READ_ONLY'
+	);
+	assert.equal(
+		(await entitlementService.get(aged.workspaceId)).entitlement.seatLimit,
+		5
+	);
+	assert.deepEqual(
+		await prisma.crmCommercialPolicy.findUniqueOrThrow({
+			where: { version: 1 }
+		}),
+		historicalSeed,
+		'Historical default policy is not rewritten by later publication'
 	);
 	console.log(
 		'Billing CRM policy PostgreSQL 18 runtime, CAS, replay, snapshot and rollback checks passed'
