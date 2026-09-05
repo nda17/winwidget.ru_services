@@ -2,7 +2,8 @@
 
 Автономный Inbox WinCRM. Реализованы ручные обращения, поиск, серверная
 пагинация, отклонение с проверкой версии, история и настройка API-источников
-с безопасной ротацией/отзывом credentials, синхронный приём API/webhook.
+с безопасной ротацией/отзывом credentials, синхронный приём API/webhook и
+атомарный импорт подтверждённых CSV-строк.
 
 Нативная доставка Widgets пока не включена: ей нужен отдельный согласованный
 контракт доставки и явного подключения. Явный приём в работу запускает durable
@@ -60,7 +61,7 @@ Actor, outcome, contact/deal IDs и source не принимаются в руч
 
 Карточка/команда возвращает `{schemaVersion:1,entry:{...}}`: `id`,
 `workspaceId`, `title`, `name`, `phone`, `email`, `message`, `origin`
-(`MANUAL|API`), `sourceId`, `status`, `createdBySubject`, `teamId`, `version`,
+(`MANUAL|API|CSV`), `sourceId`, `status`, `createdBySubject`, `teamId`, `version`,
 `contactId`, `dealId`, `rejectionReason`, `receivedAt`, `updatedAt`,
 `acceptedAt`, `rejectedAt`. Nullable-поля всегда `null`, даты — canonical
 ISO UTC. Список: `{schemaVersion:1,items:[...],page,pageSize,total}`.
@@ -73,6 +74,56 @@ ISO UTC. Список: `{schemaVersion:1,items:[...],page,pageSize,total}`.
 перечитать запись; `crm_intake_command_conflict` — ключ использован другим
 запросом; `crm_intake_entry_not_new` — обращение уже обработано. `503` не
 подменяется отсутствием подписки или успешной командой.
+
+### Атомарный CSV-импорт
+
+`POST /api/v1/crm/intake/imports/csv` требует пользовательский Bearer и
+`Idempotency-Key`, равный UUIDv4 `commandId`. JSON содержит ровно
+`{schemaVersion:1,workspaceId,commandId,label,teamId,rows}`. `label` — название
+импорта до 200 символов без путей/контрольных символов (не `.`/`..`), `teamId`
+— явный null либо UUID из свежего `context.teamIds`. Каждый из 1–250 элементов
+`rows` содержит ровно `title,name,phone,email,message` с лимитами ручного
+обращения; nullable-поля присутствуют явно. Неизвестные поля и actor/team
+override внутри строки отвергаются. Raw CSV, его encoding/delimiter и файл
+не принимаются и не сохраняются: frontend сначала показывает preview.
+
+Только точный POST CSV route допускает JSON до 1 MiB **в UTF-8 байтах**;
+остальные JSON routes сохраняют 32 KiB. HTTP 413 не отражает тело запроса.
+Backend повторно проверяет `intake:write`, `ACTIVE|GRACE` и роль
+OWNER/CRM_ADMIN/TEAM_LEAD/MANAGER на каждой попытке, включая replay.
+READ_ONLY/ANALYST не могут импортировать. Hash связывает actor, workspace,
+label, team и исходные значения/порядок строк до нормализации; retry должен
+сохранить тот же UUID и полностью неизменный DTO.
+
+HTTP 200: `{schemaVersion:1,import:{id,workspaceId,createdBySubject,teamId,
+label,rowCount,createdAt}}`; `id = commandId`, дата canonical ISO UTC.
+Это метаданные без импортированных контактных полей. `GET /imports/:id` с
+`workspaceId` возвращает тот же DTO после свежего `intake:read` и
+ALL/TEAM/OWN scope, в том числе в READ_ONLY. Невидимый импорт — 404
+`crm_intake_import_not_found`; чужой/изменённый commandId — 409
+`crm_intake_command_conflict`; 503 `crm_intake_retry_required` или
+`crm_intake_import_unavailable` требует повтора неизменной команды.
+
+В одной короткой SERIALIZABLE-транзакции сохраняются пакет, `createMany`
+заявок `NEW/origin:CSV/sourceId:null`, независимые UUID audit `CREATED`,
+связи строк и global Intake command receipt (`entityKind:import`). Никакого
+автослияния, контактов/сделок или автоматического Acceptance. CSV как быстрая
+ограниченная локальная операция не публикует RabbitMQ-события; последующее
+явное принятие использует обычный durable workflow.
+
+Миграция `20260906130000_add_csv_imports` добавляет только собственные
+`csv_imports`/`csv_import_rows`; runtime получает **SELECT/INSERT**, без
+UPDATE/DELETE/TRUNCATE/DDL. Composite workspace FKs и deferred integrity
+проверяют полный rowCount, origin/actor/team, создание audit и bound receipt.
+Все deferred constraints принудительно проверяются внутри transaction callback
+до успешного ответа. Retention этих immutable proofs согласуется отдельно.
+
+`pnpm test:integration:csv` использует те же явные `CRM_INTAKE_TEST_*` и
+`CRM_INTAKE_INTEGRATION_ALLOW_MUTATION=true`, что Inbox suite; миграции/grants
+применяются отдельно. PG18 gate проверяет 250 строк, 6 конкурентных replay,
+точный binding, scopes/READ_ONLY, namespace collision, rollback после реальных
+записей каждой стадии, deferred failure после receipt, FK и append-only ACL.
+Unit HTTP gate отдельно доказывает совместимость 32 KiB и CSV 1 MiB.
 
 ### Credentials источников
 

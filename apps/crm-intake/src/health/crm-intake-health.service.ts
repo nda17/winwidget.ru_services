@@ -55,6 +55,10 @@ export class CrmIntakeHealthService {
 				.$queryRaw`SELECT id, event_id, deduplication_key, route, payload, status, available_at, lease_token, lease_until, attempts, retry_attempt, last_error_code, published_at FROM crm_intake.acceptance_outbox LIMIT 0`;
 			await this.prisma
 				.$queryRaw`SELECT event_id, consumer, workspace_id, workflow_id, payload_hash, status, lease_token, lease_until, retry_attempt FROM crm_intake.acceptance_receipts LIMIT 0`;
+			await this.prisma
+				.$queryRaw`SELECT id, workspace_id, created_by_subject, team_id, label, row_count, created_at FROM crm_intake.csv_imports LIMIT 0`;
+			await this.prisma
+				.$queryRaw`SELECT import_id, workspace_id, row_number, entry_id, audit_command_id FROM crm_intake.csv_import_rows LIMIT 0`;
 			const identity = await this.prisma.serviceIdentity.findUnique({
 				where: { id: 'singleton' },
 				select: { serviceName: true, databaseId: true }

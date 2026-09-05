@@ -6,6 +6,8 @@ import { CrmIntakePrismaModule } from './prisma/crm-intake-prisma.module';
 import { IntakeAuthorizationClient } from './access/intake-authorization.client';
 import { IntakeController } from './intake/intake.controller';
 import { IntakeService } from './intake/intake.service';
+import { IntakeCsvImportController } from './intake/intake-csv-import.controller';
+import { IntakeCsvImportService } from './intake/intake-csv-import.service';
 import { IntakeIngestionController } from './intake/intake-ingestion.controller';
 import {
 	IntakeIngestionRateLimiter,
@@ -33,7 +35,12 @@ const publisher = role === 'publisher' || role === 'all';
 	controllers: [
 		CrmIntakeHealthController,
 		...(api
-			? [IntakeController, IntakeIngestionController, AcceptanceController]
+			? [
+					IntakeController,
+					IntakeIngestionController,
+					AcceptanceController,
+					IntakeCsvImportController
+				]
 			: [])
 	],
 	providers: [
@@ -42,6 +49,7 @@ const publisher = role === 'publisher' || role === 'all';
 		...(api
 			? [
 					IntakeService,
+					IntakeCsvImportService,
 					IntakeIngestionService,
 					IntakeIngestionRateLimiter,
 					AcceptanceService

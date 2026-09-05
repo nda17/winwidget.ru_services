@@ -909,7 +909,7 @@ jobs:
               ;;
             crm-intake)
               mutable_tables='crm_intake.inbox_entries, crm_intake.intake_sources, crm_intake.acceptances, crm_intake.acceptance_outbox, crm_intake.acceptance_receipts'
-              receipt_tables='crm_intake.intake_commands, crm_intake.intake_activities, crm_intake.inbound_receipts'
+              receipt_tables='crm_intake.intake_commands, crm_intake.intake_activities, crm_intake.inbound_receipts, crm_intake.csv_imports, crm_intake.csv_import_rows'
               docker exec "$POSTGRES_CONTAINER_ID" psql -U crm_domain_bootstrap_ci -d "$DOMAIN_DATABASE" -v ON_ERROR_STOP=1 -c 'GRANT SELECT, INSERT, UPDATE, DELETE ON crm_intake.ingestion_rate_buckets TO crm_domain_runtime_ci'
               ;;
             crm-sales)
@@ -957,6 +957,14 @@ jobs:
           CRM_CUSTOMERS_TEST_MIGRATION_DATABASE_URL: ${{ env.DOMAIN_MIGRATION_URL }}
           CRM_CUSTOMERS_TEST_RUNTIME_ROLE: crm_domain_runtime_ci
         run: pnpm --dir apps/crm-customers run test:integration:intake
+      - name: Prove atomic CSV import on PostgreSQL 18
+        if: matrix.app == 'crm-intake'
+        env:
+          CRM_INTAKE_INTEGRATION_ALLOW_MUTATION: 'true'
+          CRM_INTAKE_TEST_DATABASE_URL: ${{ env.DOMAIN_RUNTIME_URL }}
+          CRM_INTAKE_TEST_MIGRATION_DATABASE_URL: ${{ env.DOMAIN_MIGRATION_URL }}
+          CRM_INTAKE_TEST_RUNTIME_ROLE: crm_domain_runtime_ci
+        run: pnpm --dir apps/crm-intake run test:integration:csv
       - name: Prove Intake acceptance on PostgreSQL 18 and RabbitMQ
         if: matrix.app == 'crm-intake'
         env:

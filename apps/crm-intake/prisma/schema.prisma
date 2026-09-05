@@ -44,6 +44,7 @@ model InboxEntry {
   rejectedAt       DateTime?       @map("rejected_at")
   source           IntakeSource?   @relation(fields: [workspaceId, sourceId], references: [workspaceId, id], onDelete: Restrict, onUpdate: Restrict)
   inboundReceipt   InboundReceipt?
+  csvImportRow     CsvImportRow?
 
   @@unique([workspaceId, id])
   @@index([workspaceId, status, receivedAt, id])
@@ -77,14 +78,15 @@ model IntakeSource {
 }
 
 model IntakeCommand {
-  commandId    String   @id @map("command_id") @db.Uuid
-  workspaceId  String   @map("workspace_id") @db.Uuid
-  entityId     String   @map("entity_id") @db.Uuid
-  entityKind   String   @map("entity_kind") @db.VarChar(16)
-  actorSubject String   @map("actor_subject") @db.VarChar(256)
-  requestHash  String   @map("request_hash") @db.Char(64)
+  commandId    String     @id @map("command_id") @db.Uuid
+  workspaceId  String     @map("workspace_id") @db.Uuid
+  entityId     String     @map("entity_id") @db.Uuid
+  entityKind   String     @map("entity_kind") @db.VarChar(16)
+  actorSubject String     @map("actor_subject") @db.VarChar(256)
+  requestHash  String     @map("request_hash") @db.Char(64)
   response     Json
-  createdAt    DateTime @default(now()) @map("created_at")
+  createdAt    DateTime   @default(now()) @map("created_at")
+  csvImport    CsvImport?
 
   @@index([workspaceId, entityId])
   @@map("intake_commands")
@@ -92,18 +94,53 @@ model IntakeCommand {
 }
 
 model IntakeActivity {
-  id            String   @id @default(uuid()) @db.Uuid
-  workspaceId   String   @map("workspace_id") @db.Uuid
-  entityId      String   @map("entity_id") @db.Uuid
-  entityKind    String   @map("entity_kind") @db.VarChar(16)
-  commandId     String   @unique @map("command_id") @db.Uuid
-  actorSubject  String   @map("actor_subject") @db.VarChar(256)
-  action        String   @db.VarChar(32)
-  entityVersion Int      @map("entity_version")
-  createdAt     DateTime @default(now()) @map("created_at")
+  id            String        @id @default(uuid()) @db.Uuid
+  workspaceId   String        @map("workspace_id") @db.Uuid
+  entityId      String        @map("entity_id") @db.Uuid
+  entityKind    String        @map("entity_kind") @db.VarChar(16)
+  commandId     String        @unique @map("command_id") @db.Uuid
+  actorSubject  String        @map("actor_subject") @db.VarChar(256)
+  action        String        @db.VarChar(32)
+  entityVersion Int           @map("entity_version")
+  createdAt     DateTime      @default(now()) @map("created_at")
+  csvImportRow  CsvImportRow?
 
   @@index([workspaceId, entityKind, entityId, createdAt, id], map: "intake_activities_entity_created_idx")
   @@map("intake_activities")
+  @@schema("crm_intake")
+}
+
+model CsvImport {
+  id               String         @id @db.Uuid
+  workspaceId      String         @map("workspace_id") @db.Uuid
+  createdBySubject String         @map("created_by_subject") @db.VarChar(256)
+  teamId           String?        @map("team_id") @db.Uuid
+  label            String         @db.VarChar(200)
+  rowCount         Int            @map("row_count")
+  createdAt        DateTime       @default(now()) @map("created_at")
+  command          IntakeCommand  @relation(fields: [id], references: [commandId], onDelete: Restrict, onUpdate: Restrict)
+  rows             CsvImportRow[]
+
+  @@unique([workspaceId, id])
+  @@index([workspaceId, createdBySubject, createdAt])
+  @@index([workspaceId, teamId, createdAt])
+  @@map("csv_imports")
+  @@schema("crm_intake")
+}
+
+model CsvImportRow {
+  importId       String         @map("import_id") @db.Uuid
+  workspaceId    String         @map("workspace_id") @db.Uuid
+  rowNumber      Int            @map("row_number") @db.SmallInt
+  entryId        String         @map("entry_id") @db.Uuid
+  auditCommandId String         @unique @map("audit_command_id") @db.Uuid
+  import         CsvImport      @relation(fields: [workspaceId, importId], references: [workspaceId, id], onDelete: Restrict, onUpdate: Restrict)
+  entry          InboxEntry     @relation(fields: [workspaceId, entryId], references: [workspaceId, id], onDelete: Restrict, onUpdate: Restrict)
+  activity       IntakeActivity @relation(fields: [auditCommandId], references: [commandId], onDelete: Restrict, onUpdate: Restrict)
+
+  @@id([importId, rowNumber])
+  @@unique([workspaceId, entryId])
+  @@map("csv_import_rows")
   @@schema("crm_intake")
 }
 

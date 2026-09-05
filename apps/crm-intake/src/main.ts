@@ -4,6 +4,7 @@ import type { NestExpressApplication } from '@nestjs/platform-express';
 import { parseCrmIntakeCorsAllowedOrigins } from './config/crm-intake-cors.config';
 import { CrmIntakeModule } from './crm-intake.module';
 import { intakeProcessRole } from './acceptance/acceptance.messaging';
+import { configureCrmIntakeBodyParser } from './config/crm-intake-body-parser';
 import {
 	parseCrmIntakeListenHost,
 	parseCrmIntakePort
@@ -25,7 +26,7 @@ async function bootstrap(): Promise<void> {
 		CrmIntakeModule,
 		{ forceCloseConnections: true }
 	);
-	app.useBodyParser('json', { limit: '32kb' });
+	configureCrmIntakeBodyParser(app);
 	app.useGlobalPipes(
 		new ValidationPipe({
 			transform: true,
