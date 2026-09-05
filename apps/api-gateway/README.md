@@ -17,6 +17,23 @@
   инициализировать или обновить в пределах настроенного окна устаревания.
 - `/api/v1/internal/**` никогда не публикуется через публичный Gateway.
 
+Для входящего API WinCRM существует отдельная политика `crm-source`,
+разрешённая **только** для префикса `/api/v1/crm/intake/ingest`. Она пропускает
+только `POST` и preflight `OPTIONS` на точный путь `/:sourceId` с canonical
+lowercase UUIDv4, без query, encoded path, завершающего slash и дочерних путей.
+`POST` требует единственный Bearer с canonical 32-byte base64url source key;
+Gateway проверяет только форму, а `crm-intake` независимо проверяет hash ключа,
+отзыв, источник, workspace, текущие права и лимиты. Пользовательский JWT здесь
+не заменяет source key. Остальной `/api/v1/crm/intake` остаётся `required`;
+`required` и `optional` по-прежнему проверяют каждый переданный Bearer как JWT.
+
+Политика не включается автоматически и не изменяет production routes.
+Добавлять отдельный маршрут следует только вместе с совместимым Intake
+upstream и его release gates; отсутствие маршрута не даёт обхода JWT через
+общий CRM prefix. Internal credentials и пользовательские claims-заголовки
+очищаются по прежним правилам. Peer-IP rate limit Intake за private proxy
+требует отдельной согласованной trusted-proxy настройки.
+
 Плоскость управления Operations владеет следующими дополнительными публичными
 префиксами, которые должны вести на `http://127.0.0.1:5200`:
 

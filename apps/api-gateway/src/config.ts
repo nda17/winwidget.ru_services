@@ -1,4 +1,6 @@
-export type GatewayAuthPolicy = 'required' | 'optional';
+export type GatewayAuthPolicy = 'required' | 'optional' | 'crm-source';
+
+export const CRM_SOURCE_INGEST_PREFIX = '/api/v1/crm/intake/ingest';
 
 export interface GatewayRouteConfig {
 	id: string;
@@ -232,9 +234,20 @@ const readRoutes = (
 
 		if (
 			candidate.authPolicy !== 'required' &&
-			candidate.authPolicy !== 'optional'
+			candidate.authPolicy !== 'optional' &&
+			candidate.authPolicy !== 'crm-source'
 		) {
-			throw new Error(`${name}.authPolicy must be required or optional`);
+			throw new Error(
+				`${name}.authPolicy must be required or optional or crm-source`
+			);
+		}
+		if (
+			candidate.authPolicy === 'crm-source' &&
+			pathPrefix !== CRM_SOURCE_INGEST_PREFIX
+		) {
+			throw new Error(
+				`${name}.crm-source policy is restricted to ${CRM_SOURCE_INGEST_PREFIX}`
+			);
 		}
 		if (
 			typeof candidate.timeoutMs !== 'number' ||

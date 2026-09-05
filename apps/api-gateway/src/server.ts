@@ -11,7 +11,11 @@ import {
 } from 'node:http';
 import { Agent as HttpsAgent, request as httpsRequest } from 'node:https';
 import { isIP } from 'node:net';
-import type { GatewayConfig, GatewayRouteConfig } from './config';
+import {
+	CRM_SOURCE_INGEST_PREFIX,
+	type GatewayConfig,
+	type GatewayRouteConfig
+} from './config';
 import {
 	JwksStore,
 	JwksUnavailableError,
@@ -26,6 +30,11 @@ import {
 import { logger as defaultLogger, type StructuredLogger } from './logger';
 
 const REFRESH_COOKIE_NAME = 'refreshToken';
+const CRM_SOURCE_INGEST_PATH =
+	/^\/api\/v1\/crm\/intake\/ingest\/[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const isCanonicalSourceToken = (token: string): boolean =>
+	/^[A-Za-z0-9_-]{43}$/.test(token) &&
+	Buffer.from(token, 'base64url').toString('base64url') === token;
 const REFRESH_COOKIE_PATHS = new Set([
 	'/api/v1/auth/refresh',
 	'/api/v1/auth/logout'
@@ -941,6 +950,28 @@ export const createGateway = (
 				return;
 			}
 			routeId = route.id;
+			const sourceAuthentication = route.authPolicy === 'crm-source';
+			// This is a deliberately narrow service-owned credential boundary, not
+			// a configurable way to bypass JWT checks on arbitrary API routes.
+			if (
+				sourceAuthentication &&
+				(route.pathPrefix !== CRM_SOURCE_INGEST_PREFIX ||
+					!CRM_SOURCE_INGEST_PATH.test(target.rawPath) ||
+					(request.method !== 'POST' && request.method !== 'OPTIONS'))
+			) {
+				sendError(
+					request,
+					response,
+					404,
+					'Not Found',
+					'Route not found',
+					'route_not_found',
+					requestId,
+					correlationId,
+					corsHeaders
+				);
+				return;
+			}
 
 			const aiConsultantRateLimit = aiConsultantRateLimiter.consume(
 				request.method,
@@ -1008,7 +1039,7 @@ export const createGateway = (
 				bearerToken = readBearerAuthorization(request.rawHeaders);
 				if (
 					!bearerToken &&
-					route.authPolicy === 'required' &&
+					(route.authPolicy === 'required' || sourceAuthentication) &&
 					request.method !== 'OPTIONS'
 				) {
 					sendError(
@@ -1016,7 +1047,9 @@ export const createGateway = (
 						response,
 						401,
 						'Unauthorized',
-						'Access token is required',
+						sourceAuthentication
+							? 'Source token is required'
+							: 'Access token is required',
 						'authentication_required',
 						requestId,
 						correlationId,
@@ -1025,7 +1058,14 @@ export const createGateway = (
 					return;
 				}
 				if (bearerToken) {
-					await verifyAccessToken(bearerToken, jwks, config);
+					if (sourceAuthentication) {
+						if (!isCanonicalSourceToken(bearerToken))
+							throw new JwtValidationError('Invalid source credential');
+						// Intake owns the secret hash, revocation, workspace binding,
+						// quota and fresh CRM authorization. Shape is not authorization.
+					} else {
+						await verifyAccessToken(bearerToken, jwks, config);
+					}
 				}
 			} catch (error) {
 				if (error instanceof JwksUnavailableError) {
@@ -1049,18 +1089,26 @@ export const createGateway = (
 						: error instanceof JwtValidationError
 							? error.code
 							: 'invalid_token';
-				log.log('warn', 'access_token_rejected', {
-					requestId,
-					correlationId,
-					routeId,
-					errorCode
-				});
+				log.log(
+					'warn',
+					sourceAuthentication
+						? 'source_token_rejected'
+						: 'access_token_rejected',
+					{
+						requestId,
+						correlationId,
+						routeId,
+						errorCode
+					}
+				);
 				sendError(
 					request,
 					response,
 					401,
 					'Unauthorized',
-					'Invalid access token',
+					sourceAuthentication
+						? 'Invalid source token'
+						: 'Invalid access token',
 					'invalid_token',
 					requestId,
 					correlationId,
@@ -1074,7 +1122,11 @@ export const createGateway = (
 				target.routingPathname,
 				requestId,
 				correlationId,
-				bearerToken ? request.headers.authorization : undefined
+				bearerToken
+					? sourceAuthentication
+						? `Bearer ${bearerToken}`
+						: request.headers.authorization
+					: undefined
 			);
 			const useTls = route.upstreamUrl.protocol === 'https:';
 			const requestFn = useTls ? httpsRequest : httpRequest;
