@@ -69,6 +69,49 @@ describe('Intake authorization boundary', () => {
 			})
 		);
 	});
+	it('accepts only fresh canonical owner from the scoped managed-source endpoint', async () => {
+		const source = {
+			...context,
+			role: 'CRM_ADMIN',
+			ownerSubject: 'canonical-owner',
+			permissions: ['intake:read', 'intake:manage-sources']
+		};
+		(global.fetch as jest.Mock).mockImplementation(() =>
+			Promise.resolve(new Response(JSON.stringify(source)))
+		);
+		const client = new IntakeAuthorizationClient();
+		expect(
+			await client.authorizeWidgetSource(workspaceId, context.subject)
+		).toEqual(source);
+		expect(global.fetch).toHaveBeenCalledWith(
+			'https://crm-internal.example.test/internal/v1/crm-access/authorize-widget-source',
+			expect.objectContaining({
+				body: JSON.stringify({
+					schemaVersion: 1,
+					workspaceId,
+					subject: context.subject
+				}),
+				headers: expect.not.objectContaining({
+					authorization: expect.anything()
+				})
+			})
+		);
+		for (const change of [
+			{ ownerSubject: null },
+			{ ownerSubject: '' },
+			{ subject: 'changed' },
+			{ state: 'READ_ONLY' },
+			{ role: 'MANAGER' },
+			{ unexpected: 'field' }
+		]) {
+			(global.fetch as jest.Mock).mockResolvedValue(
+				new Response(JSON.stringify({ ...source, ...change }))
+			);
+			await expect(
+				client.authorizeWidgetSource(workspaceId, context.subject)
+			).rejects.toBeInstanceOf(Error);
+		}
+	});
 	it('rejects changed subject, read-only/demoted authority and invalid pair credentials for sources', async () => {
 		for (const change of [
 			{ subject: 'other' },

@@ -35,6 +35,14 @@ Refresh token остаётся общим HttpOnly cookie для доверен�
 - `POST /internal/v1/auth/introspect`
 - `POST /internal/v1/crm-access/auth-context` — только валидная bearer-сессия
   и активные memberships активных workspaces
+- `POST /internal/v1/crm-access/widget-source-context` — только scoped caller
+  `crm-access`: точные `schemaVersion:1`, `workspaceId`, `subject` без JWT.
+  Возвращает membership актора и `ownerSubject` из одного read-only
+  RepeatableRead snapshot. Неактивное workspace/членство/пользователь,
+  отсутствующий или неоднозначный активный OWNER дают оба поля `null`.
+  Для PERSONAL владелец также совпадает с `personalOwnerUserId`; профиль,
+  контакты и Widgets-подписка не раскрываются. Ответ `no-store`, ошибки БД
+  дают `503`, а не фиктивное отсутствие владельца.
 - `/internal/v1/widgets/owners/**`
 - `/internal/v1/operations/audit-snapshots` и
   `GET /internal/v1/operations/admin-health`

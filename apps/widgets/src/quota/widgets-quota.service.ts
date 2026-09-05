@@ -124,7 +124,8 @@ export class WidgetsQuotaService {
 		userId: string,
 		input: QuotaOperationInput,
 		operation: (
-			transaction: Prisma.TransactionClient
+			transaction: Prisma.TransactionClient,
+			entitlement: Readonly<WidgetEntitlementProjection>
 		) => Promise<QuotaOperationResult<T>>,
 		onLimitReached?: (
 			transaction: Prisma.TransactionClient,
@@ -160,7 +161,7 @@ export class WidgetsQuotaService {
 				transaction,
 				input.idempotencyKey
 			);
-			const result = await operation(transaction);
+			const result = await operation(transaction, context.entitlement);
 			const updated = await transaction.widgetUsageCounter.update({
 				where: { userId },
 				data: { leadCount: { increment: 1 } }

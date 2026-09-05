@@ -40,6 +40,161 @@ const response = () => ({
 
 describe('IdentityAuthContextClient', () => {
 	afterEach(() => jest.restoreAllMocks());
+	it('uses the independent exact owner-context endpoint without forwarding a user JWT', async () => {
+		const membership = response().memberships[0];
+		const value = {
+			schemaVersion: 1,
+			workspaceId: membership.workspaceId,
+			subject: 'user-1',
+			membership,
+			ownerSubject: 'user-1'
+		};
+		const fetchMock = jest
+			.spyOn(global, 'fetch')
+			.mockImplementation(async () => new Response(JSON.stringify(value)));
+		expect(
+			await client().widgetSourceContext(
+				value.workspaceId,
+				'user-1',
+				CORRELATION_ID
+			)
+		).toEqual(value);
+		expect(fetchMock).toHaveBeenCalledWith(
+			'http://127.0.0.1:4900/internal/v1/crm-access/widget-source-context',
+			expect.objectContaining({
+				method: 'POST',
+				redirect: 'error',
+				cache: 'no-store',
+				headers: expect.objectContaining({
+					'x-winwidget-service': 'crm-access',
+					'x-winwidget-internal-token': TOKEN
+				}),
+				body: JSON.stringify({
+					schemaVersion: 1,
+					workspaceId: value.workspaceId,
+					subject: 'user-1'
+				})
+			})
+		);
+		expect(fetchMock.mock.calls[0][1]?.headers).not.toHaveProperty(
+			'authorization'
+		);
+	});
+	it('accepts a distinct canonical owner for a delegated member and a null denial without leaking ownership', async () => {
+		const member = { ...response().memberships[0], role: 'MEMBER' };
+		const value = {
+			schemaVersion: 1,
+			workspaceId: member.workspaceId,
+			subject: 'administrator',
+			membership: member,
+			ownerSubject: 'owner-😀'
+		};
+		const fetchMock = jest
+			.spyOn(global, 'fetch')
+			.mockResolvedValueOnce(new Response(JSON.stringify(value)));
+		expect(
+			await client().widgetSourceContext(
+				value.workspaceId,
+				value.subject,
+				CORRELATION_ID
+			)
+		).toEqual(value);
+		fetchMock.mockResolvedValueOnce(
+			new Response(
+				JSON.stringify({ ...value, membership: null, ownerSubject: null })
+			)
+		);
+		expect(
+			await client().widgetSourceContext(
+				value.workspaceId,
+				value.subject,
+				CORRELATION_ID
+			)
+		).toMatchObject({ membership: null, ownerSubject: null });
+	});
+	it('rejects owner-context drift, cross-binding, unsupported scalar values, and hidden profile fields', async () => {
+		const membership = response().memberships[0];
+		const value = {
+			schemaVersion: 1,
+			workspaceId: membership.workspaceId,
+			subject: 'user-1',
+			membership,
+			ownerSubject: 'user-1'
+		};
+		const fetchMock = jest.spyOn(global, 'fetch');
+		for (const change of [
+			{ schemaVersion: 2 },
+			{ workspaceId: CORRELATION_ID },
+			{ subject: 'foreign' },
+			{ email: 'not-part-of-the-contract@example.test' },
+			{ ownerSubject: undefined },
+			{ ownerSubject: null },
+			{ ownerSubject: 'foreign' },
+			{ membership: null },
+			{ membership: { ...membership, role: 'MEMBER' } },
+			{
+				membership: { ...membership, role: ['MEMBER'] },
+				ownerSubject: 'other'
+			},
+			{
+				membership: { ...membership, role: ['OWNER'] },
+				ownerSubject: 'other'
+			},
+			{
+				membership: { ...membership, role: { role: 'MEMBER' } },
+				ownerSubject: 'other'
+			},
+			{ membership: { ...membership, workspaceId: CORRELATION_ID } },
+			{ membership: { ...membership, membershipId: 'bad' } },
+			...['', ' owner', 'a'.repeat(257), '\uFFFD', '\uD800', '\uDC00'].map(
+				ownerSubject => ({
+					membership: { ...membership, role: 'MEMBER' },
+					ownerSubject
+				})
+			)
+		]) {
+			fetchMock.mockResolvedValueOnce(
+				new Response(JSON.stringify({ ...value, ...change }))
+			);
+			await expect(
+				client().widgetSourceContext(
+					value.workspaceId,
+					value.subject,
+					CORRELATION_ID
+				)
+			).rejects.toBeInstanceOf(ServiceUnavailableException);
+		}
+	});
+	it('bounds owner-context responses and fails closed on HTTP, network and invalid input errors', async () => {
+		const workspaceId = response().memberships[0].workspaceId;
+		const fetchMock = jest.spyOn(global, 'fetch');
+		for (const status of [301, 401, 403, 404, 500]) {
+			fetchMock.mockResolvedValueOnce(
+				new Response('private-untrusted-body', { status })
+			);
+			await expect(
+				client().widgetSourceContext(workspaceId, 'user-1', CORRELATION_ID)
+			).rejects.toThrow('Widget source identity is unavailable');
+		}
+		fetchMock.mockResolvedValueOnce(
+			new Response(JSON.stringify({ data: 'x'.repeat(1024 * 1024) }))
+		);
+		await expect(
+			client().widgetSourceContext(workspaceId, 'user-1', CORRELATION_ID)
+		).rejects.toBeInstanceOf(ServiceUnavailableException);
+		fetchMock.mockRejectedValueOnce(new Error('private-network-error'));
+		await expect(
+			client().widgetSourceContext(workspaceId, 'user-1', CORRELATION_ID)
+		).rejects.toThrow('Widget source identity is unavailable');
+		fetchMock.mockClear();
+		await expect(
+			client().widgetSourceContext('bad', 'user-1', CORRELATION_ID)
+		).rejects.toBeInstanceOf(ServiceUnavailableException);
+		await expect(
+			client().widgetSourceContext(workspaceId, '\uD800', CORRELATION_ID)
+		).rejects.toBeInstanceOf(ServiceUnavailableException);
+		expect(fetchMock).not.toHaveBeenCalled();
+	});
 	it('uses only the scoped service credential for fresh source authority and validates its exact workspace/subject', async () => {
 		const workspaceId = response().memberships[0].workspaceId;
 		const result = {

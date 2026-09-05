@@ -84,6 +84,33 @@ export class CrmAuthorizationService {
 		return context;
 	}
 
+	async authorizeWidgetSource(workspaceId: string, subject: string) {
+		const correlationId = getCrmAccessCorrelationId();
+		const identity = await this.identity.widgetSourceContext(
+			workspaceId,
+			subject,
+			correlationId
+		);
+		if (!identity.ownerSubject || !identity.membership)
+			throw new ForbiddenException('Widget source owner is not available');
+		const context = await this.resolve(
+			workspaceId,
+			subject,
+			identity.membership,
+			correlationId,
+			'crm-intake'
+		);
+		if (
+			context.state === 'READ_ONLY' ||
+			!['OWNER', 'CRM_ADMIN'].includes(context.role) ||
+			!context.permissions.includes('intake:manage-sources')
+		)
+			throw new ForbiddenException(
+				'Widget source delegation is not active'
+			);
+		return { ...context, ownerSubject: identity.ownerSubject };
+	}
+
 	async authorizeSubject(
 		workspaceId: string,
 		subject: string,

@@ -33,6 +33,15 @@ describe('CrmIntakeHealthService', () => {
 			service: 'crm-intake'
 		});
 	});
+	it('does not issue managed Widgets SQL while feature is default off', async () => {
+		const prisma = createPrisma();
+		await new CrmIntakeHealthService(prisma).readiness();
+		expect(
+			JSON.stringify((prisma.$queryRaw as jest.Mock).mock.calls)
+		).not.toMatch(
+			/managed_widget_sources|widget_control_jobs|widget_control_receipts|widget_control_outbox/
+		);
+	});
 
 	it('fails readiness for another service database', async () => {
 		const service = new CrmIntakeHealthService(

@@ -1,7 +1,7 @@
 import { DatabaseRestoreTarget } from './database-restore.contract';
 
 export interface DatabaseRestoreAclContract {
-	profile: 'standard' | 'platform';
+	profile: 'standard' | 'platform' | 'widgets';
 	routines: readonly string[];
 	runtimeRoutines: readonly string[];
 }
@@ -21,7 +21,15 @@ export const DATABASE_RESTORE_ACL_CONTRACTS: Record<
 	'notification-delivery': STANDARD(),
 	campaigns: STANDARD(),
 	reporting: STANDARD(['reject_report_run_snapshot_mutation()']),
-	widgets: STANDARD(['enforce_ai_consent_receipt_immutability()']),
+	widgets: {
+		profile: 'widgets',
+		routines: [
+			'enforce_ai_consent_receipt_immutability()',
+			'guard_wincrm_connector_update()',
+			'reject_wincrm_evidence_mutation()'
+		],
+		runtimeRoutines: []
+	},
 	identity: STANDARD(),
 	platform: {
 		profile: 'platform',

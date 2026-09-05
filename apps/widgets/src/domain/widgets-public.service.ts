@@ -41,6 +41,7 @@ import {
 	normalizePhone
 } from './widgets-type-adapter';
 import { WidgetsTypeRegistryService } from './widgets-type-registry.service';
+import { WidgetsWincrmService } from '../wincrm/widgets-wincrm.service';
 
 interface PublicConfigRateEntry {
 	count: number;
@@ -71,7 +72,8 @@ export class WidgetsPublicService {
 		private readonly registry: WidgetsTypeRegistryService,
 		private readonly turnstile: WidgetsCloudflareTurnstileService,
 		private readonly callbackOtp: WidgetsCallbackOtpService,
-		private readonly aiConsent: WidgetsAiConsentService
+		private readonly aiConsent: WidgetsAiConsentService,
+		private readonly wincrm: WidgetsWincrmService
 	) {}
 
 	async config(
@@ -338,7 +340,7 @@ export class WidgetsPublicService {
 					: `lead-create:${initial.userId}:${initial.id}:${correlationId}`,
 				correlationId
 			},
-			async transaction => {
+			async (transaction, entitlement) => {
 				const widget = await this.repository.findByPublicKey(
 					type,
 					publicKey,
@@ -410,6 +412,14 @@ export class WidgetsPublicService {
 					widget,
 					lead: { ...lead, name: input.name },
 					config
+				});
+				await this.wincrm.capture(transaction, {
+					type,
+					widget,
+					lead,
+					config,
+					entitlement,
+					contactName: input.name
 				});
 				await this.reporting.enqueueLead(
 					transaction,

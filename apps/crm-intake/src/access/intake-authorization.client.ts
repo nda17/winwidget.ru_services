@@ -16,6 +16,10 @@ export interface IntakeAuthorization {
 	permissions: string[];
 }
 
+export interface IntakeWidgetAuthorization extends IntakeAuthorization {
+	ownerSubject: string;
+}
+
 const UUID =
 	/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const KEYS = [
@@ -198,12 +202,42 @@ export class IntakeAuthorizationClient {
 		return context;
 	}
 
+	async authorizeWidgetSource(
+		workspaceId: string,
+		subject: string
+	): Promise<IntakeWidgetAuthorization> {
+		const context = await this.request(
+			'authorize-widget-source',
+			workspaceId,
+			undefined,
+			subject
+		);
+		if (
+			context.subject !== subject ||
+			!('ownerSubject' in context) ||
+			typeof context.ownerSubject !== 'string'
+		)
+			throw new ServiceUnavailableException(
+				'Managed source authority could not be confirmed'
+			);
+		assertIntakePermission(context, 'intake:manage-sources', true);
+		if (!['OWNER', 'CRM_ADMIN'].includes(context.role))
+			throw new ForbiddenException(
+				'Managed source delegation is not active'
+			);
+		return context as IntakeWidgetAuthorization;
+	}
+
 	private async request(
-		path: 'authorize' | 'authorize-source' | 'authorize-workflow',
+		path:
+			| 'authorize'
+			| 'authorize-source'
+			| 'authorize-workflow'
+			| 'authorize-widget-source',
 		workspaceId: string,
 		authorization?: string,
 		subject?: string
-	): Promise<IntakeAuthorization> {
+	): Promise<IntakeAuthorization | IntakeWidgetAuthorization> {
 		const abort = new AbortController();
 		const timer = setTimeout(() => abort.abort(), this.timeout);
 		try {
@@ -258,12 +292,25 @@ export class IntakeAuthorizationClient {
 			} finally {
 				reader.releaseLock();
 			}
-			const context = parseIntakeAuthorization(
-				JSON.parse(Buffer.concat(chunks, size).toString('utf8')),
-				workspaceId
+			const value = JSON.parse(
+				Buffer.concat(chunks, size).toString('utf8')
 			);
+			let ownerSubject: string | undefined;
+			if (path === 'authorize-widget-source') {
+				if (
+					!value ||
+					typeof value !== 'object' ||
+					Array.isArray(value) ||
+					typeof value.ownerSubject !== 'string' ||
+					!/^[^\s\x00-\x1f\x7f]{1,256}$/.test(value.ownerSubject)
+				)
+					throw new Error('DEPENDENCY_OWNER');
+				ownerSubject = value.ownerSubject;
+				delete value.ownerSubject;
+			}
+			const context = parseIntakeAuthorization(value, workspaceId);
 			if (!context) throw new Error('DEPENDENCY_CONTRACT');
-			return context;
+			return ownerSubject ? { ...context, ownerSubject } : context;
 		} catch (error) {
 			if (
 				error instanceof UnauthorizedException ||

@@ -65,6 +65,24 @@ onboarding, затем `READ_ONLY` запрещает команды. Локал
 закрывает доступ с `503`; отсутствие entitlement признаётся только по успешному
 ответу Billing со статусом `NOT_ACTIVATED`.
 
+## Владелец нативного источника Widgets
+
+`POST /internal/v1/crm-access/authorize-widget-source` принимает только
+`crm-intake` с существующей отдельной парой `CRM_ACCESS_CRM_INTAKE_TOKEN` и
+точными `schemaVersion:1`, `workspaceId`, `subject`. Пользовательский JWT и
+`ownerSubject` в теле не заменяют межсервисную авторизацию. Контракт не
+публикуется через Gateway; удалённый caller использует защищённый private
+HTTPS ingress, а приложение проверяет реальный loopback peer.
+
+Identity заново определяет активного актора и единственного канонического
+владельца в одном own read-only snapshot. Access независимо проверяет свой
+CRM-member, onboarding и актуальный Billing. Допускаются только writable
+OWNER/CRM_ADMIN с `intake:manage-sources`, включая CRM Trial/GRACE; READ_ONLY,
+отзыв доступа и неоднозначный владелец запрещают подключение. Ответ — обычный
+Intake authorization DTO плюс `ownerSubject`, `Cache-Control: no-store`.
+Оплаченный EASY/HARD проверяет Widgets через свой Billing-контракт отдельно.
+Существующие auth/source/workflow endpoints и их точные DTO не меняются.
+
 ## Команда и допуск сотрудников
 
 Публичный `/api/v1/crm/access/team` содержит серверные списки `members`,

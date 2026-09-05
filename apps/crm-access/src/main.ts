@@ -34,6 +34,10 @@ async function bootstrap(): Promise<void> {
 				method: RequestMethod.POST
 			},
 			{
+				path: 'internal/v1/crm-access/authorize-widget-source',
+				method: RequestMethod.POST
+			},
+			{
 				path: 'internal/v1/crm-access/authorize-workflow',
 				method: RequestMethod.POST
 			}

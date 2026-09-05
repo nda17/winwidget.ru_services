@@ -78,8 +78,12 @@ const TARGETS = [
 		runtimeRole: 'winwidget_widgets_runtime',
 		backupRole: 'winwidget_widgets_backup',
 		acl: {
-			profile: 'standard',
-			routines: ['enforce_ai_consent_receipt_immutability()'],
+			profile: 'widgets',
+			routines: [
+				'enforce_ai_consent_receipt_immutability()',
+				'guard_wincrm_connector_update()',
+				'reject_wincrm_evidence_mutation()'
+			],
 			runtimeRoutines: []
 		}
 	},
@@ -230,6 +234,7 @@ const psql = ({
 	sql,
 	tuplesOnly = false,
 	expectFailure = false,
+	verbose = false,
 	label = 'PostgreSQL command'
 }) =>
 	containerCommand(
@@ -238,6 +243,7 @@ const psql = ({
 			'--no-password',
 			'--set',
 			'ON_ERROR_STOP=1',
+			...(verbose ? ['--set', 'VERBOSITY=verbose'] : []),
 			'--host',
 			'127.0.0.1',
 			'--port',
@@ -586,6 +592,135 @@ const installClientWrappers = async directory => {
 	process.env.PATH = `${directory}:${process.env.PATH}`;
 };
 
+const assertWidgetsNativeAcl = async (aclService, target) => {
+	const connection = targetConnection(target);
+	const schema = quoteIdentifier(target.schema);
+	const runtime = quoteIdentifier(target.runtimeRole);
+	const migration = quoteIdentifier(target.migrationRole);
+	const execute = (sql, label, extra = {}) =>
+		psql({
+			user: target.adminRole,
+			database: target.database,
+			password: target.passwords.admin,
+			sql,
+			label,
+			...extra
+		});
+	const tables = [
+		'wincrm_connectors',
+		'wincrm_connector_commands',
+		'wincrm_transfer_intents'
+	];
+	const assertPrivileges = () => {
+		const checks = tables.flatMap(table =>
+			[
+				'SELECT',
+				'INSERT',
+				'UPDATE',
+				'DELETE',
+				'TRUNCATE',
+				'REFERENCES',
+				'TRIGGER'
+			].map(privilege => {
+				const allowed =
+					['SELECT', 'INSERT'].includes(privilege) ||
+					(table === 'wincrm_connectors' && privilege === 'UPDATE');
+				return `has_table_privilege(${literal(target.runtimeRole)}, ${literal(`${target.schema}.${table}`)}, ${literal(privilege)}) = ${allowed}`;
+			})
+		);
+		for (const routine of target.acl.routines)
+			checks.push(
+				`NOT has_function_privilege(${literal(target.runtimeRole)}, ${literal(`${target.schema}.${routine}`)}, 'EXECUTE')`
+			);
+		checks.push(
+			`has_table_privilege(${literal(target.runtimeRole)}, ${literal(`${target.schema}.widgets`)}, 'DELETE')`
+		);
+		assert.equal(
+			execute(
+				`SELECT ${checks.join(' AND ')};`,
+				'Verify exact Widgets native privileges',
+				{ tuplesOnly: true }
+			).stdout.trim(),
+			't'
+		);
+	};
+	assertPrivileges();
+	// Rehearse repairing a prior STANDARD grant instead of only proving a fresh ACL.
+	execute(
+		`SET ROLE ${migration}; GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE ${tables.map(table => `${schema}.${quoteIdentifier(table)}`).join(', ')} TO ${runtime};`,
+		'Inject broad Widgets native grants'
+	);
+	await expectReject(
+		() => aclService.verify(connection, target),
+		/table privileges drifted/i,
+		'Reject broad Widgets native grants'
+	);
+	await aclService.reconcileAndVerify(connection, target);
+	assertPrivileges();
+	for (const table of tables) {
+		for (const sql of [
+			`DELETE FROM ${schema}.${quoteIdentifier(table)} WHERE FALSE;`,
+			`TRUNCATE ${schema}.${quoteIdentifier(table)};`,
+			...(table === 'wincrm_connectors'
+				? []
+				: [
+						`UPDATE ${schema}.${quoteIdentifier(table)} SET ${table === 'wincrm_connector_commands' ? 'command_id = command_id' : 'id = id'} WHERE FALSE;`
+					])
+		]) {
+			const rejected = execute(
+				`SET ROLE ${runtime}; ${sql}`,
+				'Reject forbidden Widgets native runtime DML',
+				{ expectFailure: true, verbose: true }
+			);
+			assert.match(rejected.stderr, /42501/);
+		}
+	}
+	const routine = 'guard_wincrm_connector_update';
+	execute(
+		`SET ROLE ${migration}; ALTER FUNCTION ${schema}.${quoteIdentifier(routine)}() RENAME TO restore_rehearsal_missing_native_routine;`,
+		'Inject missing Widgets native routine'
+	);
+	try {
+		await expectReject(
+			() => aclService.verify(connection, target),
+			/routine allowlist drifted/i,
+			'Reject missing Widgets native routine'
+		);
+	} finally {
+		execute(
+			`SET ROLE ${migration}; ALTER FUNCTION ${schema}.restore_rehearsal_missing_native_routine() RENAME TO ${quoteIdentifier(routine)};`,
+			'Restore Widgets native routine name'
+		);
+	}
+	execute(
+		`SET ROLE ${migration}; CREATE FUNCTION ${schema}.${quoteIdentifier(routine)}(integer) RETURNS integer LANGUAGE SQL AS 'SELECT 1';`,
+		'Inject unexpected Widgets routine overload'
+	);
+	try {
+		await expectReject(
+			() => aclService.verify(connection, target),
+			/routine allowlist drifted/i,
+			'Reject unexpected Widgets routine signature'
+		);
+	} finally {
+		execute(
+			`SET ROLE ${migration}; DROP FUNCTION ${schema}.${quoteIdentifier(routine)}(integer);`,
+			'Remove Widgets rehearsal routine overload'
+		);
+	}
+	execute(
+		`SET ROLE ${migration}; GRANT EXECUTE ON FUNCTION ${schema}.${quoteIdentifier(routine)}() TO ${runtime};`,
+		'Inject Widgets runtime EXECUTE drift'
+	);
+	await expectReject(
+		() => aclService.verify(connection, target),
+		/routine privileges drifted/i,
+		'Reject Widgets runtime EXECUTE'
+	);
+	await aclService.reconcileAndVerify(connection, target);
+	assertPrivileges();
+};
+
 const assertExactAclWithInjectedDrift = async (
 	aclService,
 	processService,
@@ -618,6 +753,8 @@ const assertExactAclWithInjectedDrift = async (
 			`${target.name} ACL reconciliation failed: ${error instanceof Error ? error.message : String(error)}; actual=${actual}`
 		);
 	}
+	if (target.name === 'widgets')
+		await assertWidgetsNativeAcl(aclService, target);
 	if (target !== configuredTargets[0]) return;
 	const table = psql({
 		user: target.adminRole,

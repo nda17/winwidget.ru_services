@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { DatabaseRestoreProcessService } from './database-restore-process.service';
+import { DATABASE_RESTORE_ACL_CONTRACTS } from './database-restore-acl.contract';
 import {
 	DatabaseRestoreConnection,
 	DatabaseRestoreTargetConfiguration
@@ -20,6 +21,22 @@ const PLATFORM_TABLES = [
 ] as const;
 
 const TABLE_RELKINDS_SQL = "'r', 'p', 'v', 'm', 'f'";
+
+const WIDGETS_NATIVE_TABLES = [
+	'wincrm_connectors',
+	'wincrm_connector_commands',
+	'wincrm_transfer_intents'
+] as const;
+
+const WIDGETS_NATIVE_RUNTIME_TABLE_ACL: readonly AclRow[] = [
+	['wincrm_connectors', 'SELECT'],
+	['wincrm_connectors', 'INSERT'],
+	['wincrm_connectors', 'UPDATE'],
+	['wincrm_connector_commands', 'SELECT'],
+	['wincrm_connector_commands', 'INSERT'],
+	['wincrm_transfer_intents', 'SELECT'],
+	['wincrm_transfer_intents', 'INSERT']
+];
 
 const PLATFORM_RUNTIME_TABLE_ACL: readonly AclRow[] = [
 	['billing_offer_producer_state', 'SELECT'],
@@ -91,7 +108,10 @@ export class DatabaseRestoreAclService {
 				? this.platformRuntimeGrants(schema, runtime)
 				: [
 						`GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA ${schema} TO ${runtime};`,
-						`REVOKE ALL PRIVILEGES ON TABLE ${schema}."_prisma_migrations" FROM ${runtime};`
+						`REVOKE ALL PRIVILEGES ON TABLE ${schema}."_prisma_migrations" FROM ${runtime};`,
+						target.acl.profile === 'widgets'
+							? this.widgetsNativeRuntimeGrants(schema, runtime)
+							: ''
 					].join('\n');
 		const runtimeRoutineGrants = target.acl.runtimeRoutines
 			.map(
@@ -100,14 +120,14 @@ export class DatabaseRestoreAclService {
 			)
 			.join('\n');
 		const standardRuntimeDefaults =
-			target.acl.profile === 'standard'
+			target.acl.profile !== 'platform'
 				? [
 						`ALTER DEFAULT PRIVILEGES FOR ROLE ${migration} IN SCHEMA ${schema} GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO ${runtime};`,
 						`ALTER DEFAULT PRIVILEGES FOR ROLE ${migration} IN SCHEMA ${schema} GRANT USAGE, SELECT, UPDATE ON SEQUENCES TO ${runtime};`
 					].join('\n')
 				: '';
 		const standardRuntimeSequenceGrants =
-			target.acl.profile === 'standard'
+			target.acl.profile !== 'platform'
 				? `GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA ${schema} TO ${runtime};`
 				: '';
 
@@ -144,6 +164,16 @@ export class DatabaseRestoreAclService {
 		target: DatabaseRestoreTargetConfiguration,
 		roleMode: DatabaseRestoreAclRoleMode
 	): string {
+		if (target.acl.profile === 'widgets') {
+			const expected = DATABASE_RESTORE_ACL_CONTRACTS.widgets.routines;
+			if (
+				target.acl.runtimeRoutines.length !== 0 ||
+				target.acl.routines.length !== expected.length ||
+				new Set(target.acl.routines).size !== expected.length ||
+				target.acl.routines.some(routine => !expected.includes(routine))
+			)
+				throw new Error('Invalid Widgets owner-only routine contract');
+		}
 		const database = this.literal(target.database);
 		const schema = this.literal(target.schema);
 		const admin = this.literal(target.adminRole);
@@ -360,6 +390,12 @@ END
 		const migration = this.literal(target.migrationRole);
 		const runtime = this.literal(target.runtimeRole);
 		const backup = this.literal(target.backupRole);
+		const excludedStandardTables = [
+			'_prisma_migrations',
+			...(target.acl.profile === 'widgets' ? WIDGETS_NATIVE_TABLES : [])
+		]
+			.map(table => this.literal(table))
+			.join(', ');
 		const expected =
 			target.acl.profile === 'platform'
 				? `SELECT expected.object_name::TEXT, ${runtime}::TEXT AS grantee,
@@ -380,7 +416,16 @@ END
 				AS expected_privilege(privilege_type)
 			WHERE relation.relnamespace = schema_oid
 				AND relation.relkind IN (${TABLE_RELKINDS_SQL})
-				AND relation.relname <> '_prisma_migrations'
+				AND relation.relname NOT IN (${excludedStandardTables})
+			${
+				target.acl.profile === 'widgets'
+					? `UNION ALL
+				SELECT expected.object_name::TEXT, ${runtime}::TEXT,
+					expected.privilege_type::TEXT, FALSE, ${migration}::TEXT
+				FROM (${this.aclValues(WIDGETS_NATIVE_RUNTIME_TABLE_ACL)})
+					AS expected(object_name, privilege_type)`
+					: ''
+			}
 			UNION ALL
 			SELECT relation.relname::TEXT, ${backup}::TEXT, 'SELECT'::TEXT,
 				FALSE, ${migration}::TEXT
@@ -659,6 +704,21 @@ END
 			`GRANT DELETE ON TABLE ${schema}."outbox_events" TO ${runtime};`,
 			`GRANT UPDATE ("current_semantic_fingerprint", "updated_at") ON TABLE ${schema}."service_identity" TO ${runtime};`,
 			`GRANT UPDATE ("current_aggregate_version", "current_source_sequence", "updated_at") ON TABLE ${schema}."billing_offer_producer_state" TO ${runtime};`
+		].join('\n');
+	}
+
+	private widgetsNativeRuntimeGrants(
+		schema: string,
+		runtime: string
+	): string {
+		const tables = WIDGETS_NATIVE_TABLES.map(
+			table => `${schema}.${this.identifier(table)}`
+		).join(', ');
+		return [
+			// STANDARD may already have granted wider rights: replace, do not add.
+			`REVOKE ALL PRIVILEGES ON TABLE ${tables} FROM ${runtime};`,
+			`GRANT SELECT, INSERT ON TABLE ${tables} TO ${runtime};`,
+			`GRANT UPDATE ON TABLE ${schema}."wincrm_connectors" TO ${runtime};`
 		].join('\n');
 	}
 

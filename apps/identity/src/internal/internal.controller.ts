@@ -1,8 +1,10 @@
 import {
 	Body,
+	BadRequestException,
 	Controller,
 	Get,
 	Headers,
+	Header,
 	HttpCode,
 	Post,
 	Req,
@@ -104,6 +106,33 @@ export class IdentityInternalController {
 	@InternalServices('crm-access')
 	crmSourceContext(@Body() dto: CrmSourceContextDto) {
 		return this.internal.crmSourceContext(dto.workspaceId, dto.subject);
+	}
+
+	@Post('crm-access/widget-source-context')
+	@HttpCode(200)
+	@Header('Cache-Control', 'no-store')
+	@InternalServices('crm-access')
+	crmWidgetSourceContext(
+		@Body() dto: CrmSourceContextDto,
+		@Req() request: Request
+	) {
+		// The existing global whitelist strips extra DTO fields before local pipes.
+		// Check this new exact contract against the original body, without changing old routes.
+		const raw: unknown = request.body;
+		if (
+			!raw ||
+			typeof raw !== 'object' ||
+			Array.isArray(raw) ||
+			Object.keys(raw).length !== 3 ||
+			!['schemaVersion', 'workspaceId', 'subject'].every(key =>
+				Object.hasOwn(raw, key)
+			)
+		)
+			throw new BadRequestException('Invalid widget source context');
+		return this.internal.crmWidgetSourceContext(
+			dto.workspaceId,
+			dto.subject
+		);
 	}
 
 	@Post('widgets/owners/resolve')

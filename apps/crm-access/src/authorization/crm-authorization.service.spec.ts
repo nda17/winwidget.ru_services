@@ -10,6 +10,17 @@ const teamId = '33333333-3333-4333-8333-333333333333';
 
 function setup(role = 'OWNER', status = 'ACTIVE') {
 	const identity = {
+		widgetSourceContext: jest.fn().mockResolvedValue({
+			schemaVersion: 1,
+			workspaceId,
+			subject: 'user-1',
+			ownerSubject: role === 'OWNER' ? 'user-1' : 'canonical-owner',
+			membership: {
+				workspaceId,
+				membershipId,
+				role: role === 'OWNER' ? 'OWNER' : 'MEMBER'
+			}
+		}),
 		sourceContext: jest.fn().mockResolvedValue({
 			schemaVersion: 1,
 			workspaceId,
@@ -66,6 +77,83 @@ function setup(role = 'OWNER', status = 'ACTIVE') {
 }
 
 describe('CRM service authorization', () => {
+	it.each(['OWNER', 'CRM_ADMIN'])(
+		'binds %s native source authority to fresh canonical Identity owner',
+		async role => {
+			const current = setup(role, 'GRACE');
+			for (let i = 0; i < 2; i++)
+				expect(
+					await current.service.authorizeWidgetSource(
+						workspaceId,
+						'user-1'
+					)
+				).toMatchObject({
+					workspaceId,
+					subject: 'user-1',
+					role,
+					state: 'GRACE',
+					ownerSubject: role === 'OWNER' ? 'user-1' : 'canonical-owner',
+					permissions: expect.arrayContaining(['intake:manage-sources'])
+				});
+			expect(current.identity.widgetSourceContext).toHaveBeenCalledTimes(
+				2
+			);
+			expect(current.identity.sourceContext).not.toHaveBeenCalled();
+			expect(current.identity.authContext).not.toHaveBeenCalled();
+			expect(current.billing.get).toHaveBeenCalledTimes(2);
+		}
+	);
+	it.each(['MANAGER', 'TEAM_LEAD', 'ANALYST'])(
+		'does not grant widget ownership authority to %s',
+		async role => {
+			await expect(
+				setup(role).service.authorizeWidgetSource(workspaceId, 'user-1')
+			).rejects.toBeInstanceOf(ForbiddenException);
+		}
+	);
+	it('denies missing or ambiguous Identity owner before reading Billing or CRM state', async () => {
+		const current = setup();
+		current.identity.widgetSourceContext.mockResolvedValue({
+			schemaVersion: 1,
+			workspaceId,
+			subject: 'user-1',
+			membership: null,
+			ownerSubject: null
+		});
+		await expect(
+			current.service.authorizeWidgetSource(workspaceId, 'user-1')
+		).rejects.toBeInstanceOf(ForbiddenException);
+		expect(current.billing.get).not.toHaveBeenCalled();
+		expect(
+			current.prisma.crmWorkspaceAccess.findUnique
+		).not.toHaveBeenCalled();
+	});
+	it('rechecks CRM role and paid/Trial lifecycle for every native source authority', async () => {
+		for (const role of ['OWNER', 'CRM_ADMIN'])
+			await expect(
+				setup(role, 'READ_ONLY').service.authorizeWidgetSource(
+					workspaceId,
+					'user-1'
+				)
+			).rejects.toBeInstanceOf(ForbiddenException);
+		const current = setup('CRM_ADMIN');
+		await current.service.authorizeWidgetSource(workspaceId, 'user-1');
+		current.prisma.crmWorkspaceMember.findUnique.mockResolvedValue({
+			role: 'CRM_ADMIN',
+			membershipId,
+			teams: [],
+			disabledAt: new Date()
+		});
+		await expect(
+			current.service.authorizeWidgetSource(workspaceId, 'user-1')
+		).rejects.toBeInstanceOf(ForbiddenException);
+		current.identity.widgetSourceContext.mockRejectedValue(
+			new ServiceUnavailableException()
+		);
+		await expect(
+			current.service.authorizeWidgetSource(workspaceId, 'user-1')
+		).rejects.toBeInstanceOf(ServiceUnavailableException);
+	});
 	it.each(['OWNER', 'CRM_ADMIN', 'TEAM_LEAD', 'MANAGER'])(
 		'authorizes the writable %s acceptance workflow without source-admin semantics',
 		async role => {

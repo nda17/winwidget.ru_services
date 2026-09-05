@@ -72,6 +72,13 @@ import {
 	WIDGETS_CALLBACK_OTP_TRANSPORT,
 	WidgetsCallbackOtpProvider
 } from './callback/widgets-callback-otp.transport';
+import {
+	WidgetsWincrmBillingClient,
+	WidgetsWincrmConfig,
+	WidgetsWincrmGuard
+} from './wincrm/widgets-wincrm.config';
+import { WidgetsWincrmController } from './wincrm/widgets-wincrm.controller';
+import { WidgetsWincrmService } from './wincrm/widgets-wincrm.service';
 
 @Module({
 	imports: [
@@ -81,6 +88,7 @@ import {
 		WidgetsRabbitMqModule
 	],
 	controllers: [
+		WidgetsWincrmController,
 		WidgetsHealthController,
 		WidgetsInternalController,
 		WidgetsOperationsController,
@@ -95,6 +103,10 @@ import {
 		WidgetsTelemetryController
 	],
 	providers: [
+		WidgetsWincrmConfig,
+		WidgetsWincrmBillingClient,
+		WidgetsWincrmGuard,
+		WidgetsWincrmService,
 		WidgetsIdentityClient,
 		WidgetsInternalGuard,
 		WidgetsOperationsGuard,

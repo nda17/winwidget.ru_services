@@ -141,6 +141,18 @@ Read-only аудит production API и личного кабинета ЮKassa �
   влияет на заявки и прежние интеграции, managed connector включается явно
   только на оплаченных `EASY`/`HARD`; окончание подписки прекращает новые
   передачи, сохраняя полученные данные. Историю автоматически не переносить.
+- до включения native connector добавить точный event route
+  `widgets.wincrm.lead-transfer.requested.v1` в service-owned RabbitMQ topic
+  write allowlist Widgets и независимую binding/очередь Intake. Текущий
+  production ACL этот event не разрешает; одного feature flag недостаточно.
+  Не расширять доступ до общего wildcard. Доказать confirm/mandatory return
+  и доставку под реальными least-privilege credentials перед включением;
+- включать native API только после обновления всех Widgets publishers,
+  миграций, broker ACL и готовности durable binding/consumer Intake. Старый
+  publisher не знает новый event и может поместить его в QUARANTINED.
+  Отключение feature flag не разрешает откат publisher, пока остаются
+  неопубликованные native events: сохранить совместимый publisher до
+  доказанного завершения очереди и не удалять durable сообщения при rollback;
   - проверить лимиты входящего API за Gateway/private ingress: сейчас Intake
     не доверяет произвольному `X-Forwarded-For`, поэтому peer-IP bucket может
     быть общим для всех запросов proxy. До роста входящего потока зафиксировать
@@ -152,6 +164,22 @@ Read-only аудит production API и личного кабинета ЮKassa �
 Работа продолжается локально с commit/push и CI. После MVP разрешены frontend
 backlog и выпуск остальных приложений на существующей инфраструктуре, но
 CRM-зависимые действия не включаются до совместимого backend rollout.
+
+### P1 — безопасный выпуск основного frontend до отдельного релиза WinCRM
+
+Основной frontend разрешено выпускать на существующий VPS независимо от новых
+CRM VPS. До продвижения CRM frontend-изменений в его `prod` явно отключить
+запросы каталога и настройки тарифов в `/admin/crm`, если соответствующие
+Gateway/Billing/CRM Sales contracts ещё не выпущены. Справочная часть остаётся
+доступной ADMIN/DEV; шапка сохраняет CRM disabled, `#0` и подсказку «Скоро».
+Не подменять отсутствующий API фиктивными данными или старыми DTO.
+
+Добавить verify-only CI feature/PR с auth-return и admin CRM tests. Текущий
+ручной `workflow_dispatch` основного frontend выполняет production SSH/deploy,
+поэтому его нельзя использовать для проверки feature SHA. Выпускать только
+проверенный immutable SHA после повторной сверки ветки `prod` и совместимости
+runtime. Возврат авторизации на ещё не развёрнутый CRM-домен требует отдельного
+release gate; обычные login/register/OAuth/Widgets URL должны сохраниться.
 
 ### P1 — восстановление неизвестного результата команды после новой авторизации
 

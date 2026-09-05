@@ -107,4 +107,21 @@ export class CrmAuthorizationController {
 			dto.subject
 		);
 	}
+
+	@Post('authorize-widget-source')
+	@HttpCode(200)
+	@Header('Cache-Control', 'no-store')
+	authorizeWidgetSource(
+		@Headers('x-winwidget-service') caller: CrmCaller,
+		@Body() dto: CrmAuthorizeSourceDto
+	) {
+		if (caller !== 'crm-intake')
+			throw new ForbiddenException(
+				'Only CRM Intake can authorize a widget source'
+			);
+		return this.authorization.authorizeWidgetSource(
+			dto.workspaceId,
+			dto.subject
+		);
+	}
 }

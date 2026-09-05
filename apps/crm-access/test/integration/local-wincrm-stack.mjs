@@ -542,7 +542,11 @@ async function grantRuntime(service) {
 				'intake_sources',
 				'acceptances',
 				'acceptance_outbox',
-				'acceptance_receipts'
+				'acceptance_receipts',
+				'managed_widget_sources',
+				'widget_control_jobs',
+				'widget_control_receipts',
+				'widget_control_outbox'
 			],
 			'SELECT, INSERT': [
 				'intake_commands',
@@ -609,6 +613,11 @@ async function grantRuntime(service) {
 
 async function verifyDomain() {
 	for (const [app, file, prefix] of [
+		[
+			'identity',
+			'widget-source-context-postgres18.integration.mjs',
+			'IDENTITY'
+		],
 		['crm-intake', 'intake-postgres18.integration.mjs', 'CRM_INTAKE'],
 		[
 			'crm-customers',
@@ -627,6 +636,11 @@ async function verifyDomain() {
 		],
 		['crm-intake', 'acceptance-postgres18.integration.mjs', 'CRM_INTAKE'],
 		['crm-intake', 'csv-postgres18.integration.mjs', 'CRM_INTAKE'],
+		[
+			'crm-intake',
+			'widget-control-postgres18.integration.mjs',
+			'CRM_INTAKE'
+		],
 		[
 			'crm-customers',
 			'export-postgres18.integration.mjs',

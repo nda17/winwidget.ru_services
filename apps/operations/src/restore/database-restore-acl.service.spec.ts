@@ -37,8 +37,12 @@ const widgetsTarget: DatabaseRestoreTargetConfiguration = {
 	runtimeRole: 'winwidget_widgets_runtime',
 	backupRole: 'winwidget_widgets_backup',
 	acl: {
-		profile: 'standard',
-		routines: ['enforce_ai_consent_receipt_immutability()'],
+		profile: 'widgets',
+		routines: [
+			'enforce_ai_consent_receipt_immutability()',
+			'guard_wincrm_connector_update()',
+			'reject_wincrm_evidence_mutation()'
+		],
 		runtimeRoutines: []
 	}
 };
@@ -171,7 +175,7 @@ describe('DatabaseRestoreAclService', () => {
 		);
 	});
 
-	it('keeps the Widgets consent immutability trigger routine owner-only after restore', async () => {
+	it('keeps every Widgets trigger routine owner-only after restore', async () => {
 		const { process, service } = setup();
 		const widgetsConnection = {
 			...connection,
@@ -182,9 +186,12 @@ describe('DatabaseRestoreAclService', () => {
 		await service.reconcileAndVerify(widgetsConnection, widgetsTarget);
 
 		const sql = process.executeSql.mock.calls[0][1];
-		expect(sql).toContain(
-			"'widgets.enforce_ai_consent_receipt_immutability()'"
-		);
+		for (const routine of widgetsTarget.acl.routines) {
+			expect(sql).toContain(`'widgets.${routine}'`);
+			expect(sql).not.toContain(
+				`GRANT EXECUTE ON FUNCTION "widgets"."${routine.slice(0, -2)}"()`
+			);
+		}
 		expect(sql).toContain(
 			'REVOKE ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA "widgets" FROM PUBLIC, "winwidget_widgets_runtime", "winwidget_widgets_backup";'
 		);
@@ -192,6 +199,90 @@ describe('DatabaseRestoreAclService', () => {
 			'GRANT EXECUTE ON FUNCTION "widgets"."enforce_ai_consent_receipt_immutability"() TO "winwidget_widgets_runtime";'
 		);
 	});
+
+	it('replaces broad Widgets native grants before verifying the exact evidence ACL, preserving old tables and defaults', async () => {
+		const { process, service } = setup();
+		await service.reconcileAndVerify(connection, widgetsTarget);
+		const sql = process.executeSql.mock.calls[0][1];
+		const tables =
+			'"widgets"."wincrm_connectors", "widgets"."wincrm_connector_commands", "widgets"."wincrm_transfer_intents"';
+		const broad =
+			'GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA "widgets" TO "winwidget_widgets_runtime";';
+		const revoke = `REVOKE ALL PRIVILEGES ON TABLE ${tables} FROM "winwidget_widgets_runtime";`;
+		const insert = `GRANT SELECT, INSERT ON TABLE ${tables} TO "winwidget_widgets_runtime";`;
+		expect(sql).toContain(broad);
+		expect(sql).toContain(revoke);
+		expect(sql).toContain(insert);
+		expect(sql.indexOf(revoke)).toBeGreaterThan(sql.indexOf(broad));
+		expect(sql.indexOf(insert)).toBeGreaterThan(sql.indexOf(revoke));
+		expect(sql).toContain(
+			'GRANT UPDATE ON TABLE "widgets"."wincrm_connectors" TO "winwidget_widgets_runtime";'
+		);
+		for (const table of [
+			'wincrm_connectors',
+			'wincrm_connector_commands',
+			'wincrm_transfer_intents'
+		]) {
+			expect(sql).toContain(`('${table}'::TEXT, 'SELECT'::TEXT)`);
+			expect(sql).toContain(`('${table}'::TEXT, 'INSERT'::TEXT)`);
+			expect(sql).not.toContain(`('${table}'::TEXT, 'DELETE'::TEXT)`);
+			if (table !== 'wincrm_connectors') {
+				expect(sql).not.toContain(`('${table}'::TEXT, 'UPDATE'::TEXT)`);
+				expect(sql).not.toContain(
+					`GRANT UPDATE ON TABLE "widgets"."${table}"`
+				);
+			}
+		}
+		expect(sql).toContain(
+			"relation.relname NOT IN ('_prisma_migrations', 'wincrm_connectors', 'wincrm_connector_commands', 'wincrm_transfer_intents')"
+		);
+		expect(sql).toContain('Database restore table privileges drifted');
+		expect(sql).toContain(
+			'SELECT * FROM actual EXCEPT SELECT * FROM expected'
+		);
+		expect(sql).toContain(
+			'SELECT * FROM expected EXCEPT SELECT * FROM actual'
+		);
+		expect(sql).toContain(
+			'ALTER DEFAULT PRIVILEGES FOR ROLE "winwidget_widgets_migration" IN SCHEMA "widgets" GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO "winwidget_widgets_runtime";'
+		);
+		expect(sql).toContain(
+			'GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA "widgets" TO "winwidget_widgets_runtime";'
+		);
+	});
+
+	it.each([
+		{ routines: widgetsTarget.acl.routines.slice(0, -1) },
+		{ routines: [...widgetsTarget.acl.routines, 'unreviewed()'] },
+		{
+			routines: [
+				...widgetsTarget.acl.routines.slice(0, -1),
+				'reject_wincrm_evidence_mutation(integer)'
+			]
+		},
+		{
+			routines: widgetsTarget.acl.routines.map(
+				() => 'guard_wincrm_connector_update()'
+			)
+		},
+		{ runtimeRoutines: ['guard_wincrm_connector_update()'] }
+	])(
+		'rejects a missing, malformed or widened Widgets routine contract before SQL: %j',
+		async change => {
+			const { process, service } = setup();
+			const target = {
+				...widgetsTarget,
+				acl: { ...widgetsTarget.acl, ...change }
+			};
+			await expect(
+				service.reconcileAndVerify(connection, target)
+			).rejects.toThrow('Invalid Widgets owner-only routine contract');
+			await expect(service.verify(connection, target)).rejects.toThrow(
+				'Invalid Widgets owner-only routine contract'
+			);
+			expect(process.executeSql).not.toHaveBeenCalled();
+		}
+	);
 
 	it('rejects an unsafe routine signature before invoking PostgreSQL', async () => {
 		const { process, service } = setup();

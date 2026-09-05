@@ -178,6 +178,184 @@ describe('canonical Identity introspection', () => {
 	});
 });
 
+describe('Canonical Identity owner for native WinCRM sources', () => {
+	const workspaceId = '33333333-3333-4333-8333-333333333333';
+	const membershipId = '44444444-4444-4444-8444-444444444444';
+	function setup(type = 'PERSONAL', actor = 'owner') {
+		const tx = {
+			$executeRawUnsafe: jest.fn().mockResolvedValue(0),
+			workspace: {
+				findFirst: jest.fn().mockResolvedValue({
+					type,
+					personalOwnerUserId: type === 'PERSONAL' ? 'owner' : null
+				})
+			},
+			workspaceMember: {
+				findFirst: jest.fn().mockResolvedValue({
+					id: membershipId,
+					workspaceId,
+					role: actor === 'owner' ? 'OWNER' : 'MEMBER'
+				}),
+				findMany: jest.fn().mockResolvedValue([{ userId: 'owner' }])
+			}
+		};
+		const prisma = {
+			$transaction: jest.fn(
+				(action: (value: typeof tx) => Promise<unknown>) => action(tx)
+			)
+		};
+		return {
+			tx,
+			prisma,
+			value: new IdentityInternalService(
+				prisma as never,
+				{} as never,
+				{} as never
+			)
+		};
+	}
+	it.each(['PERSONAL', 'ORGANIZATION'])(
+		'binds active actor and exactly one active %s owner in one read-only snapshot',
+		async type => {
+			const current = setup(type, 'administrator');
+			expect(
+				await current.value.crmWidgetSourceContext(
+					workspaceId,
+					'administrator'
+				)
+			).toEqual({
+				schemaVersion: 1,
+				workspaceId,
+				subject: 'administrator',
+				ownerSubject: 'owner',
+				membership: { membershipId, workspaceId, role: 'MEMBER' }
+			});
+			expect(current.prisma.$transaction).toHaveBeenCalledWith(
+				expect.any(Function),
+				{
+					isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead,
+					maxWait: 500,
+					timeout: 2000
+				}
+			);
+			expect(current.tx.$executeRawUnsafe).toHaveBeenNthCalledWith(
+				1,
+				'SET TRANSACTION READ ONLY'
+			);
+			expect(current.tx.$executeRawUnsafe).toHaveBeenNthCalledWith(
+				2,
+				"SET LOCAL statement_timeout = '1500ms'"
+			);
+			expect(current.tx.workspace.findFirst).toHaveBeenCalledWith({
+				where: { id: workspaceId, status: 'ACTIVE' },
+				select: { type: true, personalOwnerUserId: true }
+			});
+			expect(current.tx.workspaceMember.findFirst).toHaveBeenCalledWith({
+				where: {
+					workspaceId,
+					userId: 'administrator',
+					status: 'ACTIVE',
+					user: { status: 'ACTIVE', deletedAt: null }
+				},
+				select: { id: true, workspaceId: true, role: true }
+			});
+			expect(current.tx.workspaceMember.findMany).toHaveBeenCalledWith({
+				where: {
+					workspaceId,
+					role: 'OWNER',
+					status: 'ACTIVE',
+					user: { status: 'ACTIVE', deletedAt: null }
+				},
+				select: { userId: true },
+				orderBy: { id: 'asc' },
+				take: 2
+			});
+		}
+	);
+	it.each(['workspace', 'actor'])(
+		'does not reveal an owner for a missing/inactive %s',
+		async kind => {
+			const current = setup();
+			if (kind === 'workspace')
+				current.tx.workspace.findFirst.mockResolvedValue(null);
+			else current.tx.workspaceMember.findFirst.mockResolvedValue(null);
+			expect(
+				await current.value.crmWidgetSourceContext(workspaceId, 'owner')
+			).toEqual({
+				schemaVersion: 1,
+				workspaceId,
+				subject: 'owner',
+				membership: null,
+				ownerSubject: null
+			});
+			expect(current.tx.workspaceMember.findMany).not.toHaveBeenCalled();
+		}
+	);
+	it.each([
+		'missing-owner',
+		'ambiguous-owners',
+		'personal-mismatch',
+		'organization-personal-owner',
+		'false-owner',
+		'owner-as-member'
+	])(
+		'fails closed for %s without choosing the first owner',
+		async kind => {
+			const current = setup(
+				kind === 'organization-personal-owner'
+					? 'ORGANIZATION'
+					: 'PERSONAL'
+			);
+			if (kind === 'missing-owner')
+				current.tx.workspaceMember.findMany.mockResolvedValue([]);
+			if (kind === 'ambiguous-owners')
+				current.tx.workspaceMember.findMany.mockResolvedValue([
+					{ userId: 'owner' },
+					{ userId: 'other' }
+				]);
+			if (kind === 'personal-mismatch')
+				current.tx.workspace.findFirst.mockResolvedValue({
+					type: 'PERSONAL',
+					personalOwnerUserId: 'other'
+				});
+			if (kind === 'organization-personal-owner')
+				current.tx.workspace.findFirst.mockResolvedValue({
+					type: 'ORGANIZATION',
+					personalOwnerUserId: 'owner'
+				});
+			if (kind === 'owner-as-member')
+				current.tx.workspaceMember.findFirst.mockResolvedValue({
+					id: membershipId,
+					workspaceId,
+					role: 'MEMBER'
+				});
+			expect(
+				await current.value.crmWidgetSourceContext(
+					workspaceId,
+					kind === 'false-owner' ? 'foreign' : 'owner'
+				)
+			).toMatchObject({ membership: null, ownerSubject: null });
+		}
+	);
+	it('does not reuse owner authority after membership revocation and masks database failure', async () => {
+		const current = setup();
+		expect(
+			await current.value.crmWidgetSourceContext(workspaceId, 'owner')
+		).toMatchObject({ ownerSubject: 'owner' });
+		current.tx.workspaceMember.findFirst.mockResolvedValue(null);
+		expect(
+			await current.value.crmWidgetSourceContext(workspaceId, 'owner')
+		).toMatchObject({ ownerSubject: null });
+		expect(current.prisma.$transaction).toHaveBeenCalledTimes(2);
+		current.tx.workspace.findFirst.mockRejectedValue(
+			new Error('private-database-diagnostic')
+		);
+		await expect(
+			current.value.crmWidgetSourceContext(workspaceId, 'owner')
+		).rejects.toThrow('Widget source identity is unavailable');
+	});
+});
+
 describe('Identity campaign contact export v2', () => {
 	const createResponse = () => {
 		const response = Object.assign(new EventEmitter(), {

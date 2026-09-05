@@ -25,17 +25,34 @@ import {
 } from './acceptance/acceptance.messaging';
 import { AcceptancePublisher } from './acceptance/acceptance.publisher';
 import { AcceptanceWorker } from './acceptance/acceptance.worker';
+import {
+	widgetControlEnabled,
+	WidgetControlConfig
+} from './widget-sources/widget-control.config';
+import { WidgetSourceController } from './widget-sources/widget-source.controller';
+import { WidgetSourceService } from './widget-sources/widget-source.service';
+import { WidgetsControlClient } from './widget-sources/widgets-control.client';
+import { WidgetControlProcessor } from './widget-sources/widget-control.processor';
+import { WidgetControlRabbit } from './widget-sources/widget-control.messaging';
+import { WidgetControlWorker } from './widget-sources/widget-control.worker';
+import { WidgetControlPublisher } from './widget-sources/widget-control.publisher';
 
 const config = ConfigModule.forRoot({ isGlobal: true });
 const role = intakeProcessRole();
 const api = role === 'api' || role === 'all';
 const worker = role === 'worker' || role === 'all';
 const publisher = role === 'publisher' || role === 'all';
+const widgets = widgetControlEnabled();
+const controlWorker =
+	widgets && (role === 'widget-control-worker' || role === 'all');
+const controlPublisher =
+	widgets && (role === 'widget-control-publisher' || role === 'all');
 
 @Module({
 	imports: [config, CrmIntakePrismaModule],
 	controllers: [
 		CrmIntakeHealthController,
+		...(api && widgets ? [WidgetSourceController] : []),
 		...(api
 			? [
 					IntakeController,
@@ -48,7 +65,16 @@ const publisher = role === 'publisher' || role === 'all';
 	],
 	providers: [
 		CrmIntakeHealthService,
-		...(api || worker ? [IntakeAuthorizationClient] : []),
+		...(api || worker || controlWorker ? [IntakeAuthorizationClient] : []),
+		...(widgets && (api || controlWorker)
+			? [WidgetControlConfig, WidgetsControlClient]
+			: []),
+		...(widgets && api ? [WidgetSourceService] : []),
+		...(controlWorker || controlPublisher ? [WidgetControlRabbit] : []),
+		...(controlWorker
+			? [WidgetControlProcessor, WidgetControlWorker]
+			: []),
+		...(controlPublisher ? [WidgetControlPublisher] : []),
 		...(api
 			? [
 					IntakeService,

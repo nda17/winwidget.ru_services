@@ -458,6 +458,70 @@ model WidgetEntitlementProjection {
   @@schema("widgets")
 }
 
+model WincrmConnector {
+  id             String    @id @db.Uuid
+  workspaceId    String    @map("workspace_id") @db.Uuid
+  sourceId       String    @unique @map("source_id") @db.Uuid
+  ownerSubject   String    @map("owner_subject") @db.VarChar(256)
+  widgetType     String    @map("widget_type") @db.VarChar(16)
+  widgetId       String    @map("widget_id") @db.VarChar(255)
+  controlVersion Int       @map("control_version")
+  generation     Int
+  enabled        Boolean
+  enabledAt      DateTime? @map("enabled_at")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+
+  @@unique([id, workspaceId, sourceId, ownerSubject], map: "wincrm_connectors_owner_binding_key")
+  @@unique([id, workspaceId, sourceId, ownerSubject, widgetType, widgetId], map: "wincrm_connectors_full_binding_key")
+  @@index([ownerSubject, widgetType, widgetId])
+  @@map("wincrm_connectors")
+  @@schema("widgets")
+}
+
+model WincrmConnectorCommand {
+  commandId    String   @id @map("command_id") @db.Uuid
+  connectorId  String   @map("connector_id") @db.Uuid
+  workspaceId  String   @map("workspace_id") @db.Uuid
+  sourceId     String   @map("source_id") @db.Uuid
+  ownerSubject String   @map("owner_subject") @db.VarChar(256)
+  caller       String   @default("crm-intake") @db.VarChar(32)
+  requestHash  String   @map("request_hash") @db.Char(64)
+  response     Json
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  @@index([connectorId, createdAt])
+  @@map("wincrm_connector_commands")
+  @@schema("widgets")
+}
+
+model WincrmTransferIntent {
+  id                          String    @id @db.Uuid
+  eventId                     String    @unique @map("event_id") @db.Uuid
+  connectorId                 String    @map("connector_id") @db.Uuid
+  workspaceId                 String    @map("workspace_id") @db.Uuid
+  sourceId                    String    @map("source_id") @db.Uuid
+  generation                  Int
+  widgetType                  String    @map("widget_type") @db.VarChar(16)
+  widgetId                    String    @map("widget_id") @db.VarChar(255)
+  leadId                      String    @map("lead_id") @db.VarChar(255)
+  ownerSubject                String    @map("owner_subject") @db.VarChar(256)
+  originalSubscriptionId      String?   @map("original_subscription_id") @db.VarChar(255)
+  originalSubscriptionVersion String?   @map("original_subscription_version") @db.VarChar(19)
+  originalPeriodStartsAt      DateTime? @map("original_period_starts_at")
+  originalDeadline            DateTime? @map("original_deadline")
+  leadCreatedAt               DateTime  @map("lead_created_at")
+  state                       String    @db.VarChar(16)
+  reason                      String?   @db.VarChar(64)
+  payload                     Json?
+  createdAt                   DateTime  @default(now()) @map("created_at")
+
+  @@unique([connectorId, generation, widgetType, leadId])
+  @@index([workspaceId, sourceId, createdAt, id])
+  @@map("wincrm_transfer_intents")
+  @@schema("widgets")
+}
+
 model WidgetUsageCounter {
   userId             String    @id @map("user_id")
   widgetCount        Int       @default(0) @map("widget_count")

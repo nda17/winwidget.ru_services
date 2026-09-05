@@ -74,6 +74,120 @@ entry AI Gateway, включая payload и metadata. Это не означае
 `aiCloudflareDisclosureAcknowledged: true` до чтения draft, quota-check и
 вызова провайдера; acknowledgment не добавляет хранение переписки.
 
+## Нативный коннектор WinCRM — Widgets producer
+
+`WIDGETS_WINCRM_CONNECTOR_ENABLED=false` по умолчанию: старые submit endpoints,
+квоты, внешние интеграции `lead.integration.requested.v2` и AI-консультант не
+меняются. При выключенном флаге новый hook не читает таблицы и не вызывает
+Billing, внутренние CRM endpoints отвечают `404`, новые credentials не нужны.
+Поддерживаются только `WHEEL`, `QUIZ`, `CALLBACK`, `TIMER`, `STOP_OFFER`,
+`CALCULATOR`. Campaigns и чат AI-консультанта в этот контракт не входят.
+
+При включении API/all требует отдельные `WIDGETS_CRM_INTAKE_TOKEN`,
+`BILLING_WINCRM_WIDGETS_TOKEN` и явный `BILLING_INTERNAL_BASE_URL`: HTTPS origin
+без path/credentials либо локальный loopback HTTP. Между VPS нужен защищённый
+ingress на owning host с forwarding к loopback API; прямой remote socket,
+`X-Forwarded-For` и общие токены доступа не принимаются. Internal запросы несут
+`x-winwidget-service: crm-intake` и `x-winwidget-internal-token`; ответ `no-store`.
+Проверка Billing использует только его scoped read-only eligibility contract,
+не запускает Trial и не меняет подписку или usage. EASY/HARD должны иметь
+действующий оплаченный/административно активированный период; Widgets TRIAL
+не подходит. Отрицательная проверка запрещает включение, но не отключение.
+
+Три внутренних POST без публичных `/api/v1` alias:
+
+- `/internal/v1/crm-intake/widget-connectors/candidates`: exact body
+  `{schemaVersion:1,ownerSubject,page,pageSize}`; server pagination до 100 строк
+  с type/id/name/isActive/publishedVersion/createdAt, текущим активным connector
+  либо null и свежим Billing eligibility. Только собственные шесть таблиц,
+  никаких публичных ключей, конфигураций и credentials.
+- `/internal/v1/crm-intake/widget-connectors/:connectorId/configure`: exact body
+  `{schemaVersion:1,commandId,workspaceId,sourceId,ownerSubject,widgetType,widgetId,controlVersion,generation,enabled}`,
+  UUID `Idempotency-Key` равен commandId. Immutable binding, monotonic
+  controlVersion и отдельная generation при новом включении. Одинаковая команда
+  возвращает исходный receipt, а не текущее состояние; другой payload/actor —
+  `409`. Устаревшая версия не применяется. Предварительное отключение создаёт
+  tombstone и не позволяет позднему enable возродить старую generation.
+  Один widget имеет не более одного активного connector. DISABLE не требует
+  существующего widget или живой подписки. ENABLE проверяет Billing до own
+  transaction, затем owner/widget и validity внутри неё.
+- `/internal/v1/crm-intake/widget-transfers/:transferId/context`: exact body
+  `{schemaVersion:1,eventId,connectorId,generation,workspaceId,sourceId}`.
+  Ответ `{schemaVersion:1,transferId,eventId,connectorId,generation,workspaceId,sourceId,deliver,reason,checkedAt,validUntil,payload}`.
+  Неизвестная/чужая привязка — `404`, непроверяемое состояние — `503`, известное
+  прекращение доставки — `deliver:false,payload:null`. Полная owner/widget
+  привязка проверяется в runtime и composite FK. Positive proof повторно
+  проверяет локальное состояние после HTTP, текущую подписку и исходный срок.
+
+`wincrm_connectors`, `wincrm_connector_commands`, `wincrm_transfer_intents`
+принадлежат только Widgets. Команды и intents append-only. Configure locks:
+command → widget; submit: существующий quota owner lock → widget; обратного
+захвата quota lock нет. Новые locks имеют SQL `lock_timeout=1500ms`,
+`statement_timeout=5000ms`; configure дополнительно Serializable retry.
+В lead transaction атомарно сохраняются исходная заявка/usage, immutable intent
+и Outbox. Исходный `originalSubscriptionId` — Billing CUID из projection.id,
+не UUID и не выдуманный локальный ID. Capture не делает HTTP. Ошибка БД откатывает
+всю транзакцию, неподдерживаемый payload создаёт видимый `SKIPPED` intent.
+
+Outbox event/routing key — `widgets.wincrm.lead-transfer.requested.v1`,
+exchange `EVENTS`, messageId=eventId. Exact identifier-only payload:
+`{schemaVersion:1,eventType,eventId,occurredAt,transferId,connectorId,generation,workspaceId,sourceId,originalSubscriptionId,originalSubscriptionVersion,originalPeriodStartsAt,originalDeadline}`.
+Последние четыре поля nullable при skipped capture; version — decimal bigint
+string, включая `0`. JSON передаёт прежний publisher с Buffer/confirm/mandatory,
+не новый consumer или прямой publish. DTO и bounded typed snapshot определены
+в `src/wincrm/widgets-wincrm.contract.ts` и `widgets-wincrm-snapshot.ts`.
+
+Snapshot сохраняет nullable реальное имя, raw контакт/телефон, точный E164 если
+он уже дан, email, безопасный page URL, бонус/quiz answers с опубликованными
+подписями/callback slot/calculator Decimal и typed answers. Нет IP, OTP,
+reset tokens, HTML, URL userinfo/query/fragment и целой конфигурации. Unicode
+проверяется без повреждения emoji; ограничение snapshot 256 KiB UTF-8. Данные
+не обрезаются молча: `PAYLOAD_TOO_LARGE`, `PAYLOAD_SHAPE_UNSUPPORTED`,
+`TEXT_UNSUPPORTED`, `SOURCE_PERIOD_INELIGIBLE`, `SOURCE_PERIOD_INVALID` или
+`BEFORE_ACTIVATION` видны через context. История не импортируется. Исходный
+deadline никогда не продлевается новой оплатой; validity ≤ 5 секунд — только
+transport freshness bound, не обещание распределённой атомарности отзыва.
+
+Runtime grants нового среза: schema USAGE; `SELECT,INSERT,UPDATE` на
+`wincrm_connectors`; `SELECT,INSERT` на commands и intents; без
+DELETE/TRUNCATE, без UPDATE evidence. Существующие service-owned lead/quota/
+projection/Outbox grants сохраняются; новых sequences нет. Readiness при
+включённом флаге проверяет новые таблицы. PostgreSQL proof запускается после
+migrate/generate/build: `pnpm run test:integration:wincrm`, только с явным
+`WIDGETS_INTEGRATION_ALLOW_MUTATION=true` и `WIDGETS_TEST_DATABASE_URL` на
+свежую локальную `winwidget_widgets_test_*_test` или `winwidget_widgets_ci`.
+Immutable проверочные строки оставляются до удаления выделенной тестовой БД
+её владельцем; runtime не выдаётся право обходить evidence triggers.
+
+Воспроизводимая локальная проверка использует уже запущенный Colima container
+`wincrm-mvp-postgres18` с label `winwidget.test=crm-mvp`, PostgreSQL 18 на
+`127.0.0.1:55440` и bootstrap `crm_bootstrap_ci`:
+
+```bash
+WIDGETS_LOCAL_WINCRM_PG_ALLOW_MUTATION=true node apps/widgets/test/integration/local-wincrm-postgres.mjs
+```
+
+Запуск из корня services проверяет активный context/Unix socket/daemon/label и
+точный loopback port; создаёт новую `winwidget_widgets_test_<randomhex>_test`
+и две ограниченные роли. Миграции запускаются их владельцем, runtime получает
+только перечисленные grants. Сценарий доказывает отсутствие cross-schema доступа,
+проверяет sentinel, реальные ограничения/rollback и owner-level evidence triggers.
+Существующие fixtures, env, CRM БД и другие контейнеры не читаются и не меняются.
+Сгенерированные credentials не печатаются и не сохраняются в файлы. Временная
+копия Prisma без env удаляется, имена собственной БД/ролей выводятся для
+последующей общей cleanup; контейнер остаётся запущенным для соседних проверок.
+В тестовом ACL `UPDATE(id)` на шесть widget-таблиц требуется PostgreSQL для
+`SELECT ... FOR SHARE`; это не выдаёт UPDATE остальных полей и не расширяет
+права на evidence или чужую схему. Production grants runner не меняет.
+
+До включения остаются обязательные rollout gates: работающий отдельный Intake
+consumer с eventId+consumer receipt, independent retry/DLQ/manual retry,
+свежая CRM write authority и source-generation fence, собственный PII retention/
+purge policy для новых snapshots (старый Widgets retention их не очищает),
+private ingress, реальные PostgreSQL/RabbitMQ проверки. Widgets не утверждает
+`DELIVERED` и не предоставляет отдельный ack endpoint: результат доставки
+принадлежит Intake. Этот producer сам по себе не включает интеграцию у клиента.
+
 ## Ресурсы и хранилище
 
 ```bash

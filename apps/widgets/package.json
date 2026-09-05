@@ -21,6 +21,7 @@
 		"test:integration:behavior": "node test/integration/widgets-behavior.integration.mjs",
 		"test:integration:foundation": "node test/integration/widgets-foundation.integration.mjs",
 		"test:integration:retention": "node test/integration/widgets-retention.integration.mjs",
+		"test:integration:wincrm": "node test/integration/widgets-wincrm.integration.mjs",
 		"test:messaging-integration": "pnpm run build && node test/integration/widgets-messaging.integration.mjs",
 		"typecheck": "tsc -p tsconfig.json --noEmit",
 		"prisma:generate": "prisma generate --schema prisma/schema.prisma",

@@ -89,7 +89,7 @@
 			]
 		},
 		"widgets": {
-			"manifestSha256": "62cdb4c0a804dea3f090ac01d6a932baa732d5913f098c9cc165b35516d693d6",
+			"manifestSha256": "fdfd10bc680b6d0692324d38fda39361bd5881f4e76eaca332bb9403f945e059",
 			"migrations": [
 				{
 					"name": "20260804000000_init_widgets",
@@ -122,6 +122,10 @@
 				{
 					"name": "20260830030000_add_ai_consent_receipts",
 					"checksum": "e5196d8d871b4256b32d9d66cc29c70f80b09ec9b59a644c8e57c418c2c35cb3"
+				},
+				{
+					"name": "20260907010000_add_native_wincrm_connector",
+					"checksum": "48522f742401eb3f8067ba75bc13ebbc09755f062d323e37c93d0a9698f364c4"
 				}
 			]
 		},

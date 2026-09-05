@@ -3,6 +3,10 @@ import {
 	WidgetsOutboxExchange
 } from '@prisma/widgets-client';
 import {
+	assertTransferEvent,
+	WINCRM_TRANSFER_EVENT
+} from '../wincrm/widgets-wincrm.contract';
+import {
 	BILLING_SUBSCRIPTION_CHANGED_EVENT_TYPE,
 	IDENTITY_USER_CHANGED_EVENT_TYPE,
 	parseWidgetsProjectionEvent
@@ -103,6 +107,10 @@ export function assertWidgetsOutboxContract(
 	assertNoSecrets(payload);
 
 	switch (event.eventType) {
+		case WINCRM_TRANSFER_EVENT:
+			assertTransferEvent(payload, event.messageId);
+			assertEventsRoute(event, WINCRM_TRANSFER_EVENT);
+			return;
 		case IDENTITY_USER_CHANGED_EVENT_TYPE:
 			parseWidgetsProjectionEvent(
 				payload,

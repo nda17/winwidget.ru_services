@@ -151,6 +151,46 @@ jobs:
         run: test -x "$WIDGETS_BROWSER_EXECUTABLE"
       - name: Run Widgets behavior integration
         run: pnpm --dir apps/widgets run test:integration:behavior
+      - name: Prepare isolated native WinCRM connector database
+        env:
+          POSTGRES_CONTAINER_ID: ${{ job.services.postgres.id }}
+        run: |
+          docker exec -i "$POSTGRES_CONTAINER_ID" psql -U widgets_ci -d postgres -v ON_ERROR_STOP=1 <<'SQL'
+          CREATE ROLE widgets_wincrm_migration_ci LOGIN PASSWORD 'widgets_wincrm_migration_ci_password' NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
+          CREATE ROLE widgets_wincrm_runtime_ci LOGIN PASSWORD 'widgets_wincrm_runtime_ci_password' NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
+          CREATE DATABASE winwidget_widgets_ci OWNER widgets_ci;
+          REVOKE ALL ON DATABASE winwidget_widgets_ci FROM PUBLIC;
+          GRANT CONNECT ON DATABASE winwidget_widgets_ci TO widgets_wincrm_migration_ci, widgets_wincrm_runtime_ci;
+          SQL
+          docker exec -i "$POSTGRES_CONTAINER_ID" psql -U widgets_ci -d winwidget_widgets_ci -v ON_ERROR_STOP=1 <<'SQL'
+          REVOKE ALL ON SCHEMA public FROM PUBLIC;
+          CREATE SCHEMA widgets AUTHORIZATION widgets_wincrm_migration_ci;
+          CREATE SCHEMA foreign_service_guard AUTHORIZATION widgets_ci;
+          CREATE TABLE foreign_service_guard.sentinel (id INTEGER PRIMARY KEY);
+          REVOKE ALL ON SCHEMA foreign_service_guard FROM PUBLIC;
+          REVOKE ALL ON ALL TABLES IN SCHEMA foreign_service_guard FROM PUBLIC;
+          SQL
+      - name: Migrate native connector database as owning migration role
+        env:
+          WIDGETS_DATABASE_URL: postgresql://widgets_wincrm_migration_ci:widgets_wincrm_migration_ci_password@127.0.0.1:5432/winwidget_widgets_ci?schema=widgets
+        run: pnpm --dir apps/widgets run prisma:migrate:deploy
+      - name: Grant least-privilege native connector runtime
+        env:
+          POSTGRES_CONTAINER_ID: ${{ job.services.postgres.id }}
+        run: |
+          docker exec -i "$POSTGRES_CONTAINER_ID" psql -U widgets_ci -d winwidget_widgets_ci -v ON_ERROR_STOP=1 <<'SQL'
+          GRANT USAGE ON SCHEMA widgets TO widgets_wincrm_runtime_ci;
+          GRANT SELECT ON widgets.service_identity, widgets.callbacks, widgets.callback_leads, widgets.quizzes, widgets.quiz_leads, widgets.countdown_timers, widgets.countdown_timer_leads, widgets.stop_offers, widgets.stop_offer_leads, widgets.calculators, widgets.calculator_leads TO widgets_wincrm_runtime_ci;
+          GRANT SELECT, INSERT, UPDATE ON widgets.usage_counters, widgets.wincrm_connectors TO widgets_wincrm_runtime_ci;
+          GRANT SELECT, INSERT ON widgets.widgets, widgets.leads, widgets.owner_projections, widgets.entitlement_projections, widgets.usage_ledger, widgets.outbox_events, widgets.wincrm_connector_commands, widgets.wincrm_transfer_intents TO widgets_wincrm_runtime_ci;
+          GRANT UPDATE (id) ON widgets.widgets, widgets.callbacks, widgets.quizzes, widgets.countdown_timers, widgets.stop_offers, widgets.calculators TO widgets_wincrm_runtime_ci;
+          REVOKE ALL ON widgets._prisma_migrations FROM widgets_wincrm_runtime_ci;
+          SQL
+      - name: Prove native connector replay and atomic lead Outbox on PostgreSQL 18
+        env:
+          WIDGETS_TEST_DATABASE_URL: postgresql://widgets_wincrm_runtime_ci:widgets_wincrm_runtime_ci_password@127.0.0.1:5432/winwidget_widgets_ci?schema=widgets
+          WIDGETS_INTEGRATION_ALLOW_MUTATION: 'true'
+        run: pnpm --dir apps/widgets run test:integration:wincrm
 
   operations-restore-rehearsal:
     name: Operations restore PostgreSQL 18 rehearsal
@@ -797,6 +837,9 @@ jobs:
           - app: crm-access
             schema: crm_access
             script: test:integration:team
+          - app: identity
+            schema: identity
+            script: test:integration:widget-source
           - app: crm-customers
             schema: crm_customers
             script: test:integration:postgres18
@@ -865,7 +908,7 @@ jobs:
         env:
           POSTGRES_CONTAINER_ID: ${{ job.services.postgres.id }}
         run: |
-          [[ "$DOMAIN_SCHEMA" =~ ^(crm_(access|customers|intake|sales)|notification_delivery)$ ]]
+          [[ "$DOMAIN_SCHEMA" =~ ^(crm_(access|customers|intake|sales)|notification_delivery|identity)$ ]]
           if [ "$DOMAIN_SCHEMA" = notification_delivery ]; then
             test "$DOMAIN_DATABASE" = winwidget_notification_invitation_test_ci
           else
@@ -898,6 +941,10 @@ jobs:
           POSTGRES_CONTAINER_ID: ${{ job.services.postgres.id }}
         run: |
           case "$DOMAIN_APP" in
+            identity)
+              docker exec "$POSTGRES_CONTAINER_ID" psql -U crm_domain_bootstrap_ci -d "$DOMAIN_DATABASE" -v ON_ERROR_STOP=1 -c 'GRANT USAGE ON SCHEMA identity TO crm_domain_runtime_ci; GRANT SELECT ON identity.service_identity TO crm_domain_runtime_ci; GRANT SELECT, INSERT, UPDATE ON identity.users, identity.workspaces, identity.workspace_members TO crm_domain_runtime_ci; REVOKE ALL ON identity._prisma_migrations FROM crm_domain_runtime_ci'
+              exit 0
+              ;;
             crm-access)
               mutable_tables='crm_access.crm_workspace_access, crm_access.crm_workspace_members, crm_access.crm_teams, crm_access.crm_invitation_intents, crm_access.crm_admissions, crm_access.crm_team_outbox, crm_access.crm_team_deliveries'
               receipt_tables='crm_access.crm_team_command_receipts, crm_access.crm_team_audit'
@@ -908,7 +955,7 @@ jobs:
               receipt_tables='crm_customers.customer_commands, crm_customers.customer_activities, crm_customers.intake_operation_slots, crm_customers.intake_operation_commands, crm_customers.export_audit'
               ;;
             crm-intake)
-              mutable_tables='crm_intake.inbox_entries, crm_intake.intake_sources, crm_intake.acceptances, crm_intake.acceptance_outbox, crm_intake.acceptance_receipts'
+              mutable_tables='crm_intake.inbox_entries, crm_intake.intake_sources, crm_intake.acceptances, crm_intake.acceptance_outbox, crm_intake.acceptance_receipts, crm_intake.managed_widget_sources, crm_intake.widget_control_jobs, crm_intake.widget_control_receipts, crm_intake.widget_control_outbox'
               receipt_tables='crm_intake.intake_commands, crm_intake.intake_activities, crm_intake.inbound_receipts, crm_intake.csv_imports, crm_intake.csv_import_rows, crm_intake.export_audit'
               docker exec "$POSTGRES_CONTAINER_ID" psql -U crm_domain_bootstrap_ci -d "$DOMAIN_DATABASE" -v ON_ERROR_STOP=1 -c 'GRANT SELECT, INSERT, UPDATE, DELETE ON crm_intake.ingestion_rate_buckets TO crm_domain_runtime_ci'
               ;;
@@ -983,6 +1030,24 @@ jobs:
           CRM_INTAKE_TEST_RUNTIME_ROLE: crm_domain_runtime_ci
           CRM_INTAKE_ACCEPTANCE_TEST_RABBITMQ_URL: amqp://crm_workflow_ci:crm_workflow_ci@127.0.0.1:5672/winwidget_crm_acceptance_ci
         run: pnpm --dir apps/crm-intake run test:integration:acceptance
+      - name: Prepare isolated least-privilege widget control broker
+        if: matrix.app == 'crm-intake'
+        env:
+          RABBITMQ_CONTAINER_ID: ${{ job.services.rabbitmq.id }}
+        run: |
+          docker exec "$RABBITMQ_CONTAINER_ID" rabbitmqctl add_vhost winwidget_crm_widget_control_ci
+          docker exec "$RABBITMQ_CONTAINER_ID" rabbitmqctl add_user crm_widget_control_ci crm_widget_control_ci_password
+          control_resources='^winwidget\.crm-intake\.widget-control\.(events|retry|dead-letter|v1(\.dead-letter|\.retry\.[1-3])?)$'
+          docker exec "$RABBITMQ_CONTAINER_ID" rabbitmqctl set_permissions -p winwidget_crm_widget_control_ci crm_widget_control_ci "$control_resources" "$control_resources" "$control_resources"
+      - name: Prove native widget control on PostgreSQL 18 and scoped RabbitMQ
+        if: matrix.app == 'crm-intake'
+        env:
+          CRM_INTAKE_INTEGRATION_ALLOW_MUTATION: 'true'
+          CRM_INTAKE_TEST_DATABASE_URL: ${{ env.DOMAIN_RUNTIME_URL }}
+          CRM_INTAKE_TEST_MIGRATION_DATABASE_URL: ${{ env.DOMAIN_MIGRATION_URL }}
+          CRM_INTAKE_TEST_RUNTIME_ROLE: crm_domain_runtime_ci
+          CRM_INTAKE_WIDGET_CONTROL_TEST_RABBITMQ_URL: amqp://crm_widget_control_ci:crm_widget_control_ci_password@127.0.0.1:5672/winwidget_crm_widget_control_ci
+        run: pnpm --dir apps/crm-intake run test:integration:widget-control
 
   production-image:
     name: Production image / ${{ matrix.app }}

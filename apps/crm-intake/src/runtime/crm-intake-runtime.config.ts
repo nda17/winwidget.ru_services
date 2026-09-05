@@ -3,10 +3,24 @@ const LOOPBACK_HOSTS = new Set(['127.0.0.1', '::1', 'localhost']);
 
 export function parseCrmIntakePort(
 	value?: string,
-	role: 'api' | 'worker' | 'publisher' | 'all' = 'api'
+	role:
+		| 'api'
+		| 'worker'
+		| 'publisher'
+		| 'all'
+		| 'widget-control-worker'
+		| 'widget-control-publisher' = 'api'
 ): number {
 	const expected =
-		role === 'worker' ? 5311 : role === 'publisher' ? 5312 : 5310;
+		role === 'worker'
+			? 5311
+			: role === 'publisher'
+				? 5312
+				: role === 'widget-control-worker'
+					? 5313
+					: role === 'widget-control-publisher'
+						? 5314
+						: 5310;
 	if (value === undefined) return expected;
 	const port = Number(value);
 	if (!Number.isInteger(port) || port !== expected) {

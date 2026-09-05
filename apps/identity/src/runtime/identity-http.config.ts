@@ -34,6 +34,10 @@ export const IDENTITY_GLOBAL_PREFIX_EXCLUDES = [
 		method: RequestMethod.POST
 	},
 	{
+		path: 'internal/v1/crm-access/widget-source-context',
+		method: RequestMethod.POST
+	},
+	{
 		path: 'internal/v1/widgets/owners/resolve',
 		method: RequestMethod.ALL
 	},

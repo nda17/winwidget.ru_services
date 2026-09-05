@@ -48,8 +48,12 @@ describe('DatabaseRestoreTargetRegistryService', () => {
 		]);
 		expect(registry.all()).toHaveLength(DATABASE_RESTORE_TARGETS.length);
 		expect(registry.get('widgets').acl).toEqual({
-			profile: 'standard',
-			routines: ['enforce_ai_consent_receipt_immutability()'],
+			profile: 'widgets',
+			routines: [
+				'enforce_ai_consent_receipt_immutability()',
+				'guard_wincrm_connector_update()',
+				'reject_wincrm_evidence_mutation()'
+			],
 			runtimeRoutines: []
 		});
 	});

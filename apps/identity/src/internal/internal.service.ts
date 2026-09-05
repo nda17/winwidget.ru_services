@@ -3,6 +3,7 @@ import {
 	ConflictException,
 	Injectable,
 	NotFoundException,
+	ServiceUnavailableException,
 	UnauthorizedException
 } from '@nestjs/common';
 import {
@@ -11,7 +12,8 @@ import {
 	Role,
 	UserStatus,
 	WorkspaceMemberStatus,
-	WorkspaceStatus
+	WorkspaceStatus,
+	WorkspaceType
 } from '@prisma/identity-client';
 import type { Request, Response } from 'express';
 import { createHash, randomUUID } from 'node:crypto';
@@ -118,6 +120,82 @@ export class IdentityInternalService {
 				role: membership.role
 			}))
 		};
+	}
+
+	/** Canonical widget owner and delegated actor come from one Identity snapshot. */
+	async crmWidgetSourceContext(workspaceId: string, subject: string) {
+		const denied = {
+			schemaVersion: 1 as const,
+			workspaceId,
+			subject,
+			membership: null,
+			ownerSubject: null
+		};
+		try {
+			return await this.prisma.$transaction(
+				async tx => {
+					await tx.$executeRawUnsafe('SET TRANSACTION READ ONLY');
+					await tx.$executeRawUnsafe(
+						"SET LOCAL statement_timeout = '1500ms'"
+					);
+					const workspace = await tx.workspace.findFirst({
+						where: { id: workspaceId, status: WorkspaceStatus.ACTIVE },
+						select: { type: true, personalOwnerUserId: true }
+					});
+					if (!workspace) return denied;
+					const membership = await tx.workspaceMember.findFirst({
+						where: {
+							workspaceId,
+							userId: subject,
+							status: WorkspaceMemberStatus.ACTIVE,
+							user: { status: UserStatus.ACTIVE, deletedAt: null }
+						},
+						select: { id: true, workspaceId: true, role: true }
+					});
+					if (!membership) return denied;
+					const owners = await tx.workspaceMember.findMany({
+						where: {
+							workspaceId,
+							role: 'OWNER',
+							status: WorkspaceMemberStatus.ACTIVE,
+							user: { status: UserStatus.ACTIVE, deletedAt: null }
+						},
+						select: { userId: true },
+						orderBy: { id: 'asc' },
+						take: 2
+					});
+					if (owners.length !== 1) return denied;
+					const ownerSubject = owners[0].userId;
+					if (
+						(workspace.type === WorkspaceType.PERSONAL &&
+							workspace.personalOwnerUserId !== ownerSubject) ||
+						(workspace.type === WorkspaceType.ORGANIZATION &&
+							workspace.personalOwnerUserId !== null) ||
+						(membership.role === 'OWNER' && subject !== ownerSubject) ||
+						(membership.role !== 'OWNER' && subject === ownerSubject)
+					)
+						return denied;
+					return {
+						...denied,
+						membership: {
+							membershipId: membership.id,
+							workspaceId: membership.workspaceId,
+							role: membership.role
+						},
+						ownerSubject
+					};
+				},
+				{
+					isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead,
+					maxWait: 500,
+					timeout: 2000
+				}
+			);
+		} catch {
+			throw new ServiceUnavailableException(
+				'Widget source identity is unavailable'
+			);
+		}
 	}
 
 	async resolveOwners(dto: DirectoryResolveDto) {

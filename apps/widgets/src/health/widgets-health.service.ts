@@ -7,6 +7,7 @@ import { WidgetsPrismaService } from '../prisma/widgets-prisma.service';
 import { WidgetsRetentionService } from '../retention/widgets-retention.service';
 import { WidgetsRuntimeService } from '../runtime/widgets-runtime.service';
 import { WidgetsCallbackOtpService } from '../callback/widgets-callback-otp.service';
+import { WidgetsWincrmService } from '../wincrm/widgets-wincrm.service';
 
 @Injectable()
 export class WidgetsHealthService {
@@ -18,7 +19,8 @@ export class WidgetsHealthService {
 		private readonly integrations: WidgetsIntegrationWorkerService,
 		private readonly outbox: WidgetsOutboxPublisherService,
 		private readonly retention: WidgetsRetentionService,
-		private readonly callbackOtp: WidgetsCallbackOtpService
+		private readonly callbackOtp: WidgetsCallbackOtpService,
+		private readonly wincrm: WidgetsWincrmService
 	) {}
 
 	liveness() {
@@ -28,6 +30,7 @@ export class WidgetsHealthService {
 	async readiness() {
 		try {
 			await this.prisma.$queryRaw`SELECT 1`;
+			await this.wincrm.readiness();
 			const identity = await this.prisma.widgetsServiceIdentity.findUnique(
 				{
 					where: { id: 'widgets-service' },

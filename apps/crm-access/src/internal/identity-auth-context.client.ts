@@ -36,6 +36,10 @@ export interface CrmIdentitySourceContext {
 	membership: CrmWorkspaceMembership | null;
 }
 
+export interface CrmIdentityWidgetSourceContext extends CrmIdentitySourceContext {
+	ownerSubject: string | null;
+}
+
 const IDENTITY_TOKEN_PLACEHOLDERS = [
 	'identity_crm_access_token',
 	'ci_identity_crm_access_token_at_least_32_chars'
@@ -181,6 +185,79 @@ export class IdentityAuthContextClient {
 		} catch {
 			throw new ServiceUnavailableException(
 				'Source authorization service is unavailable'
+			);
+		}
+	}
+
+	async widgetSourceContext(
+		workspaceId: string,
+		subject: string,
+		correlationId: string
+	): Promise<CrmIdentityWidgetSourceContext> {
+		const isSubject = (value: unknown): value is string =>
+			typeof value === 'string' &&
+			value.length <= 256 &&
+			/^[^\s\x00-\x1f\x7f\uD800-\uDFFF\uFFFD]+$/u.test(value);
+		try {
+			if (!isUuidV4(workspaceId) || !isSubject(subject))
+				throw new Error('WIDGET_CONTEXT_INPUT');
+			const response = await fetch(
+				`${this.baseUrl}/internal/v1/crm-access/widget-source-context`,
+				{
+					method: 'POST',
+					redirect: 'error',
+					cache: 'no-store',
+					headers: {
+						'x-winwidget-service': 'crm-access',
+						'x-winwidget-internal-token': this.token,
+						'x-correlation-id': correlationId,
+						'content-type': 'application/json',
+						accept: 'application/json'
+					},
+					body: JSON.stringify({ schemaVersion: 1, workspaceId, subject }),
+					signal: AbortSignal.timeout(this.timeoutMs)
+				}
+			);
+			if (response.status !== 200 || response.redirected) {
+				await response.body?.cancel();
+				throw new Error('WIDGET_CONTEXT_RESPONSE');
+			}
+			const value = await readBoundedJson(response);
+			if (
+				!isRecord(value) ||
+				!hasExactKeys(value, [
+					'schemaVersion',
+					'workspaceId',
+					'subject',
+					'membership',
+					'ownerSubject'
+				]) ||
+				value.schemaVersion !== 1 ||
+				value.workspaceId !== workspaceId ||
+				value.subject !== subject
+			)
+				throw new Error('WIDGET_CONTEXT_CONTRACT');
+			if (value.membership === null && value.ownerSubject === null)
+				return value as unknown as CrmIdentityWidgetSourceContext;
+			const membership = value.membership;
+			if (
+				!isRecord(membership) ||
+				!hasExactKeys(membership, [
+					'membershipId',
+					'workspaceId',
+					'role'
+				]) ||
+				!isUuidV4(membership.membershipId) ||
+				membership.workspaceId !== workspaceId ||
+				(membership.role !== 'OWNER' && membership.role !== 'MEMBER') ||
+				!isSubject(value.ownerSubject) ||
+				(membership.role === 'OWNER') !== (value.ownerSubject === subject)
+			)
+				throw new Error('WIDGET_CONTEXT_OWNER');
+			return value as unknown as CrmIdentityWidgetSourceContext;
+		} catch {
+			throw new ServiceUnavailableException(
+				'Widget source identity is unavailable'
 			);
 		}
 	}

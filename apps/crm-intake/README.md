@@ -446,3 +446,172 @@ updates, fresh revoke, OWN/TEAM isolation, archives, output limits, SQL timeout,
 audit failure and append-only/foreign-schema ACL. These PG tests stub the Access
 response to control revocation; end-to-end HTTP authorization remains a separate
 local-stack/rollout gate.
+
+## Managed Widgets control plane (opt-in)
+
+`CRM_INTAKE_WIDGETS_ENABLED=false` by default. This additive phase only manages
+the desired Widgets connection and its durable acknowledgement. It does **not**
+consume `widgets.wincrm.lead-transfer.requested.v1`, create Inbox entries from
+Widgets, change nullable lead fields, or import history. Existing manual/CSV/API
+sources, source secrets, ingestion, acceptance and exports retain their contracts.
+With the flag off, the managed controller, its SQL readiness checks, Widgets HTTP
+client and new credentials are absent from existing API paths. The four CRM apps
+remain independent; no new CRM service or shared database is introduced.
+
+### Public HTTP and permissions
+
+Base `/api/v1/crm/intake/widget-sources`, with current Identity Bearer session:
+
+- `GET /?workspaceId&page&pageSize` and `GET /:id?workspaceId`: OWNER/CRM_ADMIN
+  with `intake:read`, including READ_ONLY. Server pagination uses the existing
+  Intake bounds (page size at most 100).
+- `GET /candidates?workspaceId&page&pageSize`: writable OWNER/CRM_ADMIN with
+  `intake:manage-sources`; returns actual owned widgets even when Widgets billing
+  is ineligible, with a separate explicit eligibility result.
+- `POST /`: `{schemaVersion:1,workspaceId,commandId,name,widgetType,widgetId,teamId}`.
+  Name is at most 200 characters. `teamId` is a required nullable UUID and, when
+  present, must be in the actor's fresh authorized team IDs.
+- `POST /:id/configure`:
+  `{schemaVersion:1,workspaceId,commandId,expectedVersion,enabled}`.
+- `POST /:id/retry`: `{schemaVersion:1,workspaceId,commandId,expectedVersion}`;
+  only the current BLOCKED/ERROR command can be retried.
+
+All POSTs require writable OWNER/CRM_ADMIN and exact `Idempotency-Key=commandId`.
+They return **202**, `Cache-Control: no-store`, exactly
+`{schemaVersion:1,source,command:{id:commandId,state:'QUEUED'}}`. This is a durable
+queued acknowledgement, not proof that Widgets has applied it. The stored reply
+is historical: an exact public replay returns the original response; read the
+source again to observe convergence. A command UUID shares the existing global
+Intake namespace with manual/API/CSV commands, protected by the same actor,
+workspace, raw request hash and nonblocking UUID advisory lock. Cross-purpose or
+changed-body reuse is 409. The old sources DTO and endpoint are not reused.
+
+Source fields are exactly `id,workspaceId,kind:'WIDGET',name,widgetType,widgetId,
+teamId,createdBySubject,version,enabled,generation,controlVersion,
+appliedControlVersion,appliedGeneration,syncState,lastErrorCode,createdAt,
+updatedAt,syncedAt`. Applied fields/timestamp and error are nullable; sync state
+is PENDING/SYNCED/BLOCKED/ERROR. Dates are canonical ISO UTC. Name, routing team,
+widget binding and original actor are immutable in this phase. Version equals
+the monotonically increasing desired control version. A false-to-true transition
+increments generation; local disable sets `enabled=false` in the public command
+transaction immediately. Observed acknowledgement updates never change the
+desired version and cannot overwrite a newer command.
+
+Candidates envelope is `{schemaVersion:1,workspaceId,page,pageSize,total,
+eligibility,items}`. Eligibility fields are `eligible,reason,plan,startsAt,
+expiresAt,checkedAt,validUntil`. Each item is `widgetType,widgetId,name,isActive,
+publishedVersion,createdAt,connection,sourceId`; connection is NONE,
+THIS_WORKSPACE or OTHER_WORKSPACE. `sourceId` is only exposed for this workspace;
+other workspace IDs, connector IDs, billing IDs and canonical owner are omitted.
+Widget types are WHEEL, QUIZ, CALLBACK, TIMER, STOP_OFFER and CALCULATOR.
+
+Errors do not echo input or dependency bodies: 400 malformed DTO/key, 401 session,
+403 role/subscription/delegation restrictions, 404 unknown source, 409 command
+collision/CAS/already-connected/retry-state, 503 unavailable dependency/transaction.
+Asynchronous errors are the closed codes DELEGATION_REVOKED, OWNER_CHANGED,
+SUBSCRIPTION_REQUIRED, WIDGET_UNAVAILABLE, ALREADY_CONNECTED, CONTROL_CONFLICT,
+DEPENDENCY_UNAVAILABLE or INVALID_RESPONSE; never arbitrary provider text.
+
+### Fresh authority and cross-VPS boundary
+
+Intake obtains canonical ownership only from fresh scoped Access
+`POST /internal/v1/crm-access/authorize-widget-source`, body
+`{schemaVersion:1,workspaceId,subject}`. Response extends the existing exact
+authorization context with `ownerSubject`. Access obtains that owner from active
+Identity workspace/membership records; public input never chooses the owner.
+The worker reauthorizes the **original creator** before every enabling HTTP call,
+checks current owner equality and routing-team membership, and rechecks the local
+desired command/lease before sending. Demotion, disable, expiry or changed owner
+halts enabling; retry never substitutes the administrator requesting the retry.
+An already-authorized durable disabling command may converge technically after
+CRM expiry without obtaining permission to create business data.
+
+Scoped Widgets HTTP uses `WIDGETS_INTERNAL_BASE_URL`, distinct
+`WIDGETS_CRM_INTAKE_TOKEN` and `x-winwidget-service: crm-intake`; no saved JWT.
+Only exact HTTPS origins or local loopback HTTP are valid. Redirects are rejected,
+JSON reads are bounded (candidates 256 KiB/configure 16 KiB), with 250–5000 ms total
+timeout (`CRM_INTAKE_WIDGETS_HTTP_TIMEOUT_MS`, default 3000). A separate VPS uses a
+private HTTPS ingress forwarding to the owning app's actual loopback socket;
+direct private-address HTTP and arbitrary forwarded-header trust are not allowed.
+Public Gateway must not publish these internal endpoints.
+
+Widgets configure uses its frozen monotonic controlVersion/generation contract.
+An exact downstream command UUID/body is reused after response loss; historical
+acknowledgement is validated against that exact binding, not mistaken for current
+remote state. A later local desired command wins over any late success or error.
+No compensating deletion, owner substitution or silent reconnection occurs.
+
+### Own transactions, processes and queues
+
+Migration `20260907020000_add_managed_widget_control` adds only
+`crm_intake.managed_widget_sources`, `widget_control_jobs`,
+`widget_control_receipts` and `widget_control_outbox`, and additively extends the
+existing command/activity kind allowlists. Runtime needs SELECT/INSERT/UPDATE on
+all four (no DELETE/TRUNCATE until a separate retention contract), and
+the existing SELECT/INSERT-only `intake_commands`/`intake_activities` grants.
+There are no sequence or foreign-schema privileges. Immutable binding/terminal
+proof triggers and deferred composite FKs are checked explicitly with SET
+CONSTRAINTS IMMEDIATE before returning from each command/consumer transaction.
+SQL lock/statement/transaction timeouts bound contention; network calls are outside
+database transactions.
+
+Source, immutable job, global command receipt, audit and Outbox commit atomically.
+The consumer claims `(eventId, consumer='crm-intake.widget-control.v1')` and job
+with a 30-second CAS lease before external calls, renewing every 10 seconds.
+Success/failed receipt and acknowledgement/retry Outbox update atomically before
+ack. Manual retry creates a new event ID and Outbox in the retry transaction but
+keeps the exact downstream command ID/body. Obsolete events cannot take over a
+new command. Retain commands, receipts and bindings until an explicit replay
+horizon/maintenance policy is agreed; do not auto-prune proof or active jobs.
+
+Independent `CRM_INTAKE_PROCESS_ROLE` values are `widget-control-worker` (5313)
+and `widget-control-publisher` (5314), requiring the feature flag. API remains
+5310, acceptance worker/publisher remain 5311/5312. Each background process uses
+its own scoped principal via its own `CRM_INTAKE_RABBITMQ_URL`; API-only needs no
+broker. `all` is for local checks. Consumer drain and publisher completion occur
+before Prisma disconnect. No new broker is required, only separate topology/ACL:
+
+- Main direct exchange `winwidget.crm-intake.widget-control.events`, routing key
+  `crm.intake.widget-control.requested.v1`, queue
+  `winwidget.crm-intake.widget-control.v1`.
+- Retry direct exchange `winwidget.crm-intake.widget-control.retry`, routing keys
+  `widget-control.retry.1`, `.2`, `.3`; queues main queue plus `.retry.1`/`.2`/`.3`,
+  TTL 5/30/120 seconds, dead-lettering back to the main exchange/key.
+- Dead-letter direct exchange `winwidget.crm-intake.widget-control.dead-letter`,
+  main routing key, queue main queue plus `.dead-letter`.
+
+Publisher write allowlist is only these three exchanges; worker read is only its
+main queue. Retry dead-letter routing requires the corresponding broker-side
+permissions. Runtime `CRM_INTAKE_RABBITMQ_ASSERT_TOPOLOGY=false`; a separate
+provisioner owns configure/bind/TTL permissions. No acceptance or general Widgets
+queue wildcard. Main/retry/DLQ envelopes contain only schemaVersion/eventId/
+workspaceId/sourceId/commandId/controlVersion/generation, never JWT, canonical
+owner, widget contact payload or source secret. Publisher sends Buffer JSON with
+confirm **and** mandatory-return verification, and retries transient transport
+failures indefinitely with a bounded backoff; consumer uses basic.consume, not
+broker polling. Exhausted processing retries become visible ERROR with durable
+DLQ; public retry remains an explicit authorized command.
+
+### Verification gates
+
+`pnpm test`, `pnpm typecheck`, `pnpm lint`, `pnpm build` cover default-off module
+isolation, strict scoped clients, actual ephemeral loopback controller HTTP,
+authority/revoke/CAS/replay, independent messaging and shutdown ordering.
+`pnpm test:integration:widget-control` uses the same guarded isolated PG18 env as
+the other Intake integration scripts. Apply migrations externally with the
+migration role, grant the four own tables, then run with restricted runtime.
+The script does not load .env or migrate; it cleans only its random workspace
+through the separate migration role. It checks six concurrent identical creates,
+shared namespace, late acknowledgement versus disable, original-actor recovery,
+response loss, lease recovery, reached-after-insert rollback and DB/ACL invariants.
+Access/Widgets responses are controlled stubs in this PG test, not claimed as a
+cross-service HTTP proof.
+
+Optional `CRM_INTAKE_WIDGET_CONTROL_TEST_RABBITMQ_URL` must reference an isolated,
+empty, authenticated loopback test/CI vhost. It adds real push/confirm/mandatory,
+duplicate receipt and drain checks; the script refuses nonempty/consumed queues,
+does not purge, and closes only its connections. The owner of the fixture removes
+its broker resources. Full Identity → Access → Intake → Widgets HTTP authority,
+restricted broker ACL, and coordinated future lead transfer remain separate
+local-stack/release gates. Existing production flag stays off; no VPS deployment
+is part of this phase.

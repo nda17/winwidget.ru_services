@@ -87,7 +87,8 @@ describe('WidgetsPublicService parity', () => {
 					action: () => 'ai-consultant-session'
 				} as never,
 				{} as never,
-				aiConsent() as never
+				aiConsent() as never,
+				{ capture: jest.fn() } as never
 			);
 
 			await expect(
@@ -170,7 +171,8 @@ describe('WidgetsPublicService parity', () => {
 					action: () => 'ai-consultant-session'
 				} as never,
 				{} as never,
-				aiConsent() as never
+				aiConsent() as never,
+				{ capture: jest.fn() } as never
 			);
 
 			const result = await service.config(
@@ -200,7 +202,8 @@ describe('WidgetsPublicService parity', () => {
 			{} as never,
 			{} as never,
 			{} as never,
-			{} as never
+			{} as never,
+			{ capture: jest.fn() } as never
 		);
 		const source = createHash('sha256')
 			.update('203.0.113.7')
@@ -260,7 +263,8 @@ describe('WidgetsPublicService parity', () => {
 			{} as never,
 			{} as never,
 			callbackOtp as never,
-			aiConsent() as never
+			aiConsent() as never,
+			{ capture: jest.fn() } as never
 		);
 
 		await expect(
@@ -359,7 +363,8 @@ describe('WidgetsPublicService parity', () => {
 			new WidgetsTypeRegistryService(),
 			{} as never,
 			callbackOtp as never,
-			aiConsent() as never
+			aiConsent() as never,
+			{ capture: jest.fn() } as never
 		);
 		const challengeId = '11111111-1111-4111-8111-111111111111';
 
@@ -476,7 +481,8 @@ describe('WidgetsPublicService parity', () => {
 				new WidgetsTypeRegistryService(),
 				{} as never,
 				callbackOtp as never,
-				aiConsent() as never
+				aiConsent() as never,
+				{ capture: jest.fn() } as never
 			);
 
 			await expect(
@@ -569,7 +575,8 @@ describe('WidgetsPublicService parity', () => {
 			new WidgetsTypeRegistryService(),
 			{} as never,
 			{} as never,
-			aiConsent() as never
+			aiConsent() as never,
+			{ capture: jest.fn() } as never
 		);
 
 		await service.submitLead(

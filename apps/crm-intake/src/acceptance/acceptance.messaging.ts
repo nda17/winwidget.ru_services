@@ -16,12 +16,34 @@ import {
 	type AcceptanceEvent
 } from './acceptance.contract';
 
-export type IntakeProcessRole = 'api' | 'worker' | 'publisher' | 'all';
+export type IntakeProcessRole =
+	| 'api'
+	| 'worker'
+	| 'publisher'
+	| 'all'
+	| 'widget-control-worker'
+	| 'widget-control-publisher';
 export function intakeProcessRole(): IntakeProcessRole {
 	const role = process.env.CRM_INTAKE_PROCESS_ROLE || 'api';
-	if (!['api', 'worker', 'publisher', 'all'].includes(role))
+	if (
+		![
+			'api',
+			'worker',
+			'publisher',
+			'all',
+			'widget-control-worker',
+			'widget-control-publisher'
+		].includes(role)
+	)
 		throw new Error(
-			'CRM_INTAKE_PROCESS_ROLE must be api, worker, publisher or all'
+			'CRM_INTAKE_PROCESS_ROLE must be api, worker, publisher, all, widget-control-worker or widget-control-publisher'
+		);
+	if (
+		role.startsWith('widget-control-') &&
+		process.env.CRM_INTAKE_WIDGETS_ENABLED !== 'true'
+	)
+		throw new Error(
+			'Widget control process requires CRM_INTAKE_WIDGETS_ENABLED=true'
 		);
 	return role as IntakeProcessRole;
 }

@@ -4,6 +4,8 @@ import {
 	ServiceUnavailableException
 } from '@nestjs/common';
 import { CrmIntakePrismaService } from '../prisma/crm-intake-prisma.service';
+import { widgetControlEnabled } from '../widget-sources/widget-control.config';
+import { WidgetControlRabbit } from '../widget-sources/widget-control.messaging';
 import {
 	AcceptanceRabbit,
 	intakeProcessRole
@@ -16,7 +18,8 @@ const DATABASE_SERVICE_NAME = 'crm-intake-service';
 export class CrmIntakeHealthService {
 	constructor(
 		private readonly prisma: CrmIntakePrismaService,
-		@Optional() private readonly rabbit?: AcceptanceRabbit
+		@Optional() private readonly rabbit?: AcceptanceRabbit,
+		@Optional() private readonly widgetRabbit?: WidgetControlRabbit
 	) {}
 
 	liveness() {
@@ -37,6 +40,16 @@ export class CrmIntakeHealthService {
 	async readiness() {
 		try {
 			await this.prisma.$queryRaw`SELECT 1`;
+			if (widgetControlEnabled()) {
+				await this.prisma
+					.$queryRaw`SELECT id, workspace_id, owner_subject, created_by_subject, current_command_id, version, control_version, generation, enabled, applied_control_version, applied_generation, sync_state FROM crm_intake.managed_widget_sources LIMIT 0`;
+				await this.prisma
+					.$queryRaw`SELECT command_id, workspace_id, source_id, actor_subject, status, active_event_id, lease_token, lease_until, response FROM crm_intake.widget_control_jobs LIMIT 0`;
+				await this.prisma
+					.$queryRaw`SELECT event_id, consumer, workspace_id, source_id, command_id, payload_hash, status, lease_token, lease_until, retry_attempt FROM crm_intake.widget_control_receipts LIMIT 0`;
+				await this.prisma
+					.$queryRaw`SELECT id, event_id, route, payload, status, lease_token, lease_until, retry_attempt FROM crm_intake.widget_control_outbox LIMIT 0`;
+			}
 			await this.prisma
 				.$queryRaw`SELECT id, workspace_id, actor_subject, entity, format, row_count, byte_count, snapshot_at, prepared_at FROM crm_intake.export_audit LIMIT 0`;
 			await this.prisma
@@ -78,11 +91,23 @@ export class CrmIntakeHealthService {
 		}
 		const role = intakeProcessRole();
 		if (
-			role !== 'api' &&
+			['worker', 'publisher', 'all'].includes(role) &&
 			!this.rabbit?.ready(role === 'worker' || role === 'all')
 		)
 			throw new ServiceUnavailableException(
 				'CRM Intake messaging is not ready'
+			);
+		if (
+			widgetControlEnabled() &&
+			[
+				'all',
+				'widget-control-worker',
+				'widget-control-publisher'
+			].includes(role) &&
+			!this.widgetRabbit?.ready(role !== 'widget-control-publisher')
+		)
+			throw new ServiceUnavailableException(
+				'CRM Intake widget control messaging is not ready'
 			);
 
 		return {
