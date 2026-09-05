@@ -13,6 +13,7 @@
 		"start": "node dist/src/main.js",
 		"lint": "eslint \"src/**/*.ts\" --max-warnings=0",
 		"test": "jest --runInBand",
+		"test:integration:export": "node test/integration/export-postgres18.integration.mjs",
 		"test:integration:postgres18": "node test/integration/customers-postgres18.integration.mjs",
 		"test:integration:intake": "node test/integration/intake-operations-postgres18.integration.mjs",
 		"typecheck": "tsc -p tsconfig.json --noEmit",

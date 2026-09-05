@@ -1,4 +1,6 @@
 import { Module } from '@nestjs/common';
+import { CustomersExportController } from './exports/export.controller';
+import { CustomersExportService } from './exports/export.service';
 import { ConfigModule } from '@nestjs/config';
 import { CrmCustomersHealthController } from './health/crm-customers-health.controller';
 import { CrmCustomersHealthService } from './health/crm-customers-health.service';
@@ -20,12 +22,14 @@ import {
 	controllers: [
 		CrmCustomersHealthController,
 		CustomersController,
+		CustomersExportController,
 		ContactIntakeOperationController
 	],
 	providers: [
 		CrmCustomersHealthService,
 		CustomersAuthorizationClient,
 		CustomersService,
+		CustomersExportService,
 		ContactIntakeOperationService,
 		ContactIntakeOperationGuard
 	]

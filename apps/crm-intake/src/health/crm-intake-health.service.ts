@@ -38,6 +38,8 @@ export class CrmIntakeHealthService {
 		try {
 			await this.prisma.$queryRaw`SELECT 1`;
 			await this.prisma
+				.$queryRaw`SELECT id, workspace_id, actor_subject, entity, format, row_count, byte_count, snapshot_at, prepared_at FROM crm_intake.export_audit LIMIT 0`;
+			await this.prisma
 				.$queryRaw`SELECT id, workspace_id, title, name, phone, email, message, origin, source_id, status, created_by_subject, team_id, version, contact_id, deal_id, rejection_reason, received_at, updated_at, accepted_at, rejected_at FROM crm_intake.inbox_entries LIMIT 0`;
 			await this.prisma
 				.$queryRaw`SELECT id, workspace_id, name, kind, token_hash, token_version, created_by_subject, team_id, version, revoked_at, created_at, updated_at FROM crm_intake.intake_sources LIMIT 0`;

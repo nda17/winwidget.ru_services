@@ -10,6 +10,22 @@ datasource db {
   schemas  = ["crm_sales"]
 }
 
+model ExportAudit {
+  id String @id @default(uuid()) @db.Uuid
+  workspaceId String @map("workspace_id") @db.Uuid
+  actorSubject String @map("actor_subject") @db.VarChar(256)
+  entity String @db.VarChar(16)
+  format String @db.VarChar(4)
+  rowCount Int @map("row_count")
+  byteCount Int @map("byte_count")
+  snapshotAt DateTime @map("snapshot_at")
+  preparedAt DateTime @default(now()) @map("prepared_at")
+
+  @@index([workspaceId, preparedAt, id], map: "export_audit_workspace_prepared_idx")
+  @@map("export_audit")
+  @@schema("crm_sales")
+}
+
 model ServiceIdentity {
   id          String   @id @default("singleton")
   serviceName String   @default("crm-sales-service") @map("service_name")

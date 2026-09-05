@@ -13,6 +13,7 @@
 		"start": "node dist/src/main.js",
 		"lint": "eslint \"src/**/*.ts\" --max-warnings=0",
 		"test": "jest --runInBand",
+		"test:integration:export": "node test/integration/export-postgres18.integration.mjs",
 		"test:integration": "pnpm run build && node test/integration/pipeline-template-installation-postgres18.integration.mjs",
 		"test:workflow": "pnpm run build && node test/integration/sales-workflow-postgres18.integration.mjs && node test/integration/intake-operations-postgres18.integration.mjs",
 		"test:intake-operations": "pnpm run build && node test/integration/intake-operations-postgres18.integration.mjs",

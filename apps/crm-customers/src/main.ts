@@ -1,5 +1,6 @@
 import { Logger, RequestMethod, ValidationPipe } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
+import { EXPORT_EXPOSE_HEADERS } from './exports/export-format';
 import type { NestExpressApplication } from '@nestjs/platform-express';
 import { parseCrmCustomersCorsAllowedOrigins } from './config/crm-customers-cors.config';
 import { CrmCustomersModule } from './crm-customers.module';
@@ -57,7 +58,9 @@ async function bootstrap(): Promise<void> {
 	app.enableCors({
 		origin: origins,
 		credentials: true,
-		exposedHeaders: 'set-cookie, x-request-id, x-correlation-id'
+		exposedHeaders:
+			'set-cookie, x-request-id, x-correlation-id, ' +
+			EXPORT_EXPOSE_HEADERS
 	});
 	app.enableShutdownHooks();
 	await app.listen(port, host);

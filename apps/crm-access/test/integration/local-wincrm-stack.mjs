@@ -147,7 +147,7 @@ if (process.argv[2] === '--refresh-frontends') {
 
 const args = new Set(process.argv.slice(2));
 if (args.has('--help')) {
-	console.log(`Usage: WINCRM_LOCAL_STACK_ALLOW_MUTATION=true node apps/crm-access/test/integration/local-wincrm-stack.mjs [--backend-only] [--activate-owner] [--verify-domain] [--smoke-and-stop]
+	console.log(`Usage: WINCRM_LOCAL_STACK_ALLOW_MUTATION=true node apps/crm-access/test/integration/local-wincrm-stack.mjs [--backend-only] [--activate-owner] [--verify-domain] [--verify-acceptance-http] [--smoke-and-stop]
 
 Requires local Colima container wincrm-mvp-postgres18, PostgreSQL 18 on
 127.0.0.1:55440 with local test-only trust and bootstrap role crm_bootstrap_ci.
@@ -156,6 +156,8 @@ current services, and starts real APIs plus temporary frontend mirrors.
 Default owner starts without WinCRM: use the real five-day Trial button.
 --activate-owner additionally activates Trial and installs universal-sales@1 via API.
 --verify-domain runs Customers, Intake and Sales PostgreSQL 18 integration scenarios.
+--verify-acceptance-http uses a separate normal test account and real HTTP downstream operations.
+It drives a claimed Intake event without a broker and does not prove RabbitMQ transport.
 Use --refresh-frontends /exact/private/browser-fixture.json to refresh source snapshots.
 Generated account credentials are saved only to a private 0600 fixture file.
 SIGINT/SIGTERM stops only this harness's child processes. Database/container
@@ -168,6 +170,7 @@ for (const arg of args) {
 			'--backend-only',
 			'--activate-owner',
 			'--verify-domain',
+			'--verify-acceptance-http',
 			'--smoke-and-stop'
 		].includes(arg),
 		'Unsupported local-stack argument'
@@ -185,6 +188,7 @@ const stateDirectory = await mkdtemp(
 );
 await chmod(stateDirectory, 0o700);
 const fixturePath = join(stateDirectory, 'browser-fixture.json');
+const startedAt = new Date().toISOString();
 const container = 'wincrm-mvp-postgres18';
 const bootstrapRole = 'crm_bootstrap_ci';
 const secrets = new Set();
@@ -242,6 +246,22 @@ function log(value) {
 	console.log(`[wincrm-local] ${scrub(value)}`);
 }
 
+function safeFailure(label, output) {
+	const codes = [
+		...new Set(
+			String(output).match(
+				/\b(?:P\d{4}|TS\d{4}|ERR_[A-Z0-9_]+|[245][0-9A-Z]{4})\b/g
+			) || []
+		)
+	];
+	const compiler = String(output)
+		.split('\n')
+		.filter(line => /error TS\d+:/.test(line))
+		.slice(0, 6)
+		.map(scrub);
+	return `${label} failed${codes.length ? ` (${codes.join(', ')})` : ''}${compiler.length ? `: ${compiler.join('\n')}` : ''}`;
+}
+
 function execute(command, commandArgs, options = {}) {
 	return new Promise((resolveCommand, reject) => {
 		const child = spawn(command, commandArgs, {
@@ -249,19 +269,32 @@ function execute(command, commandArgs, options = {}) {
 			env: { ...safeEnvironment, ...options.env },
 			stdio: ['pipe', 'pipe', 'pipe']
 		});
+		const timeout = setTimeout(
+			() => child.kill('SIGKILL'),
+			options.timeoutMs || 180000
+		);
 		let output = '';
 		const collect = chunk => {
 			output = (output + chunk.toString()).slice(-24_000);
 		};
 		child.stdout.on('data', collect);
 		child.stderr.on('data', collect);
-		child.once('error', reject);
+		child.once('error', error => {
+			clearTimeout(timeout);
+			reject(
+				new Error(
+					safeFailure(
+						options.label || command,
+						error.code || 'SPAWN_FAILED'
+					)
+				)
+			);
+		});
 		child.once('exit', code => {
+			clearTimeout(timeout);
 			if (code === 0) resolveCommand(output.trim());
 			else
-				reject(
-					new Error(`${options.label || command} failed: ${scrub(output)}`)
-				);
+				reject(new Error(safeFailure(options.label || command, output)));
 		});
 		child.stdin.end(options.input || '');
 	});
@@ -455,6 +488,7 @@ REVOKE ALL ON ALL TABLES IN SCHEMA foreign_service_guard FROM PUBLIC;
 async function grantRuntime(service) {
 	const grants = {
 		identity: {
+			'SELECT, INSERT, UPDATE': ['workspace_invitations'],
 			'SELECT, INSERT, UPDATE, DELETE': [
 				'users',
 				'user_sessions',
@@ -490,21 +524,45 @@ async function grantRuntime(service) {
 		'crm-access': {
 			'SELECT, INSERT, UPDATE': [
 				'crm_workspace_access',
-				'crm_workspace_members'
+				'crm_workspace_members',
+				'crm_teams',
+				'crm_invitation_intents',
+				'crm_admissions'
+			],
+			'SELECT, INSERT, DELETE': ['crm_member_teams'],
+			'SELECT, INSERT': ['crm_team_command_receipts', 'crm_team_audit'],
+			'SELECT, INSERT, UPDATE, DELETE': [
+				'crm_team_outbox',
+				'crm_team_deliveries'
 			]
 		},
 		'crm-intake': {
-			'SELECT, INSERT, UPDATE': ['inbox_entries', 'intake_sources'],
+			'SELECT, INSERT, UPDATE': [
+				'inbox_entries',
+				'intake_sources',
+				'acceptances',
+				'acceptance_outbox',
+				'acceptance_receipts'
+			],
 			'SELECT, INSERT': [
 				'intake_commands',
 				'intake_activities',
-				'inbound_receipts'
+				'inbound_receipts',
+				'csv_imports',
+				'csv_import_rows',
+				'export_audit'
 			],
 			'SELECT, INSERT, UPDATE, DELETE': ['ingestion_rate_buckets']
 		},
 		'crm-customers': {
 			'SELECT, INSERT, UPDATE': ['companies', 'contacts'],
-			'SELECT, INSERT': ['customer_commands', 'customer_activities']
+			'SELECT, INSERT': [
+				'customer_commands',
+				'customer_activities',
+				'intake_operation_slots',
+				'intake_operation_commands',
+				'export_audit'
+			]
 		},
 		'crm-sales': {
 			'SELECT, INSERT, UPDATE, DELETE': ['pipelines', 'pipeline_stages'],
@@ -515,7 +573,8 @@ async function grantRuntime(service) {
 				'deal_timeline',
 				'command_receipts',
 				'intake_operation_slots',
-				'intake_operation_commands'
+				'intake_operation_commands',
+				'export_audit'
 			]
 		}
 	};
@@ -531,6 +590,10 @@ async function grantRuntime(service) {
 	statements.push(
 		`REVOKE ALL ON ${service.schema}._prisma_migrations FROM ${service.runtimeRole};`
 	);
+	if (service.app === 'crm-access')
+		statements.push(
+			`GRANT USAGE, SELECT ON SEQUENCE crm_access.crm_admissions_position_seq TO ${service.runtimeRole};`
+		);
 	await sql(service.database, statements.join('\n'));
 	const isolation = await sql(
 		service.database,
@@ -552,7 +615,25 @@ async function verifyDomain() {
 			'customers-postgres18.integration.mjs',
 			'CRM_CUSTOMERS'
 		],
-		['crm-sales', 'sales-workflow-postgres18.integration.mjs', 'CRM_SALES']
+		[
+			'crm-sales',
+			'sales-workflow-postgres18.integration.mjs',
+			'CRM_SALES'
+		],
+		[
+			'crm-customers',
+			'intake-operations-postgres18.integration.mjs',
+			'CRM_CUSTOMERS'
+		],
+		['crm-intake', 'acceptance-postgres18.integration.mjs', 'CRM_INTAKE'],
+		['crm-intake', 'csv-postgres18.integration.mjs', 'CRM_INTAKE'],
+		[
+			'crm-customers',
+			'export-postgres18.integration.mjs',
+			'CRM_CUSTOMERS'
+		],
+		['crm-sales', 'export-postgres18.integration.mjs', 'CRM_SALES'],
+		['crm-intake', 'export-postgres18.integration.mjs', 'CRM_INTAKE']
 	]) {
 		const service = byApp[app];
 		const output = await execute(
@@ -575,7 +656,11 @@ async function verifyDomain() {
 				label: `${app} PostgreSQL 18 integration`
 			}
 		);
-		log(`${app} PostgreSQL 18 integration passed: ${output}`);
+		log(`${app} ${file} passed`);
+		assert.ok(
+			output.length > 0,
+			'Expected an integration completion result'
+		);
 	}
 }
 
@@ -600,6 +685,7 @@ function environment() {
 		'CRM_SALES_CRM_ACCESS_TOKEN',
 		'CRM_SALES_CRM_INTAKE_TOKEN',
 		'CRM_CUSTOMERS_CRM_SALES_TOKEN',
+		'CRM_CUSTOMERS_CRM_INTAKE_TOKEN',
 		'CRM_ACCESS_CRM_CUSTOMERS_TOKEN',
 		'CRM_ACCESS_CRM_SALES_TOKEN',
 		'CRM_ACCESS_CRM_INTAKE_TOKEN'
@@ -635,6 +721,9 @@ function environment() {
 		AUTH_COOKIE_DOMAIN: '',
 		IDENTITY_PROCESS_ROLE: 'api',
 		BILLING_PROCESS_ROLE: 'api',
+		CRM_ACCESS_PROCESS_ROLE: 'api',
+		CRM_INTAKE_PROCESS_ROLE: 'api',
+		WINCRM_INVITATION_EMAIL_ENABLED: 'false',
 		IDENTITY_LISTEN_HOST: '127.0.0.1',
 		BILLING_LISTEN_HOST: '127.0.0.1',
 		CRM_ACCESS_LISTEN_HOST: '127.0.0.1',
@@ -674,6 +763,7 @@ function ownedEnvironment(app, values) {
 	const keys = {
 		identity: [
 			'IDENTITY_PROCESS_ROLE',
+			'WINCRM_INVITATION_EMAIL_ENABLED',
 			'IDENTITY_LISTEN_HOST',
 			'AUTH_COOKIE_DOMAIN',
 			'JWT_ACCESS_PRIVATE_KEY_BASE64',
@@ -721,6 +811,7 @@ function ownedEnvironment(app, values) {
 			'WIDGETS_INTERNAL_BASE_URL'
 		],
 		'crm-access': [
+			'CRM_ACCESS_PROCESS_ROLE',
 			'CRM_ACCESS_LISTEN_HOST',
 			'IDENTITY_INTERNAL_BASE_URL',
 			'IDENTITY_CRM_ACCESS_TOKEN',
@@ -735,7 +826,9 @@ function ownedEnvironment(app, values) {
 		'crm-customers': [
 			'CRM_CUSTOMERS_LISTEN_HOST',
 			'CRM_ACCESS_INTERNAL_BASE_URL',
-			'CRM_ACCESS_CRM_CUSTOMERS_TOKEN'
+			'CRM_ACCESS_CRM_CUSTOMERS_TOKEN',
+			'CRM_CUSTOMERS_CRM_INTAKE_TOKEN',
+			'CRM_CUSTOMERS_CRM_SALES_TOKEN'
 		],
 		'crm-sales': [
 			'CRM_SALES_LISTEN_HOST',
@@ -747,9 +840,14 @@ function ownedEnvironment(app, values) {
 			'CRM_CUSTOMERS_INTERNAL_BASE_URL'
 		],
 		'crm-intake': [
+			'CRM_INTAKE_PROCESS_ROLE',
 			'CRM_INTAKE_LISTEN_HOST',
 			'CRM_ACCESS_INTERNAL_BASE_URL',
-			'CRM_ACCESS_CRM_INTAKE_TOKEN'
+			'CRM_ACCESS_CRM_INTAKE_TOKEN',
+			'CRM_CUSTOMERS_INTERNAL_BASE_URL',
+			'CRM_CUSTOMERS_CRM_INTAKE_TOKEN',
+			'CRM_SALES_INTERNAL_BASE_URL',
+			'CRM_SALES_CRM_INTAKE_TOKEN'
 		]
 	};
 	return Object.fromEntries(
@@ -791,11 +889,17 @@ async function seedIdentity() {
 		});
 		for (const [name, rights] of [
 			['owner', ['USER', 'ADMIN', 'DEV']],
-			['admin', ['USER', 'ADMIN']]
+			['admin', ['USER', 'ADMIN']],
+			['manager', ['USER']],
+			['teamLead', ['USER']],
+			['analyst', ['USER']],
+			...(args.has('--verify-acceptance-http')
+				? [['workflow', ['USER']]]
+				: [])
 		]) {
 			const password = `Qa1!${generated()}`;
 			secrets.add(password);
-			const email = `wincrm-${name}@example.test`;
+			const email = `wincrm-${name.toLowerCase()}@example.test`;
 			const userId = `wincrm-local-${name}-${runId}`;
 			const passwordHash = await hash(password, 10);
 			secrets.add(passwordHash);
@@ -830,6 +934,82 @@ async function seedIdentity() {
 	return accounts;
 }
 
+async function seedTeamFixtures(accounts, workspaceId) {
+	const identity = byApp.identity;
+	const accessService = byApp['crm-access'];
+	const identityRequire = createRequire(
+		join(identity.root, 'package.json')
+	);
+	const accessRequire = createRequire(
+		join(accessService.root, 'package.json')
+	);
+	const identityDb = new (identityRequire(
+		'@prisma/identity-client'
+	).PrismaClient)({
+		datasources: {
+			db: { url: databaseUrl(identity, identity.runtimeRole) }
+		}
+	});
+	const accessDb = new (accessRequire(
+		'@prisma/crm-access-client'
+	).PrismaClient)({
+		datasources: {
+			db: { url: databaseUrl(accessService, accessService.runtimeRole) }
+		}
+	});
+	const teamId = randomUUID();
+	try {
+		const members = [];
+		for (const [name, role] of [
+			['admin', 'CRM_ADMIN'],
+			['manager', 'MANAGER'],
+			['teamLead', 'TEAM_LEAD'],
+			['analyst', 'ANALYST']
+		]) {
+			const membership = await identityDb.workspaceMember.create({
+				data: {
+					workspaceId,
+					userId: accounts[name].userId,
+					role: 'MEMBER',
+					status: 'ACTIVE'
+				}
+			});
+			const memberId = randomUUID();
+			members.push({
+				id: memberId,
+				workspaceId,
+				subject: accounts[name].userId,
+				membershipId: membership.id,
+				role
+			});
+			Object.assign(accounts[name], {
+				crmWorkspaceId: workspaceId,
+				crmMemberId: memberId,
+				crmTeamId: teamId,
+				...(name === 'manager' ? { workflowMemberId: memberId } : {})
+			});
+		}
+		await accessDb.$transaction(async tx => {
+			await tx.crmTeam.create({
+				data: { id: teamId, workspaceId, name: 'Локальная команда QA' }
+			});
+			await tx.crmWorkspaceMember.createMany({ data: members });
+			await tx.crmMemberTeam.createMany({
+				data: members.map(member => ({
+					workspaceId,
+					memberId: member.id,
+					teamId
+				}))
+			});
+		});
+		log(
+			'Seeded service-owned team joins for five CRM roles; invitation/admission/email delivery is not simulated'
+		);
+	} finally {
+		await Promise.all([identityDb.$disconnect(), accessDb.$disconnect()]);
+	}
+}
+
 function start(label, command, commandArgs, env, cwd = stateDirectory) {
 	const child = spawn(command, commandArgs, {
 		cwd,
@@ -851,7 +1031,7 @@ function start(label, command, commandArgs, env, cwd = stateDirectory) {
 	child.once('exit', () => {
 		state.exited = true;
 		if (ready && !stopping) {
-			console.error(scrub(`${label} exited: ${state.output}`));
+			console.error(safeFailure(label, state.output));
 			void shutdown(1);
 		}
 	});
@@ -862,7 +1042,7 @@ async function waitForHttp(label, url, status = 200) {
 	while (Date.now() < deadline) {
 		const child = children.get(label);
 		if (child?.exited)
-			throw new Error(`${label} startup failed: ${scrub(child.output)}`);
+			throw new Error(safeFailure(`${label} startup`, child.output));
 		try {
 			const response = await fetch(url, {
 				redirect: 'manual',
@@ -878,7 +1058,7 @@ async function waitForHttp(label, url, status = 200) {
 		await new Promise(resolveWait => setTimeout(resolveWait, 500));
 	}
 	throw new Error(
-		`${label} did not become ready: ${scrub(children.get(label)?.output || '')}`
+		safeFailure(`${label} readiness`, children.get(label)?.output || '')
 	);
 }
 
@@ -968,6 +1148,30 @@ async function smoke(accounts) {
 	assert.equal(pricingResponse.status, 200);
 	const pricing = await pricingResponse.json();
 	assert.equal(pricing.includedSeats, 2);
+	assert.equal(
+		(await fetch(`${publicApi}/billing-settings/crm`)).status,
+		401,
+		'Customer pricing must still require normal Identity login'
+	);
+	const customerToken = await login(accounts.workflow);
+	const customerPricing = await fetch(
+		`${publicApi}/billing-settings/crm`,
+		{
+			headers: { authorization: `Bearer ${customerToken}` }
+		}
+	);
+	assert.equal(customerPricing.status, 200);
+	assert.equal(customerPricing.headers.get('cache-control'), 'no-store');
+	assert.deepEqual(await customerPricing.json(), pricing);
+	assert.equal(
+		(
+			await fetch(`${publicApi}/billing-settings/admin/crm`, {
+				headers: { authorization: `Bearer ${customerToken}` }
+			})
+		).status,
+		403,
+		'Customer pricing must not confer administrator access'
+	);
 	const adminToken = await login(accounts.admin);
 	const adminHeaders = {
 		authorization: `Bearer ${adminToken}`,
@@ -1051,9 +1255,14 @@ async function shutdown(exitCode = 0) {
 			}
 		}
 	}
-	await new Promise(resolveStop => setTimeout(resolveStop, 1500));
-	for (const { child } of children.values()) {
-		if (child.pid) {
+	const deadline = Date.now() + 20000;
+	while (
+		[...children.values()].some(state => !state.exited) &&
+		Date.now() < deadline
+	)
+		await new Promise(resolveStop => setTimeout(resolveStop, 100));
+	for (const { child, exited } of children.values()) {
+		if (!exited && child.pid) {
 			try {
 				process.kill(-child.pid, 'SIGKILL');
 			} catch {
@@ -1113,6 +1322,13 @@ try {
 	const routes = [
 		['identity-auth', '/auth', 4900, 'optional'],
 		['identity-users', '/users', 4900, 'required'],
+		['identity-invitations', '/workspace-invitations', 4900, 'required'],
+		[
+			'billing-crm-customer-pricing',
+			'/billing-settings/crm',
+			4800,
+			'required'
+		],
 		[
 			'billing-crm-pricing',
 			'/billing-settings/admin/crm',
@@ -1123,6 +1339,7 @@ try {
 		['crm-templates', '/crm/templates', 5330, 'optional'],
 		['crm-customers', '/crm/customers', 5320, 'required'],
 		['crm-sales', '/crm/sales', 5330, 'required'],
+		['crm-source-ingest', '/crm/intake/ingest', 5310, 'crm-source'],
 		['crm-intake', '/crm/intake', 5310, 'required']
 	].map(([id, path, port, authPolicy]) => ({
 		id,
@@ -1147,6 +1364,25 @@ try {
 	);
 	await waitForHttp('api-gateway', 'http://127.0.0.1:4100/health/ready');
 	await smoke(accounts);
+	if (args.has('--verify-acceptance-http')) {
+		const { verifyAcceptanceHttp } =
+			await import('./local-acceptance-http.integration.mjs');
+		const intake = byApp['crm-intake'];
+		await verifyAcceptanceHttp({
+			servicesRoot,
+			apiUrl: publicApi,
+			account: accounts.workflow,
+			managerAccount: accounts.manager,
+			prepareTeamFixtures: () =>
+				seedTeamFixtures(accounts, accounts.workflow.workspaceId),
+			intakeDatabaseUrl: databaseUrl(intake, intake.runtimeRole),
+			environment: ownedEnvironment('crm-intake', common),
+			registerSecret: value => secrets.add(value),
+			log
+		});
+	} else if (args.has('--activate-owner')) {
+		await seedTeamFixtures(accounts, accounts.owner.workspaceId);
+	}
 	if (!args.has('--backend-only')) {
 		const frontendEnv = {
 			NEXT_PUBLIC_MODE: 'development',
@@ -1172,12 +1408,16 @@ try {
 			{
 				runId,
 				harnessPid: process.pid,
+				startedAt,
+				ownedMarker: `wincrm-local-stack:${runId}`,
 				mainUrl: 'http://localhost:3000',
 				crmUrl: 'http://localhost:3001',
 				apiUrl: publicApi,
 				accounts,
 				frontendSnapshots,
 				activatedOwner: args.has('--activate-owner'),
+				acceptanceHttpVerified: args.has('--verify-acceptance-http'),
+				rabbitTransportVerified: false,
 				databases: serviceDefinitions.map(
 					({ app, database, migrationRole, runtimeRole }) => ({
 						app,
@@ -1199,6 +1439,8 @@ try {
 	log(`READY fixture=${fixturePath}`);
 	if (args.has('--smoke-and-stop')) await shutdown();
 } catch (error) {
-	console.error(scrub(error instanceof Error ? error.stack : error));
+	console.error(
+		scrub(error instanceof Error ? error.message : 'Local stack failed')
+	);
 	await shutdown(1);
 }

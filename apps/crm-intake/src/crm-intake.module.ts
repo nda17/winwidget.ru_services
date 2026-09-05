@@ -1,4 +1,6 @@
 import { Module } from '@nestjs/common';
+import { IntakeExportController } from './exports/export.controller';
+import { IntakeExportService } from './exports/export.service';
 import { ConfigModule } from '@nestjs/config';
 import { CrmIntakeHealthController } from './health/crm-intake-health.controller';
 import { CrmIntakeHealthService } from './health/crm-intake-health.service';
@@ -37,6 +39,7 @@ const publisher = role === 'publisher' || role === 'all';
 		...(api
 			? [
 					IntakeController,
+					IntakeExportController,
 					IntakeIngestionController,
 					AcceptanceController,
 					IntakeCsvImportController
@@ -49,6 +52,7 @@ const publisher = role === 'publisher' || role === 'all';
 		...(api
 			? [
 					IntakeService,
+					IntakeExportService,
 					IntakeCsvImportService,
 					IntakeIngestionService,
 					IntakeIngestionRateLimiter,

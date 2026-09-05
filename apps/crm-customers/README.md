@@ -172,3 +172,87 @@ Runtime grants подготавливаются отдельно по матри
 миграции и проверяет CRUD, идемпотентность, конкурентный CAS, FK, tenant/team
 scope, rollback при ошибке receipt и append-only grants. После проверки
 удаляются только данные созданных ею случайных workspace.
+
+## Bounded owner export
+
+GET `/api/v1/crm/customers/exports/{entity}?workspaceId={uuid-v4}&format=json|csv`,
+where entity is `contacts` or `companies`. A current user Bearer session is required.
+Only OWNER with both `customers:read` and `customers:export` may export,
+including GRACE and READ_ONLY. This is an additive route: ordinary CRUD semantics,
+Widgets and existing source endpoints are unchanged.
+
+Each request reads only this service's business tables in one REPEATABLE READ,
+READ ONLY snapshot, ordered by immutable UUID with keyset pages of 500. Archived
+records are included; task export also includes completed/cancelled tasks of
+archived deals. Sales uses its own stored contact-name snapshot, never a foreign
+Customer database/HTTP lookup. This is a business-data export, **not a database
+backup**: receipts, credentials, token hashes, integration proofs, team membership
+and audit history are not part of the file.
+
+Hard bounds are 10,000 records, 16 MiB of total encoded UTF-8 output, and 5 seconds
+of materialization. No truncated/partial file is returned. SQL statement timeout
+is 4 seconds; transaction max wait is 500 ms and transaction timeout 4.5 seconds.
+A process permits at most four simultaneous materializations and one per exact
+actor/workspace pair. This is a local memory guard (429), not a distributed quota
+or a substitute for ingress connection limits. Request disconnect aborts checks;
+in-flight SQL remains bounded by its timeout.
+
+Fresh Access authorization runs before the snapshot and again after complete
+encoding. Exact subject, workspace, data scope and sorted team IDs must remain
+equal; current OWNER/read/export permissions are required both times. A state
+transition ACTIVE -> READ_ONLY still permits export. Data is not sent before the
+second check and successful insertion of a technical PREPARED audit event.
+
+JSON envelope is exactly
+`{schemaVersion:1,workspaceId,entity,snapshotAt,rowCount,items}`.
+Dates are canonical UTC ISO strings, nulls stay explicit, integer amounts remain
+minor currency units. Its business fields preserve values without CSV formula
+rewriting. This does not promise full application-state restore.
+
+CSV is UTF-8 BOM, comma-delimited, RFC 4180 double-quoted headers and every cell,
+CRLF record terminators including the last record. Null is an empty quoted cell;
+integers are decimal strings. Quotes are doubled and multiline content is retained.
+String cells beginning with TAB/CR/LF, or whitespace/control followed by
+`=`, `+`, `-`, `@`, receive an ASCII apostrophe prefix. Thus a phone
+`+7...` is exported as `'+7...`. CSV is spreadsheet-safe, **not lossless
+re-import**. Column order is fixed:
+
+- contacts: `id, workspaceId, name, notes, createdBySubject, teamId, version, archivedAt, createdAt, updatedAt, phone, email, companyId`.
+- companies: `id, workspaceId, name, notes, createdBySubject, teamId, version, archivedAt, createdAt, updatedAt, inn, website`.
+
+Successful replies have a fixed attachment filename `wincrm-{entity}.{format}`,
+`Cache-Control: no-store`, `X-Content-Type-Options: nosniff` and an exact origin
+`Content-Length`. Metadata headers are `X-WinCRM-Export-Entity`, `-Rows`,
+`-Snapshot-At`, `-Schema`, `-Bytes`, `-Actor-SHA256` plus
+`X-WinCRM-Workspace-Id`. Actor SHA-256 is lowercase hexadecimal over the exact
+UTF-8 subject: it is pseudonymous, not anonymous. `-Bytes` is the logical UTF-8
+body length; proxies may compress/remove/change Content-Length and browsers
+decode automatically. Consumers must bound their decoded stream, not equate
+wire length with logical bytes. Metadata, Content-Disposition, Content-Length
+and X-Content-Type-Options are CORS-exposed without changing allowed origins.
+
+Errors are 400 invalid entity/query, 401 invalid session, 403 denied or changed
+authority, 413 row/byte limit, 429 process memory guard, and 503 dependency,
+deadline or audit failure. No row, request value or credential is included in
+error details or logs.
+
+Migration `20260906140000_add_export_audit` adds only this service's
+`crm_customers.export_audit`: UUID, workspace, actor subject, entity, format,
+row/byte counts, snapshot timestamp and preparation timestamp. Grant runtime
+**SELECT, INSERT only**, including SELECT for readiness; no UPDATE, DELETE,
+TRUNCATE, DDL or sequence grant. PREPARED records prove materialization and
+authorization, not successful browser download. Audit insertion is permitted
+technical bookkeeping in READ_ONLY, not a business mutation. Retention requires
+a separate maintenance policy; runtime must not silently prune audit.
+
+Opt-in PostgreSQL 18 gate: build first, apply own migrations externally, grant
+restricted runtime privileges, then run `pnpm test:integration:export` with the
+existing `CRM_CUSTOMERS_TEST_DATABASE_URL`,
+`_TEST_MIGRATION_DATABASE_URL`, `_TEST_RUNTIME_ROLE` and
+`_INTEGRATION_ALLOW_MUTATION=true` variables. It accepts loopback test-named
+databases only, never loads .env, and cleans only its random test workspaces
+using the separate migration role. It proves a stable snapshot across concurrent
+updates, fresh revoke, OWN/TEAM isolation, archives, output limits, SQL timeout,
+audit failure and append-only/foreign-schema ACL. These PG tests stub the Access
+response to control revocation; end-to-end HTTP authorization remains a separate
+local-stack/rollout gate.

@@ -33,6 +33,8 @@ export class CrmSalesHealthService {
 		intakeOperationToken('CRM_CUSTOMERS_CRM_SALES_TOKEN');
 		try {
 			await this.prisma.$queryRaw`SELECT 1`;
+			await this.prisma
+				.$queryRaw`SELECT id, workspace_id, actor_subject, entity, format, row_count, byte_count, snapshot_at, prepared_at FROM crm_sales.export_audit LIMIT 0`;
 			const [identity] = await Promise.all([
 				this.prisma.serviceIdentity.findUnique({
 					where: { id: 'singleton' },

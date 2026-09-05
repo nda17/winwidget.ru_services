@@ -1,4 +1,6 @@
 import { Module } from '@nestjs/common';
+import { SalesExportController } from './exports/export.controller';
+import { SalesExportService } from './exports/export.service';
 import { ConfigModule } from '@nestjs/config';
 import { CrmSalesHealthController } from './health/crm-sales-health.controller';
 import { CrmSalesHealthService } from './health/crm-sales-health.service';
@@ -27,6 +29,7 @@ import { IntakeOperationService } from './intake-operations/intake-operation.ser
 		PipelineTemplateCatalogController,
 		PipelineTemplateInstallationController,
 		SalesController,
+		SalesExportController,
 		IntakeOperationController
 	],
 	providers: [
@@ -35,6 +38,7 @@ import { IntakeOperationService } from './intake-operations/intake-operation.ser
 		PipelineTemplateCatalogService,
 		PipelineTemplateInstallationService,
 		SalesService,
+		SalesExportService,
 		SalesAccessClient,
 		SalesAccessGuard,
 		SalesContactClient,

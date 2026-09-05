@@ -80,10 +80,10 @@ Read-only аудит production API и личного кабинета ЮKassa �
 - пройти сквозные UI/API сценарии контактов/компаний, сделок, задач,
   входящих обращений и агрегированной аналитики; отдельно проверить
   серверные роли/OWN/TEAM scope, CAS/replay и визуальную адаптивность;
-- реализовать приём через CSV и opt-in managed Widgets connector
-  для всех типов виджетов; доказать workflow приёма обращения в сделку,
-  transactional Outbox, publisher confirm/mandatory return, независимые
-  push consumers, идемпотентные receipts, retry/DLQ и crash recovery;
+- реализовать opt-in managed Widgets connector для всех типов виджетов,
+  создающих заявки, и проверить его сквозную доставку: transactional Outbox,
+  publisher confirm/mandatory return, независимый push consumer,
+  идемпотентные receipts, retry/DLQ, crash recovery и expiry/revocation fences;
 - завершить приглашения, CRM-роли/команды и конкурентное применение лимита
   сотрудников: минимум 2 вместе с владельцем, Trial по умолчанию 5,
   pending и отключённые сотрудники место не занимают;
@@ -108,6 +108,11 @@ Read-only аудит production API и личного кабинета ЮKassa �
 - добавить точные Gateway route prefixes `/api/v1/crm/access` -> `crm-access`,
   `/api/v1/crm/templates` и `/api/v1/crm/sales` -> `crm-sales`,
   `/api/v1/crm/customers` -> `crm-customers`, `/api/v1/crm/intake` -> `crm-intake`,
+  отдельный `/api/v1/crm/intake/ingest` с политикой `crm-source` только для
+  canonical POST `/:sourceId` и preflight OPTIONS; остальные Intake routes
+  требуют пользовательский JWT. Ключ источника не является Identity JWT.
+  Добавить `/api/v1/workspace-invitations` -> Identity и
+  `/api/v1/billing-settings/crm` -> Billing с `required`,
   origin `https://crm.winwidget.ru` и
   обновить route-manifest только вместе с полной двусторонней синхронизацией
   production env;
@@ -136,12 +141,12 @@ Read-only аудит production API и личного кабинета ЮKassa �
   влияет на заявки и прежние интеграции, managed connector включается явно
   только на оплаченных `EASY`/`HARD`; окончание подписки прекращает новые
   передачи, сохраняя полученные данные. Историю автоматически не переносить.
-- проверить лимиты входящего API за Gateway/private ingress: сейчас Intake
-  не доверяет произвольному `X-Forwarded-For`, поэтому peer-IP bucket может
-  быть общим для всех запросов proxy. До роста входящего потока зафиксировать
-  trusted-proxy boundary с очисткой входящих заголовков и доверенными CIDR,
-  проверить подмену IP и подобрать общий/поисточниковый throughput; не
-  включать слепое доверие forwarded headers ради обхода лимита.
+  - проверить лимиты входящего API за Gateway/private ingress: сейчас Intake
+    не доверяет произвольному `X-Forwarded-For`, поэтому peer-IP bucket может
+    быть общим для всех запросов proxy. До роста входящего потока зафиксировать
+    trusted-proxy boundary с очисткой входящих заголовков и доверенными CIDR,
+    проверить подмену IP и подобрать общий/поисточниковый throughput; не
+    включать слепое доверие forwarded headers ради обхода лимита.
 
 Новые CRM VPS ещё не созданы; их деплой явно отложен пользователем 05.09.2026.
 Работа продолжается локально с commit/push и CI. После MVP разрешены frontend
@@ -179,6 +184,24 @@ retry, broker/DLQ и offline workers; закрыть возможность ис
 проверить позднюю redelivery после очистки. Очистка должна быть service-owned,
 пакетной и не требовать доступа к чужой БД. Не применять общий TTL к активным,
 неподтверждённым или частично выполненным workflow.
+
+Для native Widgets connector отдельно определить срок хранения контактного
+snapshot в transfer intent: бессрочная дедупликация не должна требовать
+бессрочного хранения дополнительной копии персональных данных. До включения
+автоматического удаления разделить неизменяемое доказательство передачи и
+очищаемое содержимое; согласовать срок жизни payload, обработку удаления
+исходной заявки и проверить late retry после очистки без воскрешения данных.
+Не удалять proof вместе с payload и не обходить append-only ограничения
+расширением прав обычного runtime.
+
+Для service-owned `export_audit` отдельно согласовать срок хранения записей
+PREPARED (actor, workspace, сущность, формат, объём и время, без содержимого
+файла). Они подтверждают подготовку, но не фактическое скачивание клиентом.
+До реализации ограниченной очистки отдельной maintenance-ролью обычный
+runtime сохраняет только SELECT/INSERT; UPDATE/DELETE/TRUNCATE не разрешать.
+До масштабирования экспорта закрепить лимиты соединений и медленных скачиваний
+на Gateway/private ingress: process-local лимит подготовки файлов не ограничивает
+уже отправляемые ответы и не является общей квотой нескольких replicas.
 
 ### P1 — production-наблюдение и recovery
 
