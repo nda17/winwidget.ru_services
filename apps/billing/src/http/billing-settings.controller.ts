@@ -3,6 +3,7 @@ import {
 	Body,
 	Controller,
 	Get,
+	Header,
 	Headers,
 	HttpCode,
 	Patch,
@@ -30,6 +31,17 @@ export class BillingSettingsController {
 		private readonly service: BillingSettingsService,
 		private readonly crmPolicy: CrmCommercialPolicyService
 	) {}
+
+	@Get('crm')
+	@HttpCode(200)
+	@Header('Cache-Control', 'no-store')
+	@BillingAuth()
+	@UseGuards(BillingAuthGuard)
+	crmPricing() {
+		// Product prices are shared, not a workspace entitlement or payment quote.
+		// Use the same immutable policy as administration, without granting writes.
+		return this.crmPolicy.get();
+	}
 
 	@Get('admin/crm')
 	@HttpCode(200)

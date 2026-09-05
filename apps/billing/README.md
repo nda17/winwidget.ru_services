@@ -110,6 +110,13 @@ migrations, grants, Outbox и RabbitMQ-события для этого чтен
 
 ### Коммерческие настройки WinCRM
 
+`GET /api/v1/billing-settings/crm` с действующей Identity-сессией возвращает
+текущую общую ценовую политику из тех же настроек, что и админка. Ответ
+`Cache-Control: no-store`, без данных администратора и без записи в Billing.
+Это не персональное предложение об оплате: endpoint не проверяет активный
+состав сотрудников, не фиксирует цену заказа, не создаёт платёж или Trial и
+не включает автопродление. Отдельный Gateway prefix требует `required`.
+
 `GET /api/v1/billing-settings/admin/crm` доступен `ADMIN` и `DEV`.
 `PUT` по тому же адресу доступен только `DEV` после Identity introspection.
 Команда содержит `schemaVersion: 1`, UUIDv4 `commandId`, совпадающий с
