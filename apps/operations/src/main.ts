@@ -1,8 +1,10 @@
 import { Logger } from '@nestjs/common';
+import type { INestApplication } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { OperationsHttpExceptionFilter } from './common/operations-http-exception.filter';
 import { operationsRequestContextMiddleware } from './common/operations-request-context';
 import { OperationsModule } from './operations.module';
+import { terminateFailedBootstrap } from './runtime/bootstrap-failure';
 import {
 	getOperationsCorsAllowedOrigins,
 	getOperationsListenHost,
@@ -14,6 +16,8 @@ import {
 	parseOperationsProcessRole
 } from './runtime/operations-runtime.service';
 
+let application: INestApplication | undefined;
+
 async function bootstrap(): Promise<void> {
 	const role = parseOperationsProcessRole(
 		process.env.OPERATIONS_PROCESS_ROLE
@@ -22,6 +26,7 @@ async function bootstrap(): Promise<void> {
 	const app = await NestFactory.create(OperationsModule, {
 		forceCloseConnections: true
 	});
+	application = app;
 	const instance = app.getHttpAdapter().getInstance();
 	if (typeof instance?.set === 'function') {
 		instance.set(
@@ -57,8 +62,7 @@ async function bootstrap(): Promise<void> {
 	);
 }
 
-void bootstrap().catch(error => {
+void bootstrap().catch(() => {
 	Logger.error('Operations bootstrap failed', undefined, 'Bootstrap');
-	void error;
-	process.exitCode = 1;
+	return terminateFailedBootstrap(application);
 });
