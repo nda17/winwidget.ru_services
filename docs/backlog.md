@@ -254,6 +254,39 @@ consent snapshot в Billing остаётся отдельным обязател
 
 ## Identity и доступ
 
+### P1 — отдельный production-выпуск резервного входа по коду
+
+До включения `IDENTITY_LOGIN_OTP_ENABLED=true` выпустить только совместимый
+Identity image и additive migration `20260910010000_add_login_otp`, без CRM
+foundation, новых CRM tokens, workspace backfill и изменений Widgets/Billing.
+Текущий общий deploy controller не является service-scoped: подготовить
+reviewed immutable infra workflow для трёх процессов Identity, согласовать
+exact pin и зелёные CI revisions. Не заменять его ручным Compose или общим
+рестартом остальных приложений.
+
+Проверить service-owned runtime/backup ACL двух новых `login_otp_*` таблиц,
+миграционную роль/default ACL и актуальный restore manifest. Новый readiness
+и housekeeping требуют миграцию перед переключением runtime даже при
+выключенном флаге. Старый runtime совместим с additive схемой; rollback не
+удаляет новые таблицы, challenge и сессии, сначала выключается OTP и
+завершаются активные запросы.
+
+Operations подписывает backup provenance по manifest, встроенному в её image,
+а не по фактическому migration ledger Identity. Обновлённый JSON в Git сам
+по себе не обновляет работающий worker. До Identity-only cutover согласовать
+доставку совместимого manifest-only Operations artifact без Notes/DDL и fence
+Identity backup jobs на переходное окно; не выпускать dumps с несовпадающим
+manifest и не ослаблять restore/provenance проверки.
+
+Синхронизировать canonical production env local/server в обе стороны с
+побайтовой проверкой и обновить expected env hash. Флаг должен оставаться
+`false` до проверки провайдеров и trusted-IP boundary Gateway → Identity.
+Проверить доступность точных методов существующего `/api/v1/auth` prefix,
+общие PostgreSQL-лимиты и отсутствие обхода CAPTCHA по клиентскому признаку
+ошибки. Реальные email/SMS проверки требуют участия пользователя; synthetic
+PG/transport tests и readiness не доказывают доставку. Сохранить прежний
+парольный вход, регистрацию, OAuth и Telegram без изменения их контрактов.
+
 ### P1 — общий auth rate limiter до нескольких replicas
 
 До второй Identity/Gateway replica вынести process-local counters в общий

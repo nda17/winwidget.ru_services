@@ -22,6 +22,7 @@ model User {
   authIdentities               AuthIdentity[]
   telegramNotificationChannel  TelegramNotificationChannel?
   verificationChallenges       VerificationChallenge[]
+  loginOtpChallenges           LoginOtpChallenge[]
   sessions                     UserSession[]
   createdAt                    DateTime                     @default(now()) @map("created_at")
   updatedAt                    DateTime                     @updatedAt @map("updated_at")
@@ -112,6 +113,38 @@ model VerificationChallenge {
   @@index([telegramUserId])
   @@index([expiresAt])
   @@map("verification_challenges")
+  @@schema("identity")
+}
+
+model LoginOtpChallenge {
+  id                 String    @id @db.Uuid
+  purpose            String    @default("LOGIN_FALLBACK") @db.VarChar(32)
+  channel            String    @db.VarChar(8)
+  userId             String?   @map("user_id")
+  authIdentityId     String?   @map("auth_identity_id")
+  identityVerifiedAt DateTime? @map("identity_verified_at")
+  destinationHash    String    @map("destination_hash") @db.Char(64)
+  browserTokenHash   String    @map("browser_token_hash") @db.Char(64)
+  codeHash           String    @map("code_hash")
+  attempts           Int       @default(0)
+  expiresAt          DateTime  @map("expires_at")
+  consumedAt         DateTime? @map("consumed_at")
+  createdAt          DateTime  @default(now()) @map("created_at")
+  user               User?     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([expiresAt, id])
+  @@index([userId])
+  @@map("login_otp_challenges")
+  @@schema("identity")
+}
+
+model LoginOtpRateLimit {
+  key       String   @id @db.Char(64)
+  count     Int
+  expiresAt DateTime @map("expires_at")
+
+  @@index([expiresAt, key])
+  @@map("login_otp_rate_limits")
   @@schema("identity")
 }
 

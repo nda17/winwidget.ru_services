@@ -70,20 +70,24 @@ export class RecaptchaGuard implements CanActivate {
 				}
 			);
 		} catch {
-			throw new ServiceUnavailableException(
-				'Не удалось проверить reCAPTCHA. Попробуйте позже.'
-			);
+			throw recaptchaUnavailable();
 		}
 		if (!response.ok) {
-			throw new ServiceUnavailableException(
-				'Не удалось проверить reCAPTCHA. Попробуйте позже.'
-			);
+			throw recaptchaUnavailable();
 		}
-		const result = (await response.json()) as {
+		let result: {
 			success?: boolean;
 			action?: string;
 			score?: number;
 		};
+		try {
+			const body: unknown = await response.json();
+			if (!body || typeof body !== 'object' || Array.isArray(body))
+				throw new Error();
+			result = body;
+		} catch {
+			throw recaptchaUnavailable();
+		}
 		if (
 			result.success !== true ||
 			result.action !== action ||
@@ -96,4 +100,11 @@ export class RecaptchaGuard implements CanActivate {
 		}
 		return true;
 	}
+}
+
+function recaptchaUnavailable() {
+	return new ServiceUnavailableException({
+		code: 'recaptcha_unavailable',
+		message: 'Не удалось проверить reCAPTCHA. Попробуйте позже.'
+	});
 }

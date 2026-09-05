@@ -77,3 +77,97 @@ docker build --build-arg APP_REVISION="$(git rev-parse HEAD)" -t winwidget-ident
 Миграции сохраняют постоянный `service_identity` текущей базы; отдельной фазы
 активации нет, поэтому включённые worker, housekeeping и Outbox publisher
 запускаются сразу после успешного применения миграций.
+
+## Резервный вход по коду
+
+`IDENTITY_LOGIN_OTP_ENABLED=false` по умолчанию. Включать после миграции
+`20260910010000_add_login_otp`, проверки Identity/Gateway trusted-proxy boundary
+и настроенных SMTP/SMS Aero credentials. Новые маршруты находятся внутри
+существующего optional-auth префикса Gateway `/api/v1/auth`; отдельная CRM
+подписка для входа не нужна. Старые пароль, регистрация, Telegram и OAuth
+сохраняют свои контракты и CAPTCHA-защиту.
+
+- `GET /api/v1/auth/login-otp/capabilities` возвращает `available`, список
+  `channels` (`EMAIL`/`SMS`), `codeLength:6`, `expiresInSeconds:300` и
+  `resendAfterSeconds:60`; отсутствие feature flag, transport config или OTP
+  таблиц не разрешает fallback. Это доступность способа входа, не результат
+  проверки существования конкретного контакта или live SLA провайдера.
+- `POST /api/v1/auth/login-otp/request` принимает только `channel` и
+  `destination`; `202` содержит `challengeId`, `browserToken`, `expiresAt` и
+  `resendAvailableAt`. Один и тот же ответ и пятисекундный response floor
+  используются для подтверждённого, отсутствующего, неподтверждённого или
+  отключённого контакта, а также неизвестного/неуспешного результата отправки.
+  UI не должен обещать факт доставки или существование аккаунта.
+- `POST /api/v1/auth/login-otp/verify` принимает только `challengeId`,
+  `browserToken` и шестизначный `code`; успех возвращает обычный user/access
+  token и общий HttpOnly refresh cookie. Все ответы OTP имеют `no-store`.
+
+Только ACTIVE user с существующим verified AuthIdentity получает код. В БД
+хранятся purpose `LOGIN_FALLBACK`, хеши destination/browser token и bcrypt12
+от `browserToken:code`; CSPRNG browser token 256-bit остаётся только в памяти
+клиента. Challenge живёт пять минут, имеет пять попыток и атомарно расходуется
+вместе с созданием сессии и локальной подписью JWT. Блокировки user/identity/challenge
+и повторная проверка contact ID/value/verifiedAt/status защищают конкуренцию
+и отвязку контакта. Доставка HTTP-ответа браузеру не может быть атомарной с БД;
+не повторять verify автоматически при неизвестном результате.
+
+Общие между replicas PostgreSQL-лимиты: IP 10 запросов за 10 минут; один
+запрос контакту за 60 секунд; SMS 5/контакт/сутки, email 20; глобально SMS
+100/час и 300/сутки, email 500/час и 2000/сутки. Проверки ограничены 50/IP
+и 2000 глобально за 10 минут. IP берётся из Express `request.ip`, не из raw
+forwarded header. Admission идёт IP → contact cooldown → contact day → channel
+hour → channel day: отказ не расходует последующие глобальные бюджеты, уже
+списанные локальные квоты сохраняются. При ошибке БД — fail closed.
+
+Ошибки: `401 login_otp_invalid`, `429 login_otp_rate_limited`,
+`503 login_otp_unavailable`. Клиентский признак недоступности CAPTCHA никогда
+не является разрешением сервера: это самостоятельный защищённый способ входа.
+Для старого входа отказ/low score остаётся `400`, а transport/HTTP/JSON outage
+siteverify получает прежний `503` и message с кодом `recaptcha_unavailable`.
+
+OTP отправляется одной синхронной ограниченной попыткой без автоматического
+retry/RabbitMQ. SMTP использует отдельный abortable socket и обычную проверку
+TLS; SMS — только HTTPS POST JSON с кодом/номером в body, без redirects.
+Неудачная отправка не отменяет challenge другого браузера. Просроченные OTP
+и rate buckets очищаются существующим service-owned housekeeping батчами
+до 1000. Код, browser token, PII и provider credentials не выводятся в логи.
+
+`pnpm test:integration:login-otp` требует отдельную PostgreSQL 18 test DB и
+разные migration/runtime роли, `IDENTITY_INTEGRATION_ALLOW_MUTATION=true`,
+`IDENTITY_TEST_DATABASE_URL` и `IDENTITY_TEST_MIGRATION_DATABASE_URL`. Fixture
+использует только synthetic delivery; runtime имеет USAGE identity, SELECT
+users/auth_identities/telegram_notification_channels, UPDATE(id) users и auth_identities для
+row lock, SELECT/INSERT user_sessions и CRUD двух OTP-таблиц. Driver проверяет
+конкурирующий consume, лимит попыток, rollback, изменение контакта, durable
+квоты и SQL constraints; создание/удаление самой test DB остаётся у runner.
+
+### Совместимость отдельного Identity-релиза
+
+OTP не зависит от CRM runtime, workspace backfill, новых межсервисных токенов
+или миграций другого сервиса. Изменение схемы строго additive: две новые
+таблицы и индексы, без изменения прежних пользователей, сессий и challenge.
+Старый Identity runtime продолжает работать с этой схемой. Новый readiness
+проверяет наличие обеих таблиц даже при выключенном флаге; миграция и ACL
+должны предшествовать переключению всех трёх Identity процессов.
+
+Canonical `.env.example` и `apps/identity/.env.example` содержат один и тот же
+выключенный флаг. Compose передаёт его явно только `identity-api`; одной
+строки в canonical env без Compose-проводки недостаточно. Самостоятельные
+правки generated service env запрещены. Production-процедура и immutable
+infra pin принадлежат `winwidget.ru_infra/docs/runbook.md`; общий controller
+не является точечным обновлением Identity. До reviewed scoped workflow,
+совпадающих local/server env hashes и exact green CI деплой не разрешён.
+
+Перед включением проверить под реальными runtime/backup ролями права новых
+таблиц и service-owned backup/restore manifest. Не расширять права на чужие
+схемы или DDL обычному runtime. Manifest встроен также в Operations backup
+image: одной его регенерации в Git недостаточно. Согласовать доставку
+совместимого Operations artifact и fence Identity backups на интервал
+миграции/переключения, не подписывать новый dump старым manifest.
+После additive migration допустим rollback
+на прежний совместимый Identity image с сохранением новых таблиц и данных:
+сначала отключить OTP и дождаться завершения активных запросов, не удалять
+challenge/сессии и не выполнять reverse DROP. Старый frontend/обычный вход
+должны оставаться работоспособными. Проверка реальной доставки кода требует
+участия пользователя; synthetic transport и `capabilities.available` её не
+доказывают.
