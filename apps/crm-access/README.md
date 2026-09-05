@@ -255,6 +255,27 @@ Opt-in PostgreSQL18 proof:
 runtime role и чужая sentinel schema. Проверяются ACL, конкурентные команды,
 FIFO/quota, replay, revoke, tenant joins и receipt-before-effect.
 
+Отдельный opt-in профиль `local-wincrm-stack.mjs --backend-only
+--verify-team-http --smoke-and-stop` запускается из корня services с
+`WINCRM_LOCAL_STACK_ALLOW_MUTATION=true`. Нужны собственные четыре scoped
+RabbitMQ principals в одном loopback test-vhost на `127.0.0.1:5673`:
+`CRM_ACCESS_TEAM_HTTP_TEST_{PROVISIONER,WORKER,PUBLISHER,IDENTITY_PUBLISHER}_RABBITMQ_URL`.
+Профиль создаёт три отдельных тестовых аккаунта и реальный Trial через HTTP,
+без прямого seed memberships/admissions. Приглашения проходят Access Outbox,
+Rabbit push consumer и внутренний Identity HTTP; принятие — публичный Identity
+HTTP, Identity Outbox и Access acceptance/admission consumers. Проверяются
+два места вместе с владельцем, отсутствие расхода места у pending/disabled,
+FIFO при конкурентном принятии двух приглашений на последнее место,
+повтор HTTP/Rabbit события и очередь повторного включения. Для наблюдаемого
+пересечения consumers тест кратко удерживает настоящий workspace advisory
+lock только в своей БД; production-методы и contracts не подменяются.
+Identity email delivery выключена; токены остаются в памяти, credentials —
+только в private fixture. Профиль нельзя смешивать с direct-seed/Widgets,
+Billing или domain fault profiles. Он доказывает built dist HTTP/PG/Rabbit,
+но не release images, отправку email, браузерные сценарии или production.
+Собственные подключения закрываются тестом; wrapper локальной проверки
+удаляет только свои БД/роли и Rabbit container/vhost, сохраняя общий PG.
+
 `pnpm run test:integration:billing` использует те же opt-in переменные и
 изоляцию после применения миграции `20260906120000_crm_billing_capacity`.
 Проверяет конкурентные admission/уменьшение мест, durable fence, replay,

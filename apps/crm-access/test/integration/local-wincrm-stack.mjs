@@ -22,6 +22,7 @@ import {
 	NATIVE_WIDGET_HTTP_TYPES,
 	nativeWidgetHttpCase
 } from './local-native-widget-http.integration.mjs';
+import { teamHttpBrokerEnvironment } from './local-team-http.integration.mjs';
 
 // Local integration harness only. The normal login, JWT, Identity introspection,
 // CRM access checks and service-owned databases run without runtime overrides.
@@ -79,7 +80,7 @@ if (process.argv[2] === '--refresh-frontends') {
 
 const args = new Set(process.argv.slice(2));
 if (args.has('--help')) {
-	console.log(`Usage: WINCRM_LOCAL_STACK_ALLOW_MUTATION=true node apps/crm-access/test/integration/local-wincrm-stack.mjs [--backend-only] [--activate-owner] [--with-widgets] [--verify-native-widget-http | --verify-native-widget-http-all] [--verify-domain] [--verify-billing] [--verify-billing-http] [--verify-acceptance-http] [--smoke-and-stop]
+	console.log(`Usage: WINCRM_LOCAL_STACK_ALLOW_MUTATION=true node apps/crm-access/test/integration/local-wincrm-stack.mjs [--backend-only] [--activate-owner] [--with-widgets] [--verify-native-widget-http | --verify-native-widget-http-all] [--verify-domain] [--verify-billing] [--verify-billing-http] [--verify-acceptance-http] [--verify-team-http] [--smoke-and-stop]
 
 Requires local Colima container wincrm-mvp-postgres18, PostgreSQL 18 on
 127.0.0.1:55440 with local test-only trust and bootstrap role crm_bootstrap_ci.
@@ -112,6 +113,13 @@ Requires BILLING_WINCRM_HTTP_TEST_{PROVISIONER,WORKER,PUBLISHER}_RABBITMQ_URL
 on one local test vhost. Use separately from --verify-billing (which leaves fault fixtures).
 --verify-acceptance-http uses a separate normal test account and real HTTP downstream operations.
 It drives a claimed Intake event without a broker and does not prove RabbitMQ transport.
+--verify-team-http uses three separate normal accounts and real Trial 2 including its owner.
+It proves HTTP invitations/acceptance -> real Identity/Access Outbox -> scoped RabbitMQ
+-> CRM admission/FIFO, concurrent last-slot claims and disable/re-enable capacity.
+Requires CRM_ACCESS_TEAM_HTTP_TEST_{PROVISIONER,WORKER,PUBLISHER,IDENTITY_PUBLISHER}_RABBITMQ_URL
+on one isolated loopback test vhost. Run separately from activation/direct-seed,
+Widgets, domain and Billing profiles. Email delivery stays disabled; dist classes
+are exercised, not release images, browser clicks or external delivery.
 Use --refresh-frontends /exact/private/browser-fixture.json to refresh source snapshots.
 Generated account credentials are saved only to a private 0600 fixture file.
 SIGINT/SIGTERM stops only this harness's child processes. Database/container
@@ -130,6 +138,7 @@ for (const arg of args) {
 			'--verify-billing',
 			'--verify-billing-http',
 			'--verify-acceptance-http',
+			'--verify-team-http',
 			'--smoke-and-stop'
 		].includes(arg),
 		'Unsupported local-stack argument'
@@ -144,6 +153,18 @@ assert.ok(
 	'Choose one native Widget HTTP profile'
 );
 const withBillingHttp = args.has('--verify-billing-http');
+const withTeamHttp = args.has('--verify-team-http');
+assert.ok(
+	!withTeamHttp ||
+		[...args].every(arg =>
+			[
+				'--verify-team-http',
+				'--backend-only',
+				'--smoke-and-stop'
+			].includes(arg)
+		),
+	'Run --verify-team-http separately from activation/direct-seed and other verification profiles'
+);
 const withBillingCommerce =
 	withBillingHttp || args.has('--verify-billing');
 assert.ok(
@@ -1320,6 +1341,13 @@ async function seedIdentity() {
 			['manager', ['USER']],
 			['teamLead', ['USER']],
 			['analyst', ['USER']],
+			...(withTeamHttp
+				? [
+						['teamOwner', ['USER']],
+						['inviteeA', ['USER']],
+						['inviteeB', ['USER']]
+					]
+				: []),
 			...(withBillingHttp
 				? [
 						['billing', ['USER']],
@@ -2259,6 +2287,9 @@ process.once('SIGINT', () => void shutdown());
 process.once('SIGTERM', () => void shutdown());
 
 try {
+	const teamHttpBroker = withTeamHttp
+		? teamHttpBrokerEnvironment(process.env, value => secrets.add(value))
+		: null;
 	const billingHttpBroker = withBillingHttp
 		? billingHttpBrokerEnvironment()
 		: null;
@@ -2278,6 +2309,7 @@ try {
 	const accounts = await seedIdentity();
 	if (withBillingHttp) await seedBillingHttpContacts(accounts);
 	let billingHttpEvidence = null;
+	let teamHttpEvidence = null;
 	let widgetsFixture = withWidgets
 		? await seedWidgets(accounts.owner)
 		: null;
@@ -2355,6 +2387,32 @@ try {
 	);
 	await waitForHttp('api-gateway', 'http://127.0.0.1:4100/health/ready');
 	await smoke(accounts);
+	if (withTeamHttp) {
+		const { verifyTeamHttp } =
+			await import('./local-team-http.integration.mjs');
+		teamHttpEvidence = await verifyTeamHttp({
+			servicesRoot,
+			runId,
+			apiUrl: publicApi,
+			accounts: {
+				owner: accounts.teamOwner,
+				first: accounts.inviteeA,
+				second: accounts.inviteeB
+			},
+			identityDatabaseUrl: databaseUrl(
+				byApp.identity,
+				byApp.identity.runtimeRole
+			),
+			accessDatabaseUrl: databaseUrl(
+				byApp['crm-access'],
+				byApp['crm-access'].runtimeRole
+			),
+			accessEnvironment: ownedEnvironment('crm-access', common),
+			broker: teamHttpBroker,
+			registerSecret: value => secrets.add(value),
+			log
+		});
+	}
 	if (withBillingHttp) {
 		const { verifyWincrmCommerceHttpRabbit } =
 			await import('../../../billing/test/integration/wincrm-commerce-http-rabbit.integration.mjs');
@@ -2522,6 +2580,7 @@ try {
 				acceptanceHttpVerified: args.has('--verify-acceptance-http'),
 				widgets: widgetsFixture,
 				billingHttp: billingHttpEvidence,
+				teamHttp: teamHttpEvidence,
 				rabbitTransportVerified: false,
 				databases: serviceDefinitions.map(
 					({ app, database, migrationRole, runtimeRole }) => ({
