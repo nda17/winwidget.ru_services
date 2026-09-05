@@ -64,6 +64,50 @@ snapshot, а migration очищает ранее сохранённые snapshot
 
 ## Настройка и развёртывание
 
+### Read-only допуск Widgets → WinCRM
+
+`POST /internal/v1/billing/widgets/wincrm-eligibility` — узкое чтение
+текущей записи `billing.subscriptions`, без `ensureTrial`, нормализации,
+платежей, usage, внешних HTTP-вызовов или PostgreSQL-записей. Сам connector
+этим endpoint не включается. Body exact: `{schemaVersion:1,ownerSubject}`;
+subject — строка 1–256 символов без пробелов/control characters, не UUID.
+
+По умолчанию `BILLING_WINCRM_WIDGETS_ELIGIBILITY_ENABLED=false`: API возвращает
+404, новые credentials не обязательны. При явном `true` обязательны две
+независимые пары `BILLING_WINCRM_WIDGETS_TOKEN` (caller `widgets`) и
+`BILLING_WINCRM_CRM_INTAKE_TOKEN` (caller `crm-intake`). Токены не совпадают
+между собой или с существующими service credentials. Заголовки —
+`x-winwidget-service`, `x-winwidget-internal-token`; неподходящая пара даёт 403. Контроллер существует только в API process. Guard проверяет реальный
+loopback peer socket, не forwarded headers. Удалённые callers должны идти
+через защищённый private HTTPS ingress с локальным upstream; не публиковать
+маршрут в Gateway, не ослаблять guard и не использовать redirect/TLS bypass.
+Существующие роли запускаются без новых настроек, пока feature выключен.
+
+Exact response: `schemaVersion:1`, `ownerSubject`, `eligible`, `reason`,
+`subscriptionId`, `version`, `plan`, `startsAt`, `expiresAt`, `checkedAt`,
+`validUntil`. Subscription ID — opaque string 1–255 (Prisma default CUID),
+не UUID; `version` — десятичная строка неотрицательного PostgreSQL bigint.
+При отсутствии записи ID/version/plan/период null и reason `NO_SUBSCRIPTION`.
+Даты — canonical ISO с миллисекундами; `checkedAt` вычисляется после чтения.
+Ответ `Cache-Control: no-store`; application cache отсутствует.
+
+Разрешён только `ACTIVE` EASY/HARD с конечным согласованным периодом
+`startsAt <= checkedAt < expiresAt`; действующая admin activation тоже
+допустима. Известные EXPIRED/CANCELLED дают `INACTIVE` (nullable expiry
+legacy-периода допустим); активный TRIAL — `TRIAL`, будущий оплаченный период
+— `NOT_STARTED`, достигнутый expiry — `EXPIRED`. Неизвестный enum, неверная
+scope/ID/version/date или ACTIVE paid без конечного положительного периода
+дают безопасный 503 `billing_wincrm_eligibility_unavailable`, без деталей БД.
+
+Для `eligible=true`, `validUntil=min(checkedAt+5s,expiresAt)`; для отказа
+`validUntil=checkedAt`. Consumer обязан заново получить снимок для каждой
+попытки и проверить `now < validUntil` и исходный transfer deadline перед
+своим commit. Пять секунд ограничивают свежесть HTTP-ответа, а не дают
+распределённую атомарность с последующим revoke. Этот ответ не проверяет
+владение виджетом, CRM-права/квоту, состояние connector или историю transfer:
+их независимо подтверждают владельцы соответствующих доменов. Новые БД,
+migrations, grants, Outbox и RabbitMQ-события для этого чтения не требуются.
+
 ### Коммерческие настройки WinCRM
 
 `GET /api/v1/billing-settings/admin/crm` доступен `ADMIN` и `DEV`.

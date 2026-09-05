@@ -5,6 +5,9 @@ import { BillingOperationsGuard } from './auth/billing-operations.guard';
 import { BillingCampaignsGuard } from './auth/billing-campaigns.guard';
 import { BillingIdentityGuard } from './auth/billing-identity.guard';
 import { BillingCrmAccessGuard } from './auth/billing-crm-access.guard';
+import { BillingWincrmWidgetsGuard } from './auth/billing-wincrm-widgets.guard';
+import { WincrmWidgetsEligibilityService } from './domain/wincrm-widgets-eligibility.service';
+import { BillingWincrmWidgetsController } from './http/billing-wincrm-widgets.controller';
 import { BillingCampaignAudienceService } from './domain/billing-campaign-audience.service';
 import { BillingAdminAlertsService } from './domain/billing-admin-alerts.service';
 import { InternalCommandsService } from './domain/internal-commands.service';
@@ -55,6 +58,7 @@ const API_CONTROLLERS =
 				AffiliateController,
 				BillingCampaignAudienceController,
 				BillingCrmAccessController,
+				BillingWincrmWidgetsController,
 				BillingIdentityController,
 				BillingSettingsController,
 				BillingOperationsController
@@ -68,6 +72,8 @@ const API_PROVIDERS =
 				BillingOperationsGuard,
 				BillingCampaignsGuard,
 				BillingCrmAccessGuard,
+				BillingWincrmWidgetsGuard,
+				WincrmWidgetsEligibilityService,
 				BillingIdentityGuard
 			]
 		: [];

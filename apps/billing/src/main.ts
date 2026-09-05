@@ -55,6 +55,10 @@ async function bootstrap(): Promise<void> {
 				method: RequestMethod.POST
 			},
 			{
+				path: 'internal/v1/billing/widgets/wincrm-eligibility',
+				method: RequestMethod.POST
+			},
+			{
 				path: 'internal/v1/billing/campaigns/active-subscriber-ids',
 				method: RequestMethod.POST
 			},
