@@ -254,6 +254,47 @@ consent snapshot в Billing остаётся отдельным обязател
 
 ## Identity и доступ
 
+### P1 — отдельный production-выпуск резервного входа по коду
+
+До включения `IDENTITY_LOGIN_OTP_ENABLED=true` выпустить только совместимый
+Identity image и additive migration `20260910010000_add_login_otp`, без CRM
+foundation, новых CRM tokens, workspace backfill и изменений Widgets/Billing.
+Выпускать fresh candidate поверх exact worker recovery
+`e9501c954dec661e29d92d6b13e8dbf4eef97b56`, не прежний OTP commit: сохранить
+bootstrap recovery Billing/Operations/Support и security lockfiles. Согласовать
+green immutable infra pin и scoped workflow `identity-with-operations-manifest`
+для Identity 3 + Operations 4. Проверить фактический mixed baseline: Operations
+API может иметь иную ревизию, чем три worker; их старые manifests должны совпадать.
+Не повторять предыдущие federation/worker jobs и не использовать `all` или
+ручной общий Compose restart.
+
+Проверить service-owned runtime/backup ACL двух новых `login_otp_*` таблиц,
+миграционную роль/default ACL и актуальный restore manifest. Новый readiness
+и housekeeping требуют миграцию перед переключением runtime даже при
+выключенном флаге. Старый runtime совместим с additive схемой; rollback не
+удаляет новые таблицы, challenge и сессии, сначала выключается OTP и
+завершаются активные запросы.
+
+Operations подписывает backup provenance по manifest, встроенному в её image,
+а не по фактическому migration ledger Identity. Обновлённый JSON в Git сам
+по себе не обновляет работающий worker. До Identity-only cutover согласовать
+доставку совместимого Operations artifact (от worker baseline — только manifest,
+без Notes/DDL) и fence Identity backup jobs на переходное окно. Сначала собрать
+images, повторно проверить quiet, выполнить bounded SIGTERM всех Operations 4,
+доказать физический stop, ноль runtime PG sessions и SHARE/0PROCESSING/no active
+restore. Quiet не считать атомарным drain. После успешного/неизвестного DDL не
+возобновлять старый manifest, сохранять recovery fence до проверки ledger.
+Не выпускать dumps с несовпадающим manifest и не ослаблять restore/provenance.
+
+Синхронизировать canonical production env local/server в обе стороны с
+побайтовой проверкой и обновить expected env hash. Флаг должен оставаться
+`false` до проверки провайдеров и trusted-IP boundary Gateway → Identity.
+Проверить доступность точных методов существующего `/api/v1/auth` prefix,
+общие PostgreSQL-лимиты и отсутствие обхода CAPTCHA по клиентскому признаку
+ошибки. Реальные email/SMS проверки требуют участия пользователя; synthetic
+PG/transport tests и readiness не доказывают доставку. Сохранить прежний
+парольный вход, регистрацию, OAuth и Telegram без изменения их контрактов.
+
 ### P1 — общий auth rate limiter до нескольких replicas
 
 До второй Identity/Gateway replica вынести process-local counters в общий

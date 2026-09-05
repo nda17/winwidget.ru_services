@@ -33,6 +33,8 @@ export class IdentityHealthService {
 	async readiness() {
 		try {
 			await this.prisma.$queryRaw`SELECT 1`;
+			await this.prisma
+				.$queryRaw`SELECT c.browser_token_hash, c.identity_verified_at, r.count FROM identity.login_otp_challenges c FULL JOIN identity.login_otp_rate_limits r ON false LIMIT 0`;
 			const identity = await this.prisma.serviceIdentity.findUnique({
 				where: { id: 'singleton' },
 				select: { serviceName: true, databaseId: true }

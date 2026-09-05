@@ -991,6 +991,25 @@ const reportingEnvironment = environmentOf('reporting-service');
 const widgetsEnvironment = environmentOf('widgets-service');
 const billingEnvironment = environmentOf('billing-api');
 const identityEnvironment = environmentOf('identity-api');
+const identityExample = parseExample('apps/identity/.env.example');
+assert(
+	rootExample.get('IDENTITY_LOGIN_OTP_ENABLED') === 'false' &&
+		identityExample.get('IDENTITY_LOGIN_OTP_ENABLED') === 'false',
+	'Identity login OTP must be disabled in both examples'
+);
+assert(
+	['true', 'false'].includes(identityEnvironment.IDENTITY_LOGIN_OTP_ENABLED) &&
+		identityEnvironment.IDENTITY_LOGIN_OTP_ENABLED ===
+			expected('IDENTITY_LOGIN_OTP_ENABLED'),
+	'Identity API login OTP flag is missing or drifted'
+);
+for (const [name, service] of Object.entries(services)) {
+	if (name === 'identity-api') continue;
+	assert(
+		!('IDENTITY_LOGIN_OTP_ENABLED' in (service.environment ?? {})),
+		name + ' must not receive the Identity API login OTP flag'
+	);
+}
 const platformEnvironment = environmentOf('platform-api');
 const supportEnvironment = environmentOf('support-api');
 const operationsApi = requireService('operations-api');

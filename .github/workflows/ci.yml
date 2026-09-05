@@ -378,6 +378,37 @@ jobs:
         run: pnpm --dir "apps/${{ matrix.app }}" run build
       - name: Run service integration
         run: pnpm --dir "apps/${{ matrix.app }}" run test:integration
+      - name: Prepare isolated least-privilege login OTP database
+        if: matrix.app == 'identity'
+        env:
+          POSTGRES_CONTAINER_ID: ${{ job.services.postgres.id }}
+          IDENTITY_DATABASE_URL: postgresql://identity_otp_migration_ci:identity_otp_migration_ci@127.0.0.1:5432/winwidget_identity_test_otp_ci?schema=identity
+        run: |
+          docker exec -i "$POSTGRES_CONTAINER_ID" psql -U services_ci -d postgres -v ON_ERROR_STOP=1 <<'SQL'
+          CREATE ROLE identity_otp_migration_ci LOGIN PASSWORD 'identity_otp_migration_ci' NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
+          CREATE ROLE identity_otp_runtime_ci LOGIN PASSWORD 'identity_otp_runtime_ci' NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
+          CREATE DATABASE winwidget_identity_test_otp_ci OWNER services_ci;
+          REVOKE ALL ON DATABASE winwidget_identity_test_otp_ci FROM PUBLIC;
+          GRANT CONNECT ON DATABASE winwidget_identity_test_otp_ci TO identity_otp_migration_ci, identity_otp_runtime_ci;
+          SQL
+          docker exec -i "$POSTGRES_CONTAINER_ID" psql -U services_ci -d winwidget_identity_test_otp_ci -v ON_ERROR_STOP=1 <<'SQL'
+          REVOKE ALL ON SCHEMA public FROM PUBLIC;
+          CREATE SCHEMA identity AUTHORIZATION identity_otp_migration_ci;
+          SQL
+          pnpm --dir apps/identity run prisma:migrate:deploy
+          docker exec -i "$POSTGRES_CONTAINER_ID" psql -U services_ci -d winwidget_identity_test_otp_ci -v ON_ERROR_STOP=1 <<'SQL'
+          GRANT USAGE ON SCHEMA identity TO identity_otp_runtime_ci;
+          GRANT SELECT ON identity.users, identity.auth_identities, identity.telegram_notification_channels TO identity_otp_runtime_ci;
+          GRANT UPDATE (id) ON identity.users, identity.auth_identities TO identity_otp_runtime_ci;
+          GRANT SELECT, INSERT ON identity.user_sessions TO identity_otp_runtime_ci;
+          GRANT SELECT, INSERT, UPDATE, DELETE ON identity.login_otp_challenges, identity.login_otp_rate_limits TO identity_otp_runtime_ci;
+          SQL
+      - name: Prove login OTP concurrency and durable quotas on PostgreSQL 18
+        if: matrix.app == 'identity'
+        env:
+          IDENTITY_TEST_DATABASE_URL: postgresql://identity_otp_runtime_ci:identity_otp_runtime_ci@127.0.0.1:5432/winwidget_identity_test_otp_ci?schema=identity
+          IDENTITY_TEST_MIGRATION_DATABASE_URL: postgresql://identity_otp_migration_ci:identity_otp_migration_ci@127.0.0.1:5432/winwidget_identity_test_otp_ci?schema=identity
+        run: node apps/identity/test/integration/login-otp-postgres18.integration.mjs
 
   production-image:
     name: Production image / ${{ matrix.app }}

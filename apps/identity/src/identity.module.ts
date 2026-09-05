@@ -13,6 +13,8 @@ import { IdentityAuthGuard } from './auth/auth.guard';
 import { AuthService } from './auth/auth.service';
 import { RecaptchaGuard } from './auth/recaptcha.guard';
 import { RefreshTokenService } from './auth/refresh-token.service';
+import { LoginOtpController } from './auth/login-otp.controller';
+import { LoginOtpService } from './auth/login-otp.service';
 import { IdentityEventsService } from './events/identity-events.service';
 import { IdentityHealthController } from './health/identity-health.controller';
 import { IdentityHealthService } from './health/identity-health.service';
@@ -51,6 +53,7 @@ const API_CONTROLLERS =
 	PROCESS_ROLE === 'api'
 		? [
 				AuthController,
+				LoginOtpController,
 				AuthSettingsController,
 				OAuthController,
 				UsersController,
@@ -71,6 +74,7 @@ const API_PROVIDERS =
 				AuthRateLimitGuard,
 				AuthSettingsService,
 				AuthService,
+				LoginOtpService,
 				IdentityAuthGuard,
 				IdentityInternalGuard,
 				IdentityInternalService,
