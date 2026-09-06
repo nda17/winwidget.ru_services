@@ -566,7 +566,7 @@ test('tracked harness and CI wire the opt-in observer to real entrypoints, not m
 	);
 	assert.match(
 		harness,
-		/start\(spec\.label, process\.execPath, \[spec\.entrypoint\], spec\.env\)/
+		/await start\(\s*spec\.label,\s*process\.execPath,\s*\[spec\.entrypoint\],\s*spec\.env\s*\)/
 	);
 	assert.match(
 		harness,

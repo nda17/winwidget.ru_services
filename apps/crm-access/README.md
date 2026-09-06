@@ -384,6 +384,56 @@ application processes. Обычный SIGTERM проверяется отдел�
 Idle statistics не заменяют burst/экспорт, рост соседних сервисов, CPU p95,
 WAL/disk/connection измерения и проверки native/acceptance workflows.
 
+### Native Widgets → Inbox на настоящих API/worker/publisher images
+
+Отдельный неинтерактивный профиль из корня services:
+
+```bash
+WINCRM_LOCAL_STACK_ALLOW_MUTATION=true node apps/crm-access/test/integration/local-wincrm-stack.mjs --backend-only --activate-owner --with-widgets --verify-native-images --smoke-and-stop
+```
+
+Нужен только предварительно проверенный локальный `wincrm-mvp-postgres18`
+на loopback `55440` в `colima`; другие контейнеры запрещены. Профиль строит
+восемь образов из точного Git HEAD: Identity, Billing, Widgets, четыре CRM
+API и Gateway. Изменённые runtime inputs запрещены; ignored env не попадают
+в build context. Семь **логических** тестовых БД имеют собственные
+migration/runtime роли; миграции запускаются из образов. Этот профиль
+использует один общий тестовый PostgreSQL с trust authentication и поэтому
+не заменяет отдельную проверку четырёх production-shaped PostgreSQL.
+
+Бизнес-команды выполняются только HTTP-запросами к настоящим образам в
+production-mode. Отдельно запускаются четыре Intake widget-control/transfer
+worker/publisher и Widgets publisher; RabbitMQ имеет пять независимых
+scoped principals, confirm/mandatory и собственные durable очереди.
+Prisma на хосте используется для synthetic fixtures и наблюдения, не для
+подмены worker/processor/publisher. Тестовая EASY подписка не является оплатой.
+
+Сценарии: шесть явных подключений и публичных заявок, immutable snapshots
+и чтение Inbox, повтор событий без дублей, обязательный возврат unroutable
+сообщения и восстановление Outbox, отключение/повторный запуск RabbitMQ,
+SIGKILL точного consumer во время PROCESSING с последующим CAS/lease recovery,
+реальные интервалы retry 5/30/120 секунд при недоступном Widgets API,
+исчерпание retry в DLQ и versioned HTTP-retry через новый transactional
+Outbox, replay и отказ устаревшей версии. Короткая синтетическая подписка
+действует восемь минут: тест дожидается её естественного окончания,
+не изменяя часы, первоначальный deadline или immutable snapshots.
+Проверяются явное отключение источника, expiry fence ожидающей заявки
+и чтение всех шести ранее принятых snapshots при остановленном Widgets API.
+Возможный
+`CONTROL_CONFLICT` восстанавливается один раз штатной versioned HTTP-командой
+retry; другая блокировка либо повторный конфликт прекращают тест. Это не
+автоматический retry production runtime. Reporting представлен отдельной
+наблюдательной очередью, а не запущенным сервисом Reporting.
+
+Успешный private `native-images-result.json` создаётся атомарно **после**
+exit 0 всех процессов и удаления собственных контейнеров/анонимных volumes.
+Shared PostgreSQL, его тестовые БД/роли и images остаются для общей обязательной
+локальной очистки; чужие ресурсы не удаляются. `browser-fixture.json` не
+заменяет итоговый результат. Профиль не доказывает production capacity,
+пользовательский браузер, OWN/TEAM UI и внешние платежи.
+Контрактные unit-тесты в CI не запускают Docker workflow и не доказывают
+успех этих реальных fault-сценариев.
+
 Наличие этих контрактов не означает готовность paid production. Обязательны
 отдельные интеграционные проверки реальных сервисов/PG/Rabbit, rollout
 миграций и scoped ACL, private ingress и токенов, а также согласованные

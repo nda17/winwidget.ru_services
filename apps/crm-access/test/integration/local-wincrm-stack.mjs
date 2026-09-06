@@ -24,6 +24,11 @@ import {
 } from './local-native-widget-http.integration.mjs';
 import { teamHttpBrokerEnvironment } from './local-team-http.integration.mjs';
 import {
+	NativeImageRuntime,
+	NATIVE_IMAGE_ROLES,
+	nativeImageArguments
+} from './local-native-images.mjs';
+import {
 	BROWSER_TEAM_PERSONAS,
 	BROWSER_TEAM_ROLES,
 	assertBrowserTeamReadiness,
@@ -92,6 +97,7 @@ if (process.argv[2] === '--refresh-frontends') {
 }
 
 const args = new Set(process.argv.slice(2));
+const withNativeImages = nativeImageArguments(process.argv.slice(2));
 if (args.has('--help')) {
 	console.log(`Usage: WINCRM_LOCAL_STACK_ALLOW_MUTATION=true node apps/crm-access/test/integration/local-wincrm-stack.mjs [--backend-only] [--activate-owner] [--with-widgets] [--verify-native-widget-http | --verify-native-widget-http-all] [--verify-domain] [--verify-billing] [--verify-billing-http] [--verify-acceptance-http] [--verify-team-http] [--smoke-and-stop] | --browser-team
 
@@ -115,6 +121,11 @@ It additionally proves public Quiz submit -> real Widgets Outbox publisher -> Ra
 --verify-native-widget-http-all preserves that profile and adds five synthetic widgets,
 proving the same path for QUIZ/WHEEL/CALLBACK/TIMER/STOP_OFFER/CALCULATOR in sequence.
 Both profiles use built dist classes, not release images; Reporting is a test sink only.
+--verify-native-images is a separate profile with exactly --backend-only --activate-owner
+--with-widgets --smoke-and-stop. It runs eight immutable API images and five native
+background roles in production mode, applies image-owned migrations to seven fresh
+logical databases on the local test PostgreSQL, and proves all six Widgets via real HTTP/RabbitMQ.
+It does not prove browser UX, external providers or full twelve-role/four-PostgreSQL capacity.
 --verify-domain runs Customers, Intake and Sales PostgreSQL 18 integration scenarios.
 It includes the service-owned native Widget transfer PostgreSQL gate.
 --verify-billing proves Billing commerce transactions and Access admission fences on PostgreSQL 18.
@@ -154,6 +165,7 @@ for (const arg of args) {
 			'--with-widgets',
 			'--verify-native-widget-http',
 			'--verify-native-widget-http-all',
+			'--verify-native-images',
 			'--verify-domain',
 			'--verify-billing',
 			'--verify-billing-http',
@@ -166,9 +178,11 @@ for (const arg of args) {
 	);
 }
 const withWidgets = args.has('--with-widgets');
-const withAllNativeWidgets = args.has('--verify-native-widget-http-all');
+const withAllNativeWidgets =
+	args.has('--verify-native-widget-http-all') || withNativeImages;
 const withNativeWidgetHttp =
-	args.has('--verify-native-widget-http') || withAllNativeWidgets;
+	args.has('--verify-native-widget-http') ||
+	args.has('--verify-native-widget-http-all');
 assert.ok(
 	!withAllNativeWidgets || !args.has('--verify-native-widget-http'),
 	'Choose one native Widget HTTP profile'
@@ -217,6 +231,8 @@ const container = 'wincrm-mvp-postgres18';
 const bootstrapRole = 'crm_bootstrap_ci';
 const secrets = new Set();
 const children = new Map();
+let nativeImages;
+let nativeImageEvidence;
 const frontendSnapshots = {};
 let frontendProxy;
 let browserTeamObserver;
@@ -384,7 +400,7 @@ function sql(database, query, role = bootstrapRole) {
 }
 
 function databaseUrl(service, role) {
-	return `postgresql://${role}@127.0.0.1:55440/${service.database}?schema=${service.schema}&sslmode=disable${withBrowserTeam ? '&connection_limit=3' : ''}`;
+	return `postgresql://${role}@127.0.0.1:55440/${service.database}?schema=${service.schema}&sslmode=disable${withBrowserTeam ? '&connection_limit=3' : withNativeImages ? '&connection_limit=1' : ''}`;
 }
 
 async function assertFreePort(port) {
@@ -534,6 +550,10 @@ REVOKE ALL ON ALL TABLES IN SCHEMA foreign_service_guard FROM PUBLIC;
 		'node_modules/prisma/build/index.js'
 	);
 	for (const command of ['generate', 'migrate']) {
+		if (withNativeImages && command === 'migrate') {
+			await nativeImages.migrate(service, env[service.databaseVariable]);
+			continue;
+		}
 		await execute(
 			process.execPath,
 			[
@@ -639,7 +659,9 @@ async function grantRuntime(service) {
 			],
 			INSERT: [
 				'quizzes',
-				...(withNativeWidgetHttp ? ['quiz_leads'] : []),
+				...(withNativeWidgetHttp || withNativeImages
+					? ['quiz_leads']
+					: []),
 				...(withAllNativeWidgets
 					? [
 							'widgets',
@@ -655,7 +677,9 @@ async function grantRuntime(service) {
 						]
 					: [])
 			],
-			...(withNativeWidgetHttp ? { UPDATE: ['outbox_events'] } : {}),
+			...(withNativeWidgetHttp || withNativeImages
+				? { UPDATE: ['outbox_events'] }
+				: {}),
 			'SELECT, INSERT': [
 				'owner_projections',
 				'entitlement_projections',
@@ -668,7 +692,7 @@ async function grantRuntime(service) {
 				'usage_counters',
 				'wincrm_connectors',
 				'heartbeats',
-				...(withNativeWidgetHttp
+				...(withNativeWidgetHttp || withNativeImages
 					? ['aggregate_versions', 'source_sequences']
 					: [])
 			]
@@ -1152,7 +1176,9 @@ function environment() {
 				}
 			: {}),
 		CRM_INTAKE_WIDGETS_ENABLED: String(withWidgets),
-		CRM_INTAKE_WIDGET_TRANSFERS_ENABLED: String(withNativeWidgetHttp),
+		CRM_INTAKE_WIDGET_TRANSFERS_ENABLED: String(
+			withNativeWidgetHttp || withNativeImages
+		),
 		...(withWidgets
 			? {
 					WIDGETS_PROCESS_ROLE: 'api',
@@ -1545,7 +1571,11 @@ async function seedWidgets(account) {
 	try {
 		const now = new Date(),
 			startsAt = new Date(now.getTime() - 60000),
-			expiresAt = new Date(now.getTime() + 30 * 86400000);
+			// Native image fault proof observes real wall-clock expiry. No clock
+			// overrides or mutations of immutable transfer/period evidence.
+			expiresAt = new Date(
+				now.getTime() + (withNativeImages ? 8 * 60000 : 30 * 86400000)
+			);
 		assert.equal(
 			await billingDb.subscription.count({
 				where: { userId: account.userId }
@@ -1604,7 +1634,7 @@ async function seedWidgets(account) {
 					sourceUpdatedAt: subscription.updatedAt
 				}
 			});
-			if (withNativeWidgetHttp)
+			if (withNativeWidgetHttp || withNativeImages)
 				await tx.widgetUsageCounter.create({
 					data: {
 						userId: account.userId,
@@ -2027,7 +2057,18 @@ async function seedTeamFixtures(accounts, workspaceId) {
 	}
 }
 
-function start(label, command, commandArgs, env, cwd = stateDirectory) {
+async function start(
+	label,
+	command,
+	commandArgs,
+	env,
+	cwd = stateDirectory
+) {
+	if (withNativeImages) {
+		const port = label === 'api-gateway' ? 4100 : byApp[label].port;
+		await nativeImages.start(label, label, env, port);
+		return;
+	}
 	const child = spawn(command, commandArgs, {
 		cwd,
 		env: { ...safeEnvironment, ...env },
@@ -2361,6 +2402,18 @@ async function shutdown(exitCode = 0) {
 		process.exit(failure || !drained ? 1 : exitCode);
 	}
 	await frontendProxy?.close();
+	if (nativeImages) {
+		try {
+			await nativeImages.close();
+			if (exitCode === 0 && nativeImageEvidence)
+				await nativeImages.finish(nativeImageEvidence);
+		} catch {
+			exitCode = 1;
+			log(
+				'Native image cleanup incomplete; preserve owned resources for inspection'
+			);
+		}
+	}
 	for (const { child, exited } of children.values()) {
 		if (!exited && child.pid) {
 			try {
@@ -2414,10 +2467,22 @@ try {
 	const ports = [
 		4100,
 		...serviceDefinitions.map(service => service.port),
+		...(withNativeImages
+			? [5675, ...NATIVE_IMAGE_ROLES.map(role => role[3])]
+			: []),
 		...(withBrowserTeam ? BROWSER_TEAM_ROLES.map(role => role.port) : []),
 		...(args.has('--backend-only') ? [] : [3000, 3001, 3002, 3003, 3100])
 	];
 	for (const port of ports) await assertFreePort(port);
+	if (withNativeImages) {
+		nativeImages = new NativeImageRuntime({
+			servicesRoot,
+			stateDirectory,
+			runId,
+			log
+		});
+		await nativeImages.prepare();
+	}
 	for (const service of serviceDefinitions) await prepareDatabase(service);
 	if (args.has('--verify-billing')) await verifyBilling();
 	if (args.has('--verify-domain')) await verifyDomain();
@@ -2430,7 +2495,7 @@ try {
 		: null;
 	const common = environment();
 	for (const service of serviceDefinitions) {
-		start(
+		await start(
 			service.app,
 			process.execPath,
 			[join(service.root, 'dist/src/main.js')],
@@ -2486,7 +2551,7 @@ try {
 		authPolicy,
 		timeoutMs: 60000
 	}));
-	start(
+	await start(
 		'api-gateway',
 		process.execPath,
 		[join(gatewayRoot, 'dist/src/main.js')],
@@ -2527,7 +2592,12 @@ try {
 			)
 		});
 		for (const spec of specs) {
-			start(spec.label, process.execPath, [spec.entrypoint], spec.env);
+			await start(
+				spec.label,
+				process.execPath,
+				[spec.entrypoint],
+				spec.env
+			);
 			const url = `http://127.0.0.1:${spec.port}/health/ready`;
 			await waitForHttp(spec.label, url);
 			const response = await fetch(url, {
@@ -2601,7 +2671,7 @@ try {
 	// The all-six profile reuses one real login in process memory; it never
 	// bypasses or resets Identity's existing 10-login/IP/10-minute limit.
 	const nativeAuthSession = withAllNativeWidgets ? {} : undefined;
-	if (withWidgets) {
+	if (withWidgets && !withNativeImages) {
 		const fixtures = [
 			widgetsFixture,
 			...(widgetsFixture.additionalWidgets || [])
@@ -2663,6 +2733,33 @@ try {
 				: {})
 		};
 	}
+	if (withNativeImages) {
+		const { verifyNativeImages } =
+			await import('./local-native-images-workflow.mjs');
+		nativeImageEvidence = await verifyNativeImages({
+			runtime: nativeImages,
+			servicesRoot,
+			runId,
+			apiUrl: publicApi,
+			account: accounts.owner,
+			widgets: widgetsFixture,
+			widgetsDatabaseUrl: databaseUrl(
+				byApp.widgets,
+				byApp.widgets.runtimeRole
+			),
+			intakeDatabaseUrl: databaseUrl(
+				byApp['crm-intake'],
+				byApp['crm-intake'].runtimeRole
+			),
+			serviceEnvironment: app => ({
+				...ownedEnvironment(app, common),
+				[byApp[app].databaseVariable]: databaseUrl(
+					byApp[app],
+					byApp[app].runtimeRole
+				)
+			})
+		});
+	}
 	if (args.has('--verify-acceptance-http')) {
 		const { verifyAcceptanceHttp } =
 			await import('./local-acceptance-http.integration.mjs');
@@ -2679,7 +2776,7 @@ try {
 			registerSecret: value => secrets.add(value),
 			log
 		});
-	} else if (args.has('--activate-owner')) {
+	} else if (args.has('--activate-owner') && !withNativeImages) {
 		await seedTeamFixtures(accounts, accounts.owner.workspaceId);
 	}
 	if (!args.has('--backend-only')) {
@@ -2712,7 +2809,7 @@ try {
 			NEXT_PUBLIC_APP_URL: 'http://localhost:3001'
 		};
 		for (const spec of frontend.frontendProcesses(snapshot)) {
-			start(
+			await start(
 				spec.label,
 				process.execPath,
 				spec.args,
@@ -2747,6 +2844,7 @@ try {
 				widgets: widgetsFixture,
 				billingHttp: billingHttpEvidence,
 				teamHttp: teamHttpEvidence,
+				...(withNativeImages ? { nativeImages: nativeImageEvidence } : {}),
 				...(withBrowserTeam
 					? {
 							browserTeam: {
