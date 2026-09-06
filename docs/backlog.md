@@ -244,9 +244,12 @@ Compose обязательны CRM-only controller, проверка факти�
 provisioning scoped credentials/DB roles и measured memory/CPU caps.
 Shape validator не подтверждает capacity и не разрешает rollout. Routine
 backend controller проверяет контейнеры своего project `winwidget`, но
-RabbitMQ users — глобально: новые scoped CRM users сейчас заблокируют
-дальнейшие обычные релизы. Сначала обновить точный broker inventory contract,
-не ослабляя его до wildcard. До старта Access worker provisioner создаёт
+RabbitMQ users — глобально: перед первым provisioning выпустить controller
+с точным `CRM_RABBITMQ_CONTRACT=disabled|native-v1` и согласованно включить
+`native-v1` под общим deploy lock после создания восьми principals/ACL/bindings.
+На VPS этот переход ещё не проверен. Не ослаблять inventory до wildcard
+и не возвращать `disabled` при rollback runtime, пока существуют CRM users
+или события. До старта Access worker provisioner создаёт
 три основные team queues, три DLQ и точные event/manual-retry bindings;
 runtime с `CRM_ACCESS_RABBITMQ_ASSERT_TOPOLOGY=false` получает только read
 на основные очереди, без configure/write. Подтвердить этот контракт на
@@ -305,10 +308,6 @@ production-топологии с её точными образами и scoped 
 
 ### P0 — безопасный rollout отложенных retry новых CRM workflows
 
-Для Intake widget-control доказать локальные outage, restart и повторную
-доставку после commit/ack на точных образах с database-delayed retry,
-включая автоматическое восстановление шести независимых команд после
-конкуренции PostgreSQL, без ручной замены исходного commandId.
 Для team, widget-control и acceptance закрепить проверку целевой
 production-топологии и recovery.
 Если в целевой среде работала старая ревизия с classic TTL -> DLX, сначала

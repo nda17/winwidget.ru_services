@@ -593,21 +593,26 @@ Shared PostgreSQL, его тестовые БД/роли и images остают�
 Контрактные unit-тесты в CI не запускают Docker workflow и не доказывают
 успех этих реальных fault-сценариев.
 
-Проверка 06.09.2026: полный профиль завершился с exit 0 на runtime images
-`c0cd61fe71205ec0ead53e86ed542113c92b9871`, драйвер проверок —
-`4580d5b8951ffd344e68adc8627917ff6ae9f52f`. Этот коммит меняет только
-проверочные драйверы и README, не runtime inputs. Итог: восемь API images,
-семь фоновых процессов, шесть типов native-заявок, OWN/TEAM/ALL и
-межпространственная изоляция, семь завершённых acceptance workflows без
-дублей после повторных HTTP-команд и событий. Подтверждены естественное
-окончание Widgets-подписки, отзыв источника, broker outage, crashed claim,
-mandatory return, DLQ/manual retry и delayed acceptance retry с перезапуском
-брокера и процессов. После восстановления Customers два workflow потребовали
-второго штатного повтора через пять минут; это не доказательство capacity/SLO
-или причины временной недоступности. Browser, invitation admission, внешние
-платежи и production capacity этим прогоном не проверены. После результата
-удалены все синтетические БД/роли и локальные тестовые Docker-ресурсы,
-проверен нулевой остаток images/build cache и остановлена Colima.
+Проверка 06.09.2026 `00250ca2f4`: полный профиль завершился с exit 0,
+runtime images и драйвер — точная ревизия
+`5efcaa5037ddd3c5b4bcb83db4a62f52daef634e`. Все шесть исходных команд
+подключения восстановились автоматически, без нового ручного commandId:
+четыре после первого delayed retry и две после второго. Восемь retry
+publications сохранили исходные payload/eventId и deadlines; replay всех
+шести исходных и применённых retry событий не изменил snapshots.
+Итоговый атомарный отчёт подтвердил восемь API images, семь фоновых
+процессов, шесть типов native-заявок, OWN/TEAM/ALL и межпространственную
+изоляцию, семь завершённых acceptance workflows без дублей после повторных
+HTTP-команд и событий. Подтверждены естественное окончание Widgets-подписки,
+отзыв источника, broker outage, crashed claim, mandatory return,
+transfer DLQ/manual retry и delayed acceptance retry с перезапуском брокера
+и процессов. Browser, invitation admission, внешние платежи и production
+capacity этим прогоном не проверены: семь логических БД работают на одном
+локальном PostgreSQL, а не на четырёх production instances.
+После результата отдельно удалены семь синтетических БД, 14 ролей,
+тестовый PostgreSQL/volume, 23 локальных образа и build cache;
+проверены нулевые остатки контейнеров/images/cache/осиротевших anonymous
+volumes, Colima остановлена. Production этим прогоном не изменялась.
 
 Наличие этих контрактов не означает готовность paid production. Обязательны
 отдельные интеграционные проверки реальных сервисов/PG/Rabbit, rollout
