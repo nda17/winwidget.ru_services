@@ -27,6 +27,7 @@ export class CrmTeamRabbitService
 	private readonly logger = new Logger(CrmTeamRabbitService.name);
 	private connection: AmqpConnectionManager | null = null;
 	private channel: ChannelWrapper | null = null;
+	private assertTopologyEnabled = true;
 	private readonly deliveries = new WeakMap<
 		ConsumeMessage,
 		ConfirmChannel
@@ -46,6 +47,16 @@ export class CrmTeamRabbitService
 	) {}
 	async onModuleInit() {
 		if (!this.runtime.rabbitEnabled) return;
+		// Preserve existing local deployments; release workers explicitly opt out
+		// and receive read-only access to controller-provisioned consumer queues.
+		const assertTopology =
+			this.config.get<string>('CRM_ACCESS_RABBITMQ_ASSERT_TOPOLOGY') ??
+			'true';
+		if (!['true', 'false'].includes(assertTopology))
+			throw new Error(
+				'CRM_ACCESS_RABBITMQ_ASSERT_TOPOLOGY must be boolean'
+			);
+		this.assertTopologyEnabled = assertTopology === 'true';
 		const url = this.config.get<string>('RABBITMQ_URL')?.trim();
 		if (!url) throw new Error('RABBITMQ_URL is required');
 		const name = `winwidget-crm-access-${this.runtime.role}`;
@@ -164,6 +175,7 @@ export class CrmTeamRabbitService
 		this.connection = null;
 	}
 	private ensureTopology(channel: ConfirmChannel): Promise<void> {
+		if (!this.assertTopologyEnabled) return Promise.resolve();
 		const existing = this.topologies.get(channel);
 		if (existing) return existing;
 		// ChannelWrapper runs registered setups concurrently, including on reconnect.

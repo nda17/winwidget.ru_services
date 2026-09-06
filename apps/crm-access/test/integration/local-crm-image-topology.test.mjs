@@ -7,8 +7,108 @@ import {
 	databaseUrl,
 	assertOwnedContainer,
 	assertQuietQueues,
-	serviceTokens
+	serviceTokens,
+	accessTeamBrokerPermissions,
+	provisionAccessTeamTopology
 } from './local-crm-image-topology.mjs';
+
+test('Access worker only reads its three main queues; publisher cannot consume or configure', () => {
+	const queues = ['provision', 'acceptance', 'admission'].map(
+		consumer => 'winwidget.crm-access.team.' + consumer
+	);
+	const exchanges = ['events', 'manual-retry', 'dead-letter'].map(
+		suffix => 'winwidget.' + suffix
+	);
+	const resources = [
+		...queues,
+		...queues.map(queue => queue + '.dead-letter'),
+		...queues.map(queue => queue + '.retry.1'),
+		...exchanges,
+		'winwidget.crm-intake.acceptance.v1',
+		'winwidget.retry',
+		'foreign'
+	];
+	for (const role of ['worker', 'outbox-publisher']) {
+		const [configure, write, read] = accessTeamBrokerPermissions(role).map(
+			pattern => new RegExp(pattern)
+		);
+		for (const resource of resources) {
+			assert.equal(configure.test(resource), false);
+			assert.equal(
+				write.test(resource),
+				role === 'outbox-publisher' && exchanges.includes(resource)
+			);
+			assert.equal(
+				read.test(resource),
+				role === 'worker' && queues.includes(resource)
+			);
+		}
+	}
+	for (const role of ['api', 'all', 'provisioner', 'identity'])
+		assert.throws(() => accessTeamBrokerPermissions(role));
+});
+
+test('provisioner creates exactly six durable Access queues and independent direct retry bindings', async () => {
+	const calls = [];
+	await provisionAccessTeamTopology(
+		Object.fromEntries(
+			['assertExchange', 'assertQueue', 'bindQueue'].map(method => [
+				method,
+				async (...args) => calls.push([method, ...args])
+			])
+		)
+	);
+	assert.deepEqual(
+		calls.filter(([method]) => method === 'assertExchange'),
+		[
+			['assertExchange', 'winwidget.events', 'topic', { durable: true }],
+			[
+				'assertExchange',
+				'winwidget.dead-letter',
+				'topic',
+				{ durable: true }
+			],
+			[
+				'assertExchange',
+				'winwidget.manual-retry',
+				'direct',
+				{ durable: true }
+			]
+		]
+	);
+	const queues = calls.filter(([method]) => method === 'assertQueue');
+	const bindings = calls.filter(([method]) => method === 'bindQueue');
+	assert.equal(queues.length, 6);
+	assert.equal(bindings.length, 9);
+	for (const [consumer, event] of [
+		['provision', 'crm.access.invitation-provision.v1'],
+		['acceptance', 'identity.wincrm.invitation-accepted.v1'],
+		['admission', 'crm.access.admission-wake.v1']
+	]) {
+		const queue = 'winwidget.crm-access.team.' + consumer;
+		const route = 'crm-access.team.' + consumer;
+		assert.deepEqual(
+			queues.filter(([, name]) => name.startsWith(queue)),
+			[
+				['assertQueue', queue, { durable: true }],
+				['assertQueue', queue + '.dead-letter', { durable: true }]
+			]
+		);
+		assert.deepEqual(
+			bindings.filter(([, name]) => name.startsWith(queue)),
+			[
+				['bindQueue', queue, 'winwidget.events', event],
+				['bindQueue', queue, 'winwidget.manual-retry', route],
+				[
+					'bindQueue',
+					queue + '.dead-letter',
+					'winwidget.dead-letter',
+					route + '.dead-letter'
+				]
+			]
+		);
+	}
+});
 
 test('four service databases and twelve independent roles retain a 40-connection runtime budget', () => {
 	assert.equal(CRM_IMAGE_SERVICES.length, 4);

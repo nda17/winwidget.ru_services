@@ -246,6 +246,16 @@ worker/publisher не регистрируют бизнес-контроллер
 RabbitMQ. Для фоновых ролей обязательны `RABBITMQ_URL` и точное
 `RABBITMQ_CONNECTION_NAME=winwidget-crm-access-<role>`.
 
+`CRM_ACCESS_RABBITMQ_ASSERT_TOPOLOGY=false` отключает declarations/bindings
+worker, в том числе при reconnect. Он получает только read на три основные
+очереди, без configure/write или доступа к DLQ; отсутствие очереди блокирует
+готовность, а не создаёт её с расширенными правами. Publisher не объявляет
+топологию при любом значении флага. Значения кроме `true|false` отклоняются
+до подключения к брокеру. Для совместимости отсутствие флага означает `true`
+(как прежние локальные запуски); отдельный CRM Compose требует ровно `false`.
+До запуска controller должен создать exchanges, шесть durable queues и
+точные bindings, приведённые ниже. Флаг не заменяет broker ACL.
+
 Три независимых consumer очереди: `winwidget.crm-access.team.provision`,
 `.acceptance`, `.admission`; routing keys соответственно
 `crm.access.invitation-provision.v1`, `identity.wincrm.invitation-accepted.v1`,
@@ -404,8 +414,9 @@ loopback HTTP и пулы 5/4/1 (API/worker/publisher), всего 40 подкл
 Pairwise credentials не передаются сервисам, которым они не принадлежат.
 
 Отдельный тестовый RabbitMQ имеет восемь независимых runtime principals:
-publishers не получают consumer/DDL права, Intake workers — publish/DDL права.
-Access worker сохраняет существующий ограниченный topology contract.
+publishers не получают consumer/DDL права, все workers — publish/DDL права.
+Топология Access и Intake создаётся отдельным provisioner до старта ролей;
+Access worker имеет read только на три основные очереди, не на DLQ/exchanges.
 Брокер намеренно выключен при запуске процессов: восемь background roles
 должны завершиться с ошибкой и автоматически перезапуститься. После запуска
 брокера проверяются health всех ролей, image/revision, 12 пустых очередей,

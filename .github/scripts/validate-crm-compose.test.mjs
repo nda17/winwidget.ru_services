@@ -382,6 +382,17 @@ reject('no automatic Intake topology provisioning', value => {
 		'crm-intake-worker'
 	].environment.CRM_INTAKE_RABBITMQ_ASSERT_TOPOLOGY = 'true';
 });
+for (const role of ['api', 'worker', 'outbox-publisher']) {
+	reject(`no automatic Access topology provisioning in ${role}`, value => {
+		value.services[
+			'crm-access-' + role
+		].environment.CRM_ACCESS_RABBITMQ_ASSERT_TOPOLOGY = 'true';
+	});
+	reject(`no absent Access topology policy in ${role}`, value => {
+		delete value.services['crm-access-' + role].environment
+			.CRM_ACCESS_RABBITMQ_ASSERT_TOPOLOGY;
+	});
+}
 reject('no new transfers without the managed connector', value => {
 	value.services[
 		'crm-intake-api'

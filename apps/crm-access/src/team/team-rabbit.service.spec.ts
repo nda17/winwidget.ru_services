@@ -18,8 +18,13 @@ const deferred = () => {
 	return { promise, resolve, reject };
 };
 
-const rawChannel = (firstDeclaration: Promise<void>) => {
-	const queues = new Set<string>();
+const rawChannel = (
+	firstDeclaration: Promise<void>,
+	preprovisioned = false
+) => {
+	const queues = new Set<string>(
+		preprovisioned ? TEAM_CONSUMERS.map(teamQueue) : []
+	);
 	const channel = {
 		on: jest.fn(),
 		assertExchange: jest
@@ -40,7 +45,7 @@ const rawChannel = (firstDeclaration: Promise<void>) => {
 	return { ...channel, raw: channel as unknown as ConfirmChannel };
 };
 
-async function fixture() {
+async function fixture(assertTopology?: string) {
 	const setups: Setup[] = [];
 	const listeners = new Map<string, () => void>();
 	const wrapper = {
@@ -70,7 +75,10 @@ async function fixture() {
 	const service = new CrmTeamRabbitService(
 		new ConfigService({
 			RABBITMQ_URL: 'amqp://synthetic.invalid/test',
-			RABBITMQ_CONNECTION_NAME: 'winwidget-crm-access-worker'
+			RABBITMQ_CONNECTION_NAME: 'winwidget-crm-access-worker',
+			...(assertTopology !== undefined
+				? { CRM_ACCESS_RABBITMQ_ASSERT_TOPOLOGY: assertTopology }
+				: {})
 		}),
 		{ rabbitEnabled: true, workerEnabled: true, role: 'worker' } as never
 	);
@@ -83,6 +91,67 @@ async function fixture() {
 }
 
 describe('CRM team channel topology lifecycle', () => {
+	it.each(['', 'yes', 'TRUE', ' false ', '0', '1'])(
+		'rejects invalid topology flag %j before opening a broker connection',
+		async value => {
+			jest.mocked(connect).mockClear();
+			await expect(fixture(value)).rejects.toThrow(
+				'CRM_ACCESS_RABBITMQ_ASSERT_TOPOLOGY must be boolean'
+			);
+			expect(connect).not.toHaveBeenCalled();
+		}
+	);
+
+	it.each([undefined, 'true'])(
+		'preserves explicit and default local topology provisioning (%s)',
+		async value => {
+			const { service, setups } = await fixture(value);
+			const channel = rawChannel(Promise.resolve());
+			await Promise.all(setups.map(setup => setup(channel.raw)));
+			expect(channel.assertExchange).toHaveBeenCalledTimes(3);
+			expect(channel.assertQueue).toHaveBeenCalledTimes(6);
+			expect(service.isReady()).toBe(true);
+			await service.onApplicationShutdown();
+		}
+	);
+
+	it('consumes pre-provisioned queues without configure/write operations, including reconnect', async () => {
+		const { service, setups, listeners } = await fixture('false');
+		for (let index = 0; index < 2; index += 1) {
+			if (index > 0) listeners.get('disconnect')!();
+			expect(service.isReady()).toBe(false);
+			const channel = rawChannel(Promise.resolve(), true);
+			await Promise.all(
+				[...setups].reverse().map(setup => setup(channel.raw))
+			);
+			expect(channel.assertExchange).not.toHaveBeenCalled();
+			expect(channel.assertQueue).not.toHaveBeenCalled();
+			expect(channel.bindQueue).not.toHaveBeenCalled();
+			expect(channel.prefetch).toHaveBeenCalledTimes(3);
+			expect(channel.prefetch).toHaveBeenCalledWith(4, false);
+			expect(
+				channel.consume.mock.calls.map(([queue]) => queue).sort()
+			).toEqual(TEAM_CONSUMERS.map(teamQueue).sort());
+			for (const call of channel.consume.mock.calls)
+				expect(call[2]).toEqual({ noAck: false });
+			expect(service.isReady()).toBe(true);
+		}
+		await service.onApplicationShutdown();
+	});
+
+	it('fails readiness closed when a pre-provisioned queue is missing and does not create it', async () => {
+		const { service, setups } = await fixture('false');
+		const channel = rawChannel(Promise.resolve());
+		await expect(
+			Promise.all(setups.map(setup => setup(channel.raw)))
+		).rejects.toThrow('QUEUE_NOT_FOUND');
+		expect(service.isReady()).toBe(false);
+		expect(channel.assertExchange).not.toHaveBeenCalled();
+		expect(channel.assertQueue).not.toHaveBeenCalled();
+		expect(channel.bindQueue).not.toHaveBeenCalled();
+		await service.onApplicationShutdown();
+	});
+
 	it('orders concurrent initial and consumer setups behind one topology declaration', async () => {
 		const { service, setups } = await fixture();
 		const barrier = deferred();

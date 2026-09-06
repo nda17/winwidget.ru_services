@@ -58,6 +58,43 @@ export const CRM_IMAGE_PROCESSES = Object.freeze(
 	)
 );
 
+export function accessTeamBrokerPermissions(role) {
+	assert.ok(['worker', 'outbox-publisher'].includes(role));
+	return role === 'worker'
+		? [
+				'^$',
+				'^$',
+				'^winwidget\\.crm-access\\.team\\.(provision|acceptance|admission)$'
+			]
+		: ['^$', '^winwidget\\.(events|dead-letter|manual-retry)$', '^$'];
+}
+
+export async function provisionAccessTeamTopology(channel) {
+	for (const [name, type] of [
+		['winwidget.events', 'topic'],
+		['winwidget.dead-letter', 'topic'],
+		['winwidget.manual-retry', 'direct']
+	])
+		await channel.assertExchange(name, type, { durable: true });
+	for (const [consumer, event] of [
+		['provision', 'crm.access.invitation-provision.v1'],
+		['acceptance', 'identity.wincrm.invitation-accepted.v1'],
+		['admission', 'crm.access.admission-wake.v1']
+	]) {
+		const queue = 'winwidget.crm-access.team.' + consumer;
+		const route = 'crm-access.team.' + consumer;
+		await channel.assertQueue(queue, { durable: true });
+		await channel.bindQueue(queue, 'winwidget.events', event);
+		await channel.bindQueue(queue, 'winwidget.manual-retry', route);
+		await channel.assertQueue(queue + '.dead-letter', { durable: true });
+		await channel.bindQueue(
+			queue + '.dead-letter',
+			'winwidget.dead-letter',
+			route + '.dead-letter'
+		);
+	}
+}
+
 const mutableTables = {
 	'crm-access': [
 		'crm_workspace_access',
@@ -726,9 +763,7 @@ async function runRuntime(context) {
 	);
 	try {
 		const channel = await provisioner.createChannel();
-		await channel.assertExchange('winwidget.events', 'topic', {
-			durable: true
-		});
+		await provisionAccessTeamTopology(channel);
 		for (const [prefix, queue, event] of [
 			[
 				'winwidget.crm-intake',
@@ -774,25 +809,16 @@ async function runRuntime(context) {
 		const password = randomBytes(24).toString('hex');
 		await ctl(['add_user', user, password]);
 		if (process.app === 'crm-access') {
-			const resources =
-				'^(winwidget\\.(events|dead-letter|manual-retry)|winwidget\\.crm-access\\.team\\.(provision|acceptance|admission)(\\.dead-letter)?)$';
 			const worker = process.role === 'worker';
-			const writes = worker
-				? '^winwidget\\.crm-access\\.team\\.(provision|acceptance|admission)(\\.dead-letter)?$'
-				: '^winwidget\\.(events|dead-letter|manual-retry)$';
 			await ctl([
 				'set_permissions',
 				'-p',
 				vhost,
 				user,
-				worker ? resources : '^$',
-				writes,
-				worker ? resources : '^$'
+				...accessTeamBrokerPermissions(process.role)
 			]);
 			const accessEvents =
 				'^crm\\.access\\.(invitation-provision|admission-wake)\\.v1$';
-			const allEvents =
-				'^(crm\\.access\\.(invitation-provision|admission-wake)\\.v1|identity\\.wincrm\\.invitation-accepted\\.v1)$';
 			const routes =
 				'^crm-access\\.team\\.(provision|acceptance|admission)\\.dead-letter$';
 			await ctl([
@@ -802,7 +828,7 @@ async function runRuntime(context) {
 				user,
 				'winwidget.events',
 				worker ? '^$' : accessEvents,
-				worker ? allEvents : '^$'
+				'^$'
 			]);
 			await ctl([
 				'set_topic_permissions',
@@ -811,7 +837,7 @@ async function runRuntime(context) {
 				user,
 				'winwidget.dead-letter',
 				worker ? '^$' : routes,
-				worker ? routes : '^$'
+				'^$'
 			]);
 		} else {
 			const kind = process.role.startsWith('widget-control')
@@ -894,6 +920,7 @@ async function runRuntime(context) {
 			CRM_SALES_INTERNAL_BASE_URL: 'http://127.0.0.1:5330',
 			WIDGETS_INTERNAL_BASE_URL: 'http://127.0.0.1:4700',
 			CRM_ACCESS_BILLING_ENABLED: 'true',
+			CRM_ACCESS_RABBITMQ_ASSERT_TOPOLOGY: 'false',
 			CRM_INTAKE_WIDGETS_ENABLED: 'true',
 			CRM_INTAKE_WIDGET_TRANSFERS_ENABLED: 'true',
 			CRM_INTAKE_RABBITMQ_ASSERT_TOPOLOGY: 'false',

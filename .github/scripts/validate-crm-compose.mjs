@@ -354,7 +354,11 @@ export function validateCrmCompose(config) {
 				...Object.keys(origins[app]),
 				...tokenNames[app],
 				...(app === 'crm-access'
-					? ['TRUST_PROXY', 'CRM_ACCESS_BILLING_ENABLED']
+					? [
+							'TRUST_PROXY',
+							'CRM_ACCESS_BILLING_ENABLED',
+							'CRM_ACCESS_RABBITMQ_ASSERT_TOPOLOGY'
+						]
 					: []),
 				...(app === 'crm-intake'
 					? [
@@ -418,6 +422,11 @@ export function validateCrmCompose(config) {
 				}
 			}
 			if (app === 'crm-access') {
+				same(
+					env.CRM_ACCESS_RABBITMQ_ASSERT_TOPOLOGY,
+					'false',
+					'CRM Access must use pre-provisioned topology'
+				);
 				same(env.TRUST_PROXY, 'loopback', 'Unexpected CRM trusted proxy');
 				check(
 					['false', 'true'].includes(env.CRM_ACCESS_BILLING_ENABLED),

@@ -76,6 +76,7 @@ x-crm-access-env: &crm-access-env
   CRM_ACCESS_CRM_INTAKE_TOKEN: ${CRM_ACCESS_CRM_INTAKE_TOKEN:?CRM_ACCESS_CRM_INTAKE_TOKEN is required}
   TRUST_PROXY: loopback
   CRM_ACCESS_BILLING_ENABLED: '${CRM_ACCESS_BILLING_ENABLED:-false}'
+  CRM_ACCESS_RABBITMQ_ASSERT_TOPOLOGY: 'false'
 
 x-crm-intake-env: &crm-intake-env
   NODE_ENV: production

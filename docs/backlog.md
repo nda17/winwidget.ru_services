@@ -245,7 +245,12 @@ Shape validator не подтверждает capacity и не разрешае�
 backend controller проверяет контейнеры своего project `winwidget`, но
 RabbitMQ users — глобально: новые scoped CRM users сейчас заблокируют
 дальнейшие обычные релизы. Сначала обновить точный broker inventory contract,
-не ослабляя его до wildcard. Для отдельного project `winwidget-crm` при первом
+не ослабляя его до wildcard. До старта Access worker provisioner создаёт
+три основные team queues, три DLQ и точные event/manual-retry bindings;
+runtime с `CRM_ACCESS_RABBITMQ_ASSERT_TOPOLOGY=false` получает только read
+на основные очереди, без configure/write. Подтвердить этот контракт на
+целевом брокере, включая reconnect и fail-closed при отсутствующей очереди.
+Для отдельного project `winwidget-crm` при первом
 rollout проверить сохранение контейнеров/images в целевой среде при routine
 cleanup, включая неиспользуемые CRM candidate/rollback tags, и общий deploy lock:
 cleanup сравнивает глобальные running IDs и image bindings, поэтому параллельный
