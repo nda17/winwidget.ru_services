@@ -7,7 +7,8 @@ import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 import {
 	CRM_SERVICES,
-	validateCrmCompose
+	validateCrmCompose,
+	validateCrmCompanionCompose
 } from './validate-crm-compose.mjs';
 import {
 	CRM_IMAGE_SERVICES,
@@ -121,6 +122,210 @@ assert.equal(
 );
 const config = JSON.parse(rendered.stdout);
 
+const companionSource = Object.fromEntries(
+	readFileSync(resolve(root, '.env.example'), 'utf8')
+		.split('\n')
+		.filter(line => /^[A-Z][A-Z0-9_]*=/.test(line))
+		.map(line => {
+			const offset = line.indexOf('=');
+			return [line.slice(0, offset), line.slice(offset + 1)];
+		})
+);
+const companion = (overrides = {}) => {
+	const source = { ...companionSource, ...overrides };
+	const result = spawnSync(
+		'docker',
+		[
+			'compose',
+			'--env-file',
+			'/dev/null',
+			'-f',
+			'deploy/docker-compose.prod.yml',
+			'--profile',
+			'*',
+			'config',
+			'--format',
+			'json'
+		],
+		{
+			cwd: root,
+			encoding: 'utf8',
+			timeout: 20000,
+			maxBuffer: 1024 * 1024,
+			env: {
+				PATH: process.env.PATH,
+				HOME: process.env.HOME,
+				COMPOSE_DISABLE_ENV_FILE: 'true',
+				...source
+			}
+		}
+	);
+	assert.equal(
+		result.status,
+		0,
+		'Synthetic companion Compose must render; private details suppressed'
+	);
+	return { config: JSON.parse(result.stdout), source };
+};
+const activeCompanion = {
+	CRM_RABBITMQ_CONTRACT: 'mvp-v1',
+	BILLING_WINCRM_PAYMENTS_ENABLED: 'true',
+	BILLING_WINCRM_RECONCILIATION_ENABLED: 'true',
+	BILLING_CRM_ACCESS_COMMERCE_BASE_URL: 'http://127.0.0.1:5300',
+	BILLING_WINCRM_PROVIDER_RABBITMQ_URL:
+		'amqp://winwidget-billing-wincrm-provider-worker:' +
+		fixtureSecret('provider') +
+		'@127.0.0.1:5672/winwidget',
+	WIDGETS_WINCRM_CONNECTOR_ENABLED: 'true',
+	BILLING_WINCRM_WIDGETS_ELIGIBILITY_ENABLED: 'true',
+	WINCRM_INVITATION_EMAIL_ENABLED: 'true',
+	NOTIFICATION_DELIVERY_KINDS:
+		companionSource.NOTIFICATION_DELIVERY_KINDS +
+		',wincrm-invitation-email'
+};
+for (const key of [
+	'IDENTITY_CRM_ACCESS_TOKEN',
+	'BILLING_CRM_ACCESS_TOKEN',
+	'BILLING_CRM_ACCESS_COMMERCE_TOKEN',
+	'IDENTITY_NOTIFICATION_DELIVERY_TOKEN',
+	'WIDGETS_CRM_INTAKE_TOKEN',
+	'BILLING_WINCRM_WIDGETS_TOKEN',
+	'BILLING_WINCRM_CRM_INTAKE_TOKEN'
+])
+	activeCompanion[key] = fixtureSecret(key);
+
+test('existing services keep CRM default-off with exact process-scoped variables', () => {
+	const value = companion();
+	assert.deepEqual(
+		validateCrmCompanionCompose(value.config, value.source),
+		{
+			wiringVerified: true,
+			credentialsProvisioned: false,
+			releaseApproved: false
+		}
+	);
+	assert.equal(
+		value.config.services['billing-worker'].environment
+			.BILLING_WINCRM_PROVIDER_RABBITMQ_URL,
+		''
+	);
+	assert.equal(value.source.CRM_RABBITMQ_CONTRACT, 'disabled');
+});
+
+test('complete opt-in passes, and scheduler never receives the provider or reverse authority credentials', () => {
+	const value = companion(activeCompanion);
+	assert.equal(
+		validateCrmCompanionCompose(value.config, value.source).wiringVerified,
+		true
+	);
+	for (const name of [
+		'billing-api',
+		'billing-scheduler',
+		'billing-outbox-publisher'
+	]) {
+		assert.equal(
+			Object.hasOwn(
+				value.config.services[name].environment,
+				'BILLING_WINCRM_PROVIDER_RABBITMQ_URL'
+			),
+			false
+		);
+		assert.equal(
+			Object.hasOwn(
+				value.config.services[name].environment,
+				'BILLING_CRM_ACCESS_COMMERCE_TOKEN'
+			),
+			false
+		);
+	}
+	assert.equal(
+		value.config.services['billing-worker'].environment
+			.BILLING_WINCRM_PROVIDER_ASSERT_TOPOLOGY,
+		'false'
+	);
+	assert.deepEqual(
+		value.source.NOTIFICATION_DELIVERY_KINDS.split(',').slice(0, -1),
+		companionSource.NOTIFICATION_DELIVERY_KINDS.split(',')
+	);
+	const draining = companion({
+		...activeCompanion,
+		BILLING_WINCRM_PAYMENTS_ENABLED: 'false'
+	});
+	assert.equal(
+		validateCrmCompanionCompose(draining.config, draining.source)
+			.wiringVerified,
+		true
+	);
+});
+
+test('missing, drifted or leaked CRM settings are rejected for every process boundary', () => {
+	const value = companion(activeCompanion);
+	for (const [name, service] of Object.entries(value.config.services)) {
+		for (const key of Object.keys(service.environment ?? {}).filter(
+			key =>
+				/CRM/.test(key) || key === 'IDENTITY_NOTIFICATION_DELIVERY_TOKEN'
+		)) {
+			for (const missing of [true, false]) {
+				const changed = structuredClone(value.config);
+				if (missing) delete changed.services[name].environment[key];
+				else changed.services[name].environment[key] = 'incorrect';
+				assert.throws(() =>
+					validateCrmCompanionCompose(changed, value.source)
+				);
+			}
+		}
+		if (name === 'billing-worker') continue;
+		const changed = structuredClone(value.config);
+		changed.services[name].environment ??= {};
+		changed.services[
+			name
+		].environment.BILLING_WINCRM_PROVIDER_RABBITMQ_URL =
+			value.source.BILLING_WINCRM_PROVIDER_RABBITMQ_URL;
+		assert.throws(() =>
+			validateCrmCompanionCompose(changed, value.source)
+		);
+	}
+});
+
+test('activation is rejected without prerequisites, valid worker credentials or retained reconciliation', () => {
+	for (const invalid of [
+		{ CRM_RABBITMQ_CONTRACT: 'disabled' },
+		{ BILLING_WINCRM_RECONCILIATION_ENABLED: 'false' },
+		{
+			BILLING_WINCRM_PAYMENTS_ENABLED: 'false',
+			BILLING_WINCRM_RECONCILIATION_ENABLED: 'false'
+		},
+		{ BILLING_WINCRM_WIDGETS_ELIGIBILITY_ENABLED: 'false' },
+		{
+			NOTIFICATION_DELIVERY_KINDS:
+				companionSource.NOTIFICATION_DELIVERY_KINDS
+		},
+		{ IDENTITY_NOTIFICATION_DELIVERY_TOKEN: 'placeholder' },
+		{
+			BILLING_WINCRM_PROVIDER_RABBITMQ_URL:
+				activeCompanion.BILLING_WINCRM_PROVIDER_RABBITMQ_URL.replace(
+					'winwidget-billing-wincrm-provider-worker:',
+					'winwidget-billing-worker:'
+				)
+		},
+		{
+			BILLING_WINCRM_PROVIDER_RABBITMQ_URL:
+				activeCompanion.BILLING_WINCRM_PROVIDER_RABBITMQ_URL +
+				'?ignore=true'
+		},
+		{
+			WIDGETS_CRM_INTAKE_TOKEN:
+				activeCompanion.BILLING_WINCRM_WIDGETS_TOKEN
+		},
+		{ BILLING_CRM_ACCESS_COMMERCE_BASE_URL: 'http://api.winwidget.ru' }
+	]) {
+		const value = companion({ ...activeCompanion, ...invalid });
+		assert.throws(() =>
+			validateCrmCompanionCompose(value.config, value.source)
+		);
+	}
+});
+
 test('real Compose normalization validates twenty isolated CRM definitions without starting Docker', () => {
 	const report = validateCrmCompose(config);
 	assert.equal(report.runtimeProcesses, 12);
@@ -201,10 +406,19 @@ test('default CRM flags do not activate commerce or native Widgets', () => {
 			.CRM_INTAKE_WIDGET_TRANSFERS_ENABLED,
 		'false'
 	);
-	assert.ok(
-		!/crm[-_]/i.test(
-			readFileSync(resolve(root, 'deploy/docker-compose.prod.yml'), 'utf8')
-		)
+	// Existing services need opt-in CRM settings, not embedded CRM runtimes/DBs.
+	const ordinary = companion().config;
+	assert.equal(
+		Object.keys(ordinary.services).some(name => name.startsWith('crm-')),
+		false
+	);
+	assert.equal(
+		Object.keys(ordinary.volumes ?? {}).some(name => /crm/.test(name)),
+		false
+	);
+	assert.equal(
+		Object.keys(ordinary.networks ?? {}).some(name => /crm/.test(name)),
+		false
 	);
 });
 

@@ -6,6 +6,8 @@ jest.mock('../domain/wincrm-commerce.service', () => ({
 
 describe('WinCRM durable renewal scheduler', () => {
 	const originalFlag = process.env.BILLING_WINCRM_PAYMENTS_ENABLED;
+	const originalReconciliation =
+		process.env.BILLING_WINCRM_RECONCILIATION_ENABLED;
 	const originalBrokerUrl =
 		process.env.BILLING_WINCRM_PROVIDER_RABBITMQ_URL;
 	let scheduler: WincrmCommerceSchedulerService;
@@ -14,6 +16,7 @@ describe('WinCRM durable renewal scheduler', () => {
 		jest.useFakeTimers();
 		advanceRenewals.mockReset().mockResolvedValue(undefined);
 		delete process.env.BILLING_WINCRM_PAYMENTS_ENABLED;
+		delete process.env.BILLING_WINCRM_RECONCILIATION_ENABLED;
 		delete process.env.BILLING_WINCRM_PROVIDER_RABBITMQ_URL;
 		scheduler = new WincrmCommerceSchedulerService(
 			{ schedulerEnabled: true } as never,
@@ -27,6 +30,11 @@ describe('WinCRM durable renewal scheduler', () => {
 		if (originalFlag === undefined)
 			delete process.env.BILLING_WINCRM_PAYMENTS_ENABLED;
 		else process.env.BILLING_WINCRM_PAYMENTS_ENABLED = originalFlag;
+		if (originalReconciliation === undefined)
+			delete process.env.BILLING_WINCRM_RECONCILIATION_ENABLED;
+		else
+			process.env.BILLING_WINCRM_RECONCILIATION_ENABLED =
+				originalReconciliation;
 		if (originalBrokerUrl === undefined)
 			delete process.env.BILLING_WINCRM_PROVIDER_RABBITMQ_URL;
 		else
@@ -103,6 +111,28 @@ describe('WinCRM durable renewal scheduler', () => {
 			'sensitive-database-url'
 		);
 	});
+	it('reconciles already-paid periods with sales closed and no broker credential', async () => {
+		process.env.BILLING_WINCRM_PAYMENTS_ENABLED = 'false';
+		process.env.BILLING_WINCRM_RECONCILIATION_ENABLED = 'true';
+		expect(
+			process.env.BILLING_WINCRM_PROVIDER_RABBITMQ_URL
+		).toBeUndefined();
+		scheduler.onModuleInit();
+		await jest.advanceTimersByTimeAsync(60_000);
+		expect(advanceRenewals).toHaveBeenCalledTimes(2);
+		expect(scheduler.isReady()).toBe(true);
+	});
+	it.each(['yes', '1', 'on'])(
+		'rejects an invalid reconciliation switch (%s)',
+		value => {
+			process.env.BILLING_WINCRM_RECONCILIATION_ENABLED = value;
+			expect(() => scheduler.onModuleInit()).toThrow(
+				'must be true or false'
+			);
+			expect(advanceRenewals).not.toHaveBeenCalled();
+			expect(jest.getTimerCount()).toBe(0);
+		}
+	);
 	it('clears its timer and rejects new work after shutdown', async () => {
 		process.env.BILLING_WINCRM_PAYMENTS_ENABLED = 'true';
 		scheduler.onModuleInit();

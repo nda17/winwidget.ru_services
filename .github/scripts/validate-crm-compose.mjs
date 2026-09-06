@@ -233,6 +233,186 @@ function checkDatabaseUrl(value, schema, port, pool, migration) {
 	return url.password;
 }
 
+// Validate only the existing services' CRM environment wiring. This does not
+// validate private file provenance, deployed revisions or approve a rollout.
+export function validateCrmCompanionCompose(config, source) {
+	const targets = {
+		IDENTITY_CRM_ACCESS_TOKEN: ['identity-api'],
+		IDENTITY_NOTIFICATION_DELIVERY_TOKEN: [
+			'identity-api',
+			'notification-delivery-worker'
+		],
+		WINCRM_INVITATION_EMAIL_ENABLED: ['identity-api'],
+		BILLING_CRM_ACCESS_TOKEN: ['billing-api'],
+		BILLING_WINCRM_PAYMENTS_ENABLED: [
+			'billing-api',
+			'billing-worker',
+			'billing-scheduler'
+		],
+		BILLING_WINCRM_RECONCILIATION_ENABLED: [
+			'billing-worker',
+			'billing-scheduler'
+		],
+		BILLING_WINCRM_FRONTEND_ORIGIN: ['billing-api', 'billing-worker'],
+		BILLING_CRM_ACCESS_COMMERCE_BASE_URL: ['billing-worker'],
+		BILLING_CRM_ACCESS_COMMERCE_TOKEN: ['billing-worker'],
+		BILLING_WINCRM_PROVIDER_RABBITMQ_URL: ['billing-worker'],
+		BILLING_WINCRM_PROVIDER_ASSERT_TOPOLOGY: ['billing-worker'],
+		BILLING_WINCRM_WIDGETS_ELIGIBILITY_ENABLED: ['billing-api'],
+		BILLING_WINCRM_WIDGETS_TOKEN: ['billing-api', 'widgets-service'],
+		BILLING_WINCRM_CRM_INTAKE_TOKEN: ['billing-api'],
+		WIDGETS_WINCRM_CONNECTOR_ENABLED: ['widgets-service'],
+		WIDGETS_CRM_INTAKE_TOKEN: ['widgets-service'],
+		WIDGETS_WINCRM_HTTP_TIMEOUT_MS: ['widgets-service']
+	};
+	check(
+		config?.name === 'winwidget' && config.services && source,
+		'Invalid CRM companion inputs'
+	);
+	for (const [key, names] of Object.entries(targets)) {
+		check(
+			typeof source[key] === 'string',
+			'Missing canonical CRM companion setting'
+		);
+		for (const name of names)
+			same(
+				config.services[name]?.environment?.[key],
+				source[key],
+				'CRM companion environment differs'
+			);
+	}
+	for (const [name, service] of Object.entries(config.services))
+		for (const key of Object.keys(service.environment ?? {}))
+			if (
+				/CRM/.test(key) ||
+				key === 'IDENTITY_NOTIFICATION_DELIVERY_TOKEN'
+			)
+				check(
+					targets[key]?.includes(name),
+					'CRM setting escaped its process role'
+				);
+	for (const name of ['notification-delivery-worker', 'widgets-service']) {
+		const key =
+			name === 'widgets-service'
+				? 'BILLING_INTERNAL_BASE_URL'
+				: 'IDENTITY_INTERNAL_BASE_URL';
+		same(
+			config.services[name].environment[key],
+			source[key],
+			'CRM dependency origin differs'
+		);
+	}
+	same(
+		source.BILLING_WINCRM_PROVIDER_ASSERT_TOPOLOGY,
+		'false',
+		'Runtime cannot provision the CRM provider topology'
+	);
+	const enabled = key => {
+		check(
+			['false', 'true'].includes(source[key]),
+			'Invalid CRM companion switch'
+		);
+		return source[key] === 'true';
+	};
+	const payments = enabled('BILLING_WINCRM_PAYMENTS_ENABLED');
+	const reconciliation = enabled('BILLING_WINCRM_RECONCILIATION_ENABLED');
+	const brokerConfigured = Boolean(
+		source.BILLING_WINCRM_PROVIDER_RABBITMQ_URL
+	);
+	check(
+		!brokerConfigured || reconciliation,
+		'Provider drain requires credential-free scheduler reconciliation'
+	);
+	const widgets = enabled('WIDGETS_WINCRM_CONNECTOR_ENABLED');
+	const eligibility = enabled(
+		'BILLING_WINCRM_WIDGETS_ELIGIBILITY_ENABLED'
+	);
+	const email = enabled('WINCRM_INVITATION_EMAIL_ENABLED');
+	const kinds = source.NOTIFICATION_DELIVERY_KINDS?.split(',');
+	same(
+		config.services['notification-delivery-worker'].environment
+			.NOTIFICATION_DELIVERY_KINDS,
+		source.NOTIFICATION_DELIVERY_KINDS,
+		'Invitation reader set differs from canonical configuration'
+	);
+	check(
+		Array.isArray(kinds) && new Set(kinds).size === kinds.length,
+		'Invalid notification reader set'
+	);
+	const reader = kinds.includes('wincrm-invitation-email');
+	check(!email || reader, 'Invitation producer requires its reader');
+	check(
+		!widgets || eligibility,
+		'Widgets connector requires Billing eligibility'
+	);
+	check(
+		!payments || reconciliation,
+		'Paid CRM requires durable reconciliation after sales close'
+	);
+	check(
+		['disabled', 'mvp-v1'].includes(source.CRM_RABBITMQ_CONTRACT),
+		'Invalid CRM broker contract'
+	);
+	if (
+		payments ||
+		reconciliation ||
+		widgets ||
+		eligibility ||
+		email ||
+		reader
+	)
+		same(
+			source.CRM_RABBITMQ_CONTRACT,
+			'mvp-v1',
+			'CRM activation requires the full broker contract'
+		);
+	const secret = key =>
+		check(
+			strong(source[key]),
+			'CRM companion requires a separately provisioned secret'
+		);
+	if (payments || reconciliation) {
+		const url = parseUrl(source.BILLING_WINCRM_PROVIDER_RABBITMQ_URL);
+		check(
+			url.protocol === 'amqp:' &&
+				url.hostname === '127.0.0.1' &&
+				(url.port === '' || url.port === '5672') &&
+				url.pathname === '/winwidget' &&
+				url.username === 'winwidget-billing-wincrm-provider-worker' &&
+				strong(url.password) &&
+				!url.search &&
+				!url.hash,
+			'Billing requires its process-scoped local broker credential'
+		);
+	}
+	if (payments) {
+		same(
+			source.BILLING_CRM_ACCESS_COMMERCE_BASE_URL,
+			'http://127.0.0.1:5300',
+			'Billing payment authority origin differs'
+		);
+		secret('BILLING_CRM_ACCESS_COMMERCE_TOKEN');
+	}
+	if (widgets) secret('WIDGETS_CRM_INTAKE_TOKEN');
+	if (eligibility) {
+		secret('BILLING_WINCRM_WIDGETS_TOKEN');
+		secret('BILLING_WINCRM_CRM_INTAKE_TOKEN');
+	}
+	if (email || reader) secret('IDENTITY_NOTIFICATION_DELIVERY_TOKEN');
+	const activeTokens = Object.keys(targets)
+		.filter(key => key.endsWith('_TOKEN') && source[key])
+		.map(key => source[key]);
+	check(
+		new Set(activeTokens).size === activeTokens.length,
+		'CRM companion secrets must be pairwise distinct'
+	);
+	return {
+		wiringVerified: true,
+		credentialsProvisioned: false,
+		releaseApproved: false
+	};
+}
+
 export function validateCrmCompose(config) {
 	check(
 		config && typeof config === 'object',

@@ -19,9 +19,16 @@ export function wincrmPaymentsEnabled(): boolean {
 
 // Keep reconciliation alive after new payments have been switched off. Once
 // provisioned, the broker credential is retained until durable jobs are drained.
+// The scheduler receives the non-secret switch, never the worker's credential.
 export function wincrmProviderMessagingEnabled(): boolean {
+	const reconciliation = parseStrictBoolean(
+		process.env.BILLING_WINCRM_RECONCILIATION_ENABLED,
+		false,
+		'BILLING_WINCRM_RECONCILIATION_ENABLED'
+	);
 	return (
 		wincrmPaymentsEnabled() ||
+		reconciliation ||
 		Boolean(process.env.BILLING_WINCRM_PROVIDER_RABBITMQ_URL?.trim())
 	);
 }

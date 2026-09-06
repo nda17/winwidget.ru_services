@@ -1851,4 +1851,21 @@ assert(
 	'Operations image must pin and verify PostgreSQL client 18'
 );
 
-process.stdout.write('Production Compose apps-only contract is valid.\n');
+import('./validate-crm-compose.mjs')
+	.then(({ validateCrmCompanionCompose }) => {
+		validateCrmCompanionCompose(
+			config,
+			Object.fromEntries(
+				[...rootExample.keys()].map(key => [key, expected(key)])
+			)
+		);
+		process.stdout.write(
+			'Production Compose apps-only contract is valid.\n'
+		);
+	})
+	.catch(() => {
+		process.stderr.write(
+			'Production CRM companion wiring is invalid; private details suppressed.\n'
+		);
+		process.exitCode = 1;
+	});

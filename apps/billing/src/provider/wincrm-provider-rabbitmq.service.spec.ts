@@ -28,6 +28,7 @@ describe('WinCRM provider isolated broker', () => {
 	beforeEach(() => {
 		jest.clearAllMocks();
 		process.env.BILLING_WINCRM_PAYMENTS_ENABLED = 'true';
+		delete process.env.BILLING_WINCRM_RECONCILIATION_ENABLED;
 		process.env.BILLING_WINCRM_PROVIDER_RABBITMQ_URL =
 			'amqp://synthetic-user:synthetic-password@127.0.0.1:5673/isolated_ci';
 		process.env.BILLING_WINCRM_PROVIDER_ASSERT_TOPOLOGY = 'true';
@@ -71,6 +72,7 @@ describe('WinCRM provider isolated broker', () => {
 		jest.useRealTimers();
 		for (const key of [
 			'BILLING_WINCRM_PAYMENTS_ENABLED',
+			'BILLING_WINCRM_RECONCILIATION_ENABLED',
 			'BILLING_WINCRM_PROVIDER_RABBITMQ_URL',
 			'BILLING_WINCRM_PROVIDER_ASSERT_TOPOLOGY'
 		]) {
@@ -97,6 +99,16 @@ describe('WinCRM provider isolated broker', () => {
 		await service.consume(async () => undefined);
 		expect(service.isReady()).toBe(true);
 		await service.onApplicationShutdown();
+	});
+	it('does not accept an active reconciliation switch without a worker credential', async () => {
+		process.env.BILLING_WINCRM_PAYMENTS_ENABLED = 'false';
+		process.env.BILLING_WINCRM_RECONCILIATION_ENABLED = 'true';
+		delete process.env.BILLING_WINCRM_PROVIDER_RABBITMQ_URL;
+		const service = new WincrmProviderRabbitMqService(runtime);
+		await expect(service.onModuleInit()).rejects.toThrow(
+			'WinCRM provider RabbitMQ URL is required'
+		);
+		expect(mockConnect).not.toHaveBeenCalled();
 	});
 
 	it.each(['false', 'yes', '1', 'on'])(

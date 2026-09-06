@@ -267,12 +267,16 @@ Notification Delivery — opt-in reader `wincrm-invitation-email` с прежн�
 Billing publisher — provider-operation route и write на отдельный provider DLQ
 exchange. Новый Billing provider principal получает только read своей основной
 очереди; queue/DLQ/bindings создаёт provisioner, без TTL retry.
-В текущем production Compose ещё отсутствует явная передача ряда CRM variables
-существующим Identity/Billing/Notification Delivery. Перед cutover согласованно
-синхронизировать canonical/service env и process-scoped Compose: provider URL
-только Billing worker, private tokens только нужным caller/receiver, email flag
-только после готовности reader. Не считать локальный image harness, который
-передаёт env самостоятельно, доказательством этой production wiring.
+Перед применением подготовленного companion Compose согласованно
+синхронизировать canonical/service env и exact runtime revisions:
+provider URL только Billing worker, private tokens только нужным caller/receiver,
+email flag только после готовности reader. Перед платным release включить
+`BILLING_WINCRM_RECONCILIATION_ENABLED` у worker/scheduler и сохранять его
+после закрытия новых продаж, пока остаются durable операции или уже оплаченные
+отложенные периоды. Планировщик не получает broker credential. Отдельно
+подтвердить production-проверку `validateCrmCompanionCompose`, новые optional
+env defaults и отсутствие утечки секретов между процессами. Не считать
+локальный image harness или Compose shape доказательством фактической wiring.
 Для отдельного project `winwidget-crm` при первом
 rollout проверить сохранение контейнеров/images в целевой среде при routine
 cleanup, включая неиспользуемые CRM candidate/rollback tags, и общий deploy lock:

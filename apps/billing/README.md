@@ -257,8 +257,10 @@ Retry использует PostgreSQL Outbox `availableAt`, без TTL/DLX-та�
 Claim/lease/CAS предшествует внешнему вызову, ack — после commit;
 publisher использует Buffer JSON, confirm и mandatory return.
 
-После отключения продаж сохраняйте собственный broker URL и workers до
-завершения durable обязательств: VERIFY, фискальная синхронизация и начало
+После отключения продаж сохраняйте собственный broker URL только у worker,
+а `BILLING_WINCRM_RECONCILIATION_ENABLED=true` — у worker и scheduler до
+завершения durable обязательств. Scheduler не получает RabbitMQ credential;
+этот отдельный флаг не разрешает новые списания. VERIFY, фискальная синхронизация и начало
 уже оплаченного SCHEDULED периода продолжаются. Пустой/pending список чеков
 не считается завершённой фискализацией; отменённый чек даёт отдельную ошибку
 и DLQ, не отменяя оплаченный период. Существующий общий webhook сначала
