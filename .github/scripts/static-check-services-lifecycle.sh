@@ -422,7 +422,7 @@ exactFiles('deploy', ['docker-compose.prod.yml']);
 
 const servicesWorkflow = readFileSync('.github/workflows/ci.yml', 'utf8');
 const pinnedInfraRevision =
-	'166ff870e128b9ae4cdc07b604b0c59636c9c217';
+	'cb5a862fd83b5b466a450a5392f43f4e9f4d19ef';
 const operationsEnvSha256 = '06f1affe7b715a3c2d96d2a00975fab168e2060623a8af72d33c62bb4055799e';
 if (!/^[a-f0-9]{64}$/.test(operationsEnvSha256)) {
 	throw new Error('Operations owner env must be synchronized and its exact hash reviewed before release');
@@ -486,14 +486,14 @@ if (
 	infraReleaseReferences.length !== 1 ||
 	infraReleaseReferences.some(reference => reference[1] !== pinnedInfraRevision)
 ) {
-	throw new Error('the Operations backup production job must use the exact reviewed infra SHA');
+	throw new Error('the Operations API production job must use the exact reviewed infra SHA');
 }
-// This file-only caller must capture the already verified phase-A runtime;
-// it must not deploy new application code or repeat the writer fence.
+// This PRE-B caller replaces only Operations API with the reviewed read-filter
+// fix. Workers, Notes data/fence, backups and the pending migration stay intact.
 const operationsRuntimeRevision = '65025008d4aa993adb96df435a744a29c4f021d3';
-const phaseAApplicationsTree = '00565b98b442da9820f1dde663a917223efee016';
-const expectedBackupJob = [
-	'    name: Capture Operations ACL-preserving safety backup',
+const approvedApplicationsTree = '139df42fb3e049199a4f51c91b469e9a91b5f55b';
+const expectedApiJob = [
+	'    name: Deploy Operations API read filters only',
 	'    needs:',
 	'      - lifecycle-contract',
 	'      - operations-control-ledger',
@@ -506,10 +506,9 @@ const expectedBackupJob = [
 	`    uses: nda17/winwidget.ru_infra/.github/workflows/deploy-production.yml@${pinnedInfraRevision}`,
 	'    with:',
 	'      services_revision: ${{ github.sha }}',
-	'      release_scope: operations-backlog-backup',
+	'      release_scope: operations-api-runtime',
 	`      expected_live_revision: '${operationsRuntimeRevision}'`,
 	`      expected_service_env_sha256: '${operationsEnvSha256}'`,
-	`      operations_runtime_revision: '${operationsRuntimeRevision}'`,
 	'    secrets:',
 	'      BACKEND_PRODUCTION_SSH_HOST: ${{ secrets.PRODUCTION_SSH_HOST }}',
 	'      BACKEND_PRODUCTION_SSH_PORT: ${{ secrets.PRODUCTION_SSH_PORT }}',
@@ -519,14 +518,14 @@ const expectedBackupJob = [
 	'      BACKEND_PRODUCTION_ENV_SHA256: ${{ secrets.BACKEND_PRODUCTION_ENV_SHA256 }}',
 	''
 ].join('\n');
-const assertOperationsBackupCaller = (workflow, applicationsTree) => {
+const assertOperationsApiCaller = (workflow, applicationsTree) => {
 	const jobParts = workflow.split('  deploy-production:\n');
 	if (
-		jobParts.length !== 2 || jobParts[1] !== expectedBackupJob ||
+		jobParts.length !== 2 || jobParts[1] !== expectedApiJob ||
 		(workflow.match(/release_scope:/g) ?? []).length !== 1 ||
-		applicationsTree !== phaseAApplicationsTree
+		applicationsTree !== approvedApplicationsTree
 	) {
-		throw new Error('Operations backup caller must preserve exact phase-A code, identities and capture-only authority');
+		throw new Error('Operations API caller must preserve the reviewed source tree, phase-A identities and API-only authority');
 	}
 };
 // HEAD's own tree exists in actions/checkout's depth-1 clone; no ancestor fetch
@@ -534,33 +533,43 @@ const assertOperationsBackupCaller = (workflow, applicationsTree) => {
 const applicationsTree = execFileSync('git', ['rev-parse', 'HEAD:apps'], {
 	encoding: 'utf8'
 }).trim();
-assertOperationsBackupCaller(servicesWorkflow, applicationsTree);
-const backupCallerMutations = [
-	['release_scope: operations-backlog-backup', 'release_scope: operations-runtime'],
-	['release_scope: operations-backlog-backup', 'release_scope: operations-backlog-finalize'],
-	['release_scope: operations-backlog-backup', 'release_scope: all'],
+assertOperationsApiCaller(servicesWorkflow, applicationsTree);
+const apiCallerMutations = [
+	['release_scope: operations-api-runtime', 'release_scope: operations-runtime'],
+	['release_scope: operations-api-runtime', 'release_scope: operations-backlog-backup'],
+	['release_scope: operations-api-runtime', 'release_scope: operations-backlog-finalize'],
+	['release_scope: operations-api-runtime', 'release_scope: workers-bootstrap-recovery'],
+	['release_scope: operations-api-runtime', 'release_scope: identity-with-operations-manifest'],
+	['release_scope: operations-api-runtime', 'release_scope: operations-federation-config'],
+	['release_scope: operations-api-runtime', 'release_scope: gateway-remove-notes'],
+	['release_scope: operations-api-runtime', 'release_scope: all'],
 	[`expected_live_revision: '${operationsRuntimeRevision}'`, `expected_live_revision: '${'a'.repeat(40)}'`],
-	[`operations_runtime_revision: '${operationsRuntimeRevision}'`, `operations_runtime_revision: '${'b'.repeat(40)}'`],
 	[`expected_service_env_sha256: '${operationsEnvSha256}'`, `expected_service_env_sha256: '${'c'.repeat(64)}'`],
 	[`deploy-production.yml@${pinnedInfraRevision}`, 'deploy-production.yml@prod'],
+	[`deploy-production.yml@${pinnedInfraRevision}`, `deploy-production.yml@${'b'.repeat(40)}`],
 	['      - operations-restore-rehearsal\n', ''],
 	["if: github.event_name == 'push' && github.ref == 'refs/heads/prod'", 'if: always()'],
 	['services_revision: ${{ github.sha }}', `services_revision: '${operationsRuntimeRevision}'`],
+	['    secrets:\n', `      operations_runtime_revision: '${operationsRuntimeRevision}'\n    secrets:\n`],
 	['    secrets:\n', `      operations_evidence_sha256: '${'d'.repeat(64)}'\n    secrets:\n`],
 	['    secrets:\n', `      expected_operations_revision: '${operationsRuntimeRevision}'\n    secrets:\n`],
+	['    secrets:\n', `      expected_operations_api_revision: '${operationsRuntimeRevision}'\n    secrets:\n`],
+	['    secrets:\n', `      expected_operations_env_sha256: '${operationsEnvSha256}'\n    secrets:\n`],
+	['    secrets:\n', `      expected_support_env_sha256: '${'d'.repeat(64)}'\n    secrets:\n`],
+	['    secrets:\n', '      deploy_frontend: true\n    secrets:\n'],
 	['    secrets:\n', '      release_scope: operations-runtime\n    secrets:\n'],
 	['    secrets:\n', '    secrets: inherit\n'],
 	['BACKEND_PRODUCTION_ENV_SHA256:', 'FRONTEND_PRODUCTION_ENV_SHA256:']
 ];
-for (const [before, after] of backupCallerMutations) {
-	const changedJob = expectedBackupJob.replace(before, after);
-	if (changedJob === expectedBackupJob) throw new Error('backup caller negative fixture did not mutate');
-	throws(() => assertOperationsBackupCaller(`  deploy-production:\n${changedJob}`, phaseAApplicationsTree));
+for (const [before, after] of apiCallerMutations) {
+	const changedJob = expectedApiJob.replace(before, after);
+	if (changedJob === expectedApiJob) throw new Error('API caller negative fixture did not mutate');
+	throws(() => assertOperationsApiCaller(`  deploy-production:\n${changedJob}`, approvedApplicationsTree));
 }
-throws(() => assertOperationsBackupCaller(servicesWorkflow, 'e'.repeat(40)));
-throws(() => assertOperationsBackupCaller(servicesWorkflow, ''));
-throws(() => assertOperationsBackupCaller(`${servicesWorkflow}  deploy-production:\n${expectedBackupJob}`, phaseAApplicationsTree));
-process.stdout.write(`operations_backup_caller_negative_cases=${backupCallerMutations.length + 3}\n`);
+throws(() => assertOperationsApiCaller(servicesWorkflow, 'e'.repeat(40)));
+throws(() => assertOperationsApiCaller(servicesWorkflow, ''));
+throws(() => assertOperationsApiCaller(`${servicesWorkflow}  deploy-production:\n${expectedApiJob}`, approvedApplicationsTree));
+process.stdout.write(`operations_api_caller_negative_cases=${apiCallerMutations.length + 3}\n`);
 
 const rootReadme = readFileSync('README.md', 'utf8');
 if (

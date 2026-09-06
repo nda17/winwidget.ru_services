@@ -449,7 +449,7 @@ jobs:
           "apps/${{ matrix.app }}"
 
   deploy-production:
-    name: Capture Operations ACL-preserving safety backup
+    name: Deploy Operations API read filters only
     needs:
       - lifecycle-contract
       - operations-control-ledger
@@ -459,13 +459,12 @@ jobs:
       - service-integration
       - widgets-integration
     if: github.event_name == 'push' && github.ref == 'refs/heads/prod'
-    uses: nda17/winwidget.ru_infra/.github/workflows/deploy-production.yml@166ff870e128b9ae4cdc07b604b0c59636c9c217
+    uses: nda17/winwidget.ru_infra/.github/workflows/deploy-production.yml@cb5a862fd83b5b466a450a5392f43f4e9f4d19ef
     with:
       services_revision: ${{ github.sha }}
-      release_scope: operations-backlog-backup
+      release_scope: operations-api-runtime
       expected_live_revision: '65025008d4aa993adb96df435a744a29c4f021d3'
       expected_service_env_sha256: '06f1affe7b715a3c2d96d2a00975fab168e2060623a8af72d33c62bb4055799e'
-      operations_runtime_revision: '65025008d4aa993adb96df435a744a29c4f021d3'
     secrets:
       BACKEND_PRODUCTION_SSH_HOST: ${{ secrets.PRODUCTION_SSH_HOST }}
       BACKEND_PRODUCTION_SSH_PORT: ${{ secrets.PRODUCTION_SSH_PORT }}
