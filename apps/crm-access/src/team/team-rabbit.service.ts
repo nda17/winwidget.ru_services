@@ -38,6 +38,10 @@ export class CrmTeamRabbitService
 		{ channel: ConfirmChannel; tag: string }
 	>();
 	private readonly returns = new Map<string, boolean>();
+	private readonly topologies = new WeakMap<
+		ConfirmChannel,
+		Promise<void>
+	>();
 	constructor(
 		private readonly config: ConfigService,
 		private readonly runtime: CrmAccessRuntimeService
@@ -71,7 +75,7 @@ export class CrmTeamRabbitService
 					if (typeof token === 'string' && this.returns.has(token))
 						this.returns.set(token, true);
 				});
-				if (this.runtime.workerEnabled) await this.topology(channel);
+				if (this.runtime.workerEnabled) await this.ensureTopology(channel);
 			}
 		});
 		await this.connection.connect({ timeout: 15_000 });
@@ -123,6 +127,7 @@ export class CrmTeamRabbitService
 		if (!this.channel || !this.runtime.workerEnabled)
 			throw new Error('CRM consumer is disabled');
 		await this.channel.addSetup(async (channel: ConfirmChannel) => {
+			await this.ensureTopology(channel);
 			await channel.prefetch(4, false);
 			const { consumerTag } = await channel.consume(
 				teamQueue(consumer),
@@ -159,6 +164,19 @@ export class CrmTeamRabbitService
 		await this.connection?.close().catch(() => undefined);
 		this.channel = null;
 		this.connection = null;
+	}
+	private ensureTopology(channel: ConfirmChannel): Promise<void> {
+		const existing = this.topologies.get(channel);
+		if (existing) return existing;
+		// ChannelWrapper runs registered setups concurrently, including on reconnect.
+		// Every consumer must await this channel's declarations before basic.consume.
+		const pending = this.topology(channel).catch(error => {
+			if (this.topologies.get(channel) === pending)
+				this.topologies.delete(channel);
+			throw error;
+		});
+		this.topologies.set(channel, pending);
+		return pending;
 	}
 	private async topology(channel: ConfirmChannel) {
 		for (const [name, type] of [
