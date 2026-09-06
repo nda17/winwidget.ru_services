@@ -25,7 +25,6 @@ import {
 	parseTeamEvent,
 	TEAM_CONSUMERS,
 	TEAM_RETRY_DELAYS,
-	teamRetryRoute,
 	teamRoute,
 	type TeamEvent
 } from './team-messaging.contract';
@@ -243,14 +242,20 @@ export class CrmTeamWorkerService
 			});
 			await queueTeamDelivery(tx, receipt, {
 				deduplicationKey: `retry:${receipt.id}:${receipt.manualRetryCycle}:${receipt.retryAttempt}:${receipt.status}`,
-				exchange: retry ? 'winwidget.retry' : 'winwidget.dead-letter',
+				exchange: retry
+					? 'winwidget.manual-retry'
+					: 'winwidget.dead-letter',
 				routingKey: retry
-					? teamRetryRoute(
-							receipt.consumer as TeamConsumer,
-							receipt.retryAttempt
-						)
+					? teamRoute(receipt.consumer as TeamConsumer)
 					: `${teamRoute(receipt.consumer as TeamConsumer)}.dead-letter`,
-				...(retry ? { token } : {})
+				...(retry
+					? {
+							token,
+							availableAt: new Date(
+								Date.now() + TEAM_RETRY_DELAYS[receipt.retryAttempt - 1]
+							)
+						}
+					: {})
 			});
 		});
 	}

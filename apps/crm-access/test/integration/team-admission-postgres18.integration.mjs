@@ -12,6 +12,9 @@ const {
 const {
 	CrmTeamWorkerService
 } = require('../../dist/src/team/team-worker.service.js');
+const {
+	CrmTeamOutboxService
+} = require('../../dist/src/team/team-outbox.service.js');
 assert.equal(process.env.CRM_ACCESS_INTEGRATION_ALLOW_MUTATION, 'true');
 const databaseUrl = required('CRM_ACCESS_TEST_DATABASE_URL');
 const runtimeRole = required('CRM_ACCESS_TEST_RUNTIME_ROLE');
@@ -394,6 +397,244 @@ try {
 		).status,
 		'DELIVERED'
 	);
+	// Real PostgreSQL retry boundary; transport double is not a broker/image proof.
+	const retryEvent = {
+		schemaVersion: 1,
+		eventId: randomUUID(),
+		eventType: 'crm.access.admission-wake.v1',
+		workspaceId,
+		occurredAt: new Date().toISOString()
+	};
+	const retryMessage = (messageId = retryEvent.eventId, headers = {}) => ({
+		content: Buffer.from(JSON.stringify(retryEvent)),
+		properties: {
+			messageId,
+			headers,
+			contentType: 'application/json',
+			type: retryEvent.eventType
+		}
+	});
+	let ready = false,
+		retryCalls = 0,
+		retryAcks = 0;
+	const retryWorker = new CrmTeamWorkerService(
+		prisma,
+		{ workerEnabled: true },
+		{
+			ack: () => {
+				retryAcks++;
+			}
+		},
+		{
+			admitNext: async () => {
+				retryCalls++;
+				if (!ready) throw new Error('SYNTHETIC_DEPENDENCY_UNAVAILABLE');
+			}
+		}
+	);
+	await retryWorker.handle('admission', retryMessage());
+	const retryReceipt = await prisma.crmTeamDelivery.findUniqueOrThrow({
+		where: {
+			eventId_consumer: {
+				eventId: retryEvent.eventId,
+				consumer: 'admission'
+			}
+		}
+	});
+	assert.equal(retryReceipt.status, 'RETRY_SCHEDULED');
+	assert.equal(retryAcks, 1);
+	const retries = await prisma.crmTeamOutbox.findMany({
+		where: {
+			deduplicationKey: { startsWith: `retry:${retryReceipt.id}:` }
+		}
+	});
+	assert.equal(retries.length, 1);
+	const retryRow = retries[0];
+	assert.equal(retryRow.exchange, 'winwidget.manual-retry');
+	assert.equal(retryRow.routingKey, 'crm-access.team.admission');
+	assert.ok(
+		retryRow.availableAt.getTime() - retryRow.createdAt.getTime() >= 29000
+	);
+	const scopedOutbox = id => ({
+		crmTeamOutbox: {
+			findFirst: query =>
+				prisma.crmTeamOutbox.findFirst({
+					...query,
+					where: { AND: [query.where, { id }] }
+				}),
+			updateMany: query => prisma.crmTeamOutbox.updateMany(query)
+		}
+	});
+	const publications = [];
+	const retryTransport = {
+		publish: async (exchange, route, payload, options) => {
+			publications.push({ exchange, route });
+			assert.equal(exchange, 'winwidget.manual-retry');
+			assert.equal(route, 'crm-access.team.admission');
+			assert.deepEqual(payload, retryEvent);
+			await retryWorker.handle(
+				'admission',
+				retryMessage(options.messageId, options.headers)
+			);
+		}
+	};
+	const earlyPublisher = new CrmTeamOutboxService(
+		scopedOutbox(retryRow.id),
+		{},
+		retryTransport
+	);
+	assert.equal(await earlyPublisher.publishOne(), false);
+	assert.equal(publications.length, 0);
+	ready = true;
+	// Recreate the publisher object: scheduling remains in PostgreSQL, not memory.
+	const restartedPublisher = new CrmTeamOutboxService(
+		scopedOutbox(retryRow.id),
+		{},
+		retryTransport
+	);
+	await new Promise(resolve =>
+		setTimeout(
+			resolve,
+			Math.max(0, retryRow.availableAt.getTime() - Date.now()) + 25
+		)
+	);
+	assert.equal(await restartedPublisher.publishOne(), true);
+	assert.equal(publications.length, 1);
+	const deliveredRetry = await prisma.crmTeamOutbox.findUniqueOrThrow({
+		where: { id: retryRow.id }
+	});
+	assert.equal(deliveredRetry.status, 'PUBLISHED');
+	assert.equal(
+		deliveredRetry.availableAt.getTime(),
+		retryRow.availableAt.getTime()
+	);
+	assert.ok(deliveredRetry.publishedAt >= retryRow.availableAt);
+	assert.equal(await restartedPublisher.publishOne(), false);
+	await retryWorker.handle(
+		'admission',
+		retryMessage(retryRow.messageId, retryRow.headers)
+	);
+	assert.equal(retryCalls, 2); // One failed attempt, one success; no replay effect.
+	assert.equal(retryAcks, 3);
+	assert.equal(
+		(
+			await prisma.crmTeamDelivery.findUniqueOrThrow({
+				where: { id: retryReceipt.id }
+			})
+		).status,
+		'DELIVERED'
+	);
+
+	const legacyNow = new Date();
+	const legacy = await prisma.crmTeamOutbox.create({
+		data: {
+			messageId: randomUUID(),
+			deduplicationKey: `legacy:${randomUUID()}`,
+			eventType: retryEvent.eventType,
+			payload: retryEvent,
+			headers: retryRow.headers,
+			exchange: 'winwidget.retry',
+			routingKey: 'crm-access.team.admission.retry.1',
+			createdAt: legacyNow,
+			availableAt: legacyNow
+		}
+	});
+	const legacyTransport = {
+		publish: async () => {
+			throw new Error('LEGACY_MUST_REMAIN_DEFERRED');
+		}
+	};
+	const legacyPublisher = new CrmTeamOutboxService(
+		scopedOutbox(legacy.id),
+		{},
+		legacyTransport
+	);
+	await legacyPublisher.publishOne();
+	const converted = await prisma.crmTeamOutbox.findUniqueOrThrow({
+		where: { id: legacy.id }
+	});
+	assert.equal(converted.status, 'PENDING');
+	assert.equal(converted.exchange, 'winwidget.manual-retry');
+	assert.equal(converted.routingKey, 'crm-access.team.admission');
+	assert.equal(
+		converted.availableAt.getTime(),
+		legacyNow.getTime() + 30000
+	);
+	assert.equal(converted.messageId, legacy.messageId);
+	assert.deepEqual(converted.headers, legacy.headers);
+	assert.deepEqual(converted.payload, legacy.payload);
+	assert.equal(converted.lastError, null);
+	assert.equal(await legacyPublisher.publishOne(), false);
+	const expiredLegacy = await prisma.crmTeamOutbox.create({
+		data: {
+			messageId: randomUUID(),
+			deduplicationKey: `expired-legacy:${randomUUID()}`,
+			eventType: retryEvent.eventType,
+			payload: retryEvent,
+			headers: retryRow.headers,
+			exchange: 'winwidget.retry',
+			routingKey: 'crm-access.team.admission.retry.1',
+			createdAt: new Date(Date.now() - 60000),
+			availableAt: new Date(Date.now() - 1000),
+			status: 'PROCESSING',
+			leaseToken: randomUUID(),
+			leaseExpiresAt: new Date(Date.now() - 1000)
+		}
+	});
+	let legacyPublishes = 0;
+	const recoveredPublisher = new CrmTeamOutboxService(
+		scopedOutbox(expiredLegacy.id),
+		{},
+		{
+			publish: async (exchange, route, payload, options) => {
+				legacyPublishes++;
+				assert.equal(exchange, 'winwidget.manual-retry');
+				assert.equal(route, 'crm-access.team.admission');
+				assert.equal(options.messageId, expiredLegacy.messageId);
+				assert.deepEqual(options.headers, expiredLegacy.headers);
+				assert.deepEqual(payload, expiredLegacy.payload);
+			}
+		}
+	);
+	assert.equal(await recoveredPublisher.publishOne(), true);
+	assert.equal(legacyPublishes, 1);
+	assert.equal(
+		(
+			await prisma.crmTeamOutbox.findUniqueOrThrow({
+				where: { id: expiredLegacy.id }
+			})
+		).status,
+		'PUBLISHED'
+	);
+	const publishedLegacy = await prisma.crmTeamOutbox.create({
+		data: {
+			messageId: randomUUID(),
+			deduplicationKey: `published-legacy:${randomUUID()}`,
+			eventType: retryEvent.eventType,
+			payload: retryEvent,
+			headers: retryRow.headers,
+			exchange: 'winwidget.retry',
+			routingKey: 'crm-access.team.admission.retry.1',
+			createdAt: new Date(Date.now() - 60000),
+			availableAt: new Date(Date.now() - 1000),
+			status: 'PUBLISHED',
+			publishedAt: new Date(Date.now() - 30000)
+		}
+	});
+	assert.equal(
+		await new CrmTeamOutboxService(
+			scopedOutbox(publishedLegacy.id),
+			{},
+			legacyTransport
+		).publishOne(),
+		false
+	);
+	assert.deepEqual(
+		await prisma.crmTeamOutbox.findUniqueOrThrow({
+			where: { id: publishedLegacy.id }
+		}),
+		publishedLegacy
+	);
 	for (const table of [
 		'crm_workspace_members',
 		'crm_teams',
@@ -418,7 +659,7 @@ try {
 		error => error?.meta?.code === '42501'
 	);
 	console.log(
-		'PASS WinCRM team PostgreSQL18: least privilege, page directory binding, parallel command/acceptance replay, FIFO Trial quota including owner, disabled/pending no seat, tenant joins, read-only deny, revoke race, receipt-before-effect'
+		'PASS WinCRM team PostgreSQL18: least privilege, page directory binding, parallel command/acceptance replay, FIFO Trial quota including owner, disabled/pending no seat, tenant joins, read-only deny, revoke race, receipt-before-effect, real 30s durable retry across publisher recreation, replay, unpublished legacy conversion (transport double)'
 	);
 } catch (error) {
 	console.error(

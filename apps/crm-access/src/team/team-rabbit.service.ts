@@ -16,9 +16,7 @@ import { CrmAccessRuntimeService } from '../runtime/crm-access-runtime.service';
 import { TEAM_EVENTS, type TeamConsumer } from './team.util';
 import {
 	TEAM_CONSUMERS,
-	TEAM_RETRY_DELAYS,
 	teamQueue,
-	teamRetryRoute,
 	teamRoute
 } from './team-messaging.contract';
 
@@ -181,7 +179,6 @@ export class CrmTeamRabbitService
 	private async topology(channel: ConfirmChannel) {
 		for (const [name, type] of [
 			['winwidget.events', 'topic'],
-			['winwidget.retry', 'direct'],
 			['winwidget.dead-letter', 'topic'],
 			['winwidget.manual-retry', 'direct']
 		] as const)
@@ -202,20 +199,6 @@ export class CrmTeamRabbitService
 				'winwidget.dead-letter',
 				`${route}.dead-letter`
 			);
-			for (const [index, delay] of TEAM_RETRY_DELAYS.entries()) {
-				const retryQueue = `${queue}.retry.${index + 1}`;
-				await channel.assertQueue(retryQueue, {
-					durable: true,
-					messageTtl: delay,
-					deadLetterExchange: 'winwidget.manual-retry',
-					deadLetterRoutingKey: route
-				});
-				await channel.bindQueue(
-					retryQueue,
-					'winwidget.retry',
-					teamRetryRoute(consumer, index + 1)
-				);
-			}
 		}
 	}
 }

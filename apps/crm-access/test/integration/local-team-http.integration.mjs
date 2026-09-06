@@ -663,13 +663,7 @@ export async function verifyTeamHttp({
 		await worker.beforeApplicationShutdown();
 		worker = null;
 		for (const consumer of TEAM_CONSUMERS)
-			for (const suffix of [
-				'',
-				'.dead-letter',
-				'.retry.1',
-				'.retry.2',
-				'.retry.3'
-			]) {
+			for (const suffix of ['', '.dead-letter']) {
 				const queue = await inspectorChannel.checkQueue(
 					teamQueue(consumer) + suffix
 				);

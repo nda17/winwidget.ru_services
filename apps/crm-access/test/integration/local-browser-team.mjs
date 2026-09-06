@@ -28,7 +28,7 @@ export const BROWSER_TEAM_PERSONAS = Object.freeze([
 	'browserInviteeB'
 ]);
 const consumers = ['provision', 'acceptance', 'admission'];
-const suffixes = ['', '.dead-letter', '.retry.1', '.retry.2', '.retry.3'];
+const suffixes = ['', '.dead-letter'];
 const delay = milliseconds =>
 	new Promise(resolve => setTimeout(resolve, milliseconds));
 

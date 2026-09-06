@@ -120,13 +120,7 @@ test('topology proof requires all queues, separate push consumers and no pending
 		'winwidget.crm-intake.widget-transfer.v1'
 	];
 	const rows = main
-		.flatMap(name => [
-			name,
-			`${name}.dead-letter`,
-			...(names.includes(name)
-				? [1, 2, 3].map(index => `${name}.retry.${index}`)
-				: [])
-		])
+		.flatMap(name => [name, `${name}.dead-letter`])
 		.map(name => ({
 			name,
 			messages_ready: 0,

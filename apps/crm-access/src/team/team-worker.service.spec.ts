@@ -5,7 +5,11 @@ import {
 	CrmTeamWorkerService,
 	TEAM_DELIVERY_LEASE_MS
 } from './team-worker.service';
-import { parseTeamEvent, teamRoute } from './team-messaging.contract';
+import {
+	parseTeamEvent,
+	teamRoute,
+	TEAM_RETRY_DELAYS
+} from './team-messaging.contract';
 import { TEAM_EVENTS, semanticHash } from './team.util';
 
 const event = () => ({
@@ -120,6 +124,7 @@ const setup = () => {
 };
 
 describe('WinCRM team durable delivery', () => {
+	afterEach(() => jest.useRealTimers());
 	it('takes a durable PROCESSING receipt before the first external call and acks only after delivered commit', async () => {
 		const { worker, rows, admissions, rabbit } = setup();
 		const value = event();
@@ -186,6 +191,7 @@ describe('WinCRM team durable delivery', () => {
 		expect([...rows.values()][0].status).toBe('DELIVERED');
 	});
 	it('writes independent retry and DLQ messages transactionally and rejects stale retry tokens', async () => {
+		jest.useFakeTimers({ now: new Date('2026-09-06T17:30:00.000Z') });
 		const { worker, rows, outbox, admissions } = setup();
 		const value = event();
 		admissions.admitNext.mockRejectedValue(
@@ -202,6 +208,16 @@ describe('WinCRM team durable delivery', () => {
 		expect(admissions.admitNext).toHaveBeenCalledTimes(1);
 		for (let attempt = 1; attempt <= 3; attempt++) {
 			row = [...rows.values()][0];
+			expect(outbox[attempt - 1]).toMatchObject({
+				exchange: 'winwidget.manual-retry',
+				routingKey: teamRoute('admission'),
+				availableAt: new Date(Date.now() + TEAM_RETRY_DELAYS[attempt - 1]),
+				headers: {
+					'x-delivery-token': row.leaseToken,
+					'x-retry-attempt': attempt
+				}
+			});
+			jest.advanceTimersByTime(TEAM_RETRY_DELAYS[attempt - 1]);
 			await worker.handle(
 				'admission',
 				message(value, {
@@ -219,6 +235,7 @@ describe('WinCRM team durable delivery', () => {
 			routingKey: 'crm-access.team.admission.dead-letter'
 		});
 		expect(JSON.stringify(outbox)).not.toContain('private-detail');
+		expect(JSON.stringify(outbox)).not.toContain('winwidget.retry');
 	});
 	it('quarantines malformed body without storing token-shaped raw fields or trusting foreign workspace', async () => {
 		const { worker, rows, outbox, admissions } = setup();

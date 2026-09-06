@@ -8,6 +8,7 @@ import { randomUUID } from 'node:crypto';
 import { CrmAccessPrismaService } from '../prisma/crm-access-prisma.service';
 import { CrmAccessRuntimeService } from '../runtime/crm-access-runtime.service';
 import { CrmTeamRabbitService } from './team-rabbit.service';
+import { legacyTeamRetryRoute } from './team-messaging.contract';
 
 @Injectable()
 export class CrmTeamOutboxService
@@ -67,6 +68,25 @@ export class CrmTeamOutboxService
 		});
 		if (claimed.count !== 1) return true;
 		try {
+			const legacy = legacyTeamRetryRoute(candidate);
+			if (legacy) {
+				const deferred = legacy.availableAt.getTime() > Date.now();
+				const converted = await this.prisma.crmTeamOutbox.updateMany({
+					where: { id: candidate.id, status: 'PROCESSING', leaseToken },
+					data: {
+						...legacy,
+						...(deferred
+							? {
+									status: 'PENDING',
+									leaseToken: null,
+									leaseExpiresAt: null
+								}
+							: {})
+					}
+				});
+				if (converted.count !== 1) throw new Error('OUTBOX_LEASE_LOST');
+				if (deferred) return true;
+			}
 			const headers =
 				candidate.headers &&
 				typeof candidate.headers === 'object' &&
@@ -78,8 +98,8 @@ export class CrmTeamOutboxService
 						)
 					: {};
 			await this.rabbit.publish(
-				candidate.exchange,
-				candidate.routingKey,
+				legacy?.exchange ?? candidate.exchange,
+				legacy?.routingKey ?? candidate.routingKey,
 				candidate.payload,
 				{
 					messageId: candidate.messageId,

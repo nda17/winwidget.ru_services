@@ -55,13 +55,11 @@ const snapshot = (stopped = false) => ({
 	accessPending: 0,
 	deliveryPending: 0,
 	queues: ['provision', 'acceptance', 'admission'].flatMap(consumer =>
-		['', '.dead-letter', '.retry.1', '.retry.2', '.retry.3'].map(
-			suffix => ({
-				name: `winwidget.crm-access.team.${consumer}${suffix}`,
-				messageCount: 0,
-				consumerCount: !stopped && suffix === '' ? 1 : 0
-			})
-		)
+		['', '.dead-letter'].map(suffix => ({
+			name: `winwidget.crm-access.team.${consumer}${suffix}`,
+			messageCount: 0,
+			consumerCount: !stopped && suffix === '' ? 1 : 0
+		}))
 	)
 });
 function clock() {
@@ -388,7 +386,7 @@ test('drain distinguishes three active consumers, closed consumers and pending/r
 				assertBrowserTeamSnapshot({ ...snapshot(), [key]: value })
 			);
 	}
-	for (let index = 0; index < 15; index++) {
+	for (let index = 0; index < snapshot().queues.length; index++) {
 		const value = snapshot();
 		value.queues[index].messageCount = 1;
 		assert.throws(() => assertBrowserTeamSnapshot(value));

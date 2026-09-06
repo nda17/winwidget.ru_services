@@ -227,13 +227,7 @@ export function assertQuietQueues(rows, requireConsumers) {
 		'winwidget.crm-intake.widget-control.v1',
 		'winwidget.crm-intake.widget-transfer.v1'
 	];
-	const expected = main.flatMap(name => [
-		name,
-		`${name}.dead-letter`,
-		...(name.includes('crm-access')
-			? [1, 2, 3].map(index => `${name}.retry.${index}`)
-			: [])
-	]);
+	const expected = main.flatMap(name => [name, `${name}.dead-letter`]);
 	assert.deepEqual(rows.map(row => row.name).sort(), expected.sort());
 	for (const row of rows) {
 		assert.equal(
@@ -781,11 +775,11 @@ async function runRuntime(context) {
 		await ctl(['add_user', user, password]);
 		if (process.app === 'crm-access') {
 			const resources =
-				'^(winwidget\\.(events|retry|dead-letter|manual-retry)|winwidget\\.crm-access\\.team\\.(provision|acceptance|admission)(\\.dead-letter|\\.retry\\.[123])?)$';
+				'^(winwidget\\.(events|dead-letter|manual-retry)|winwidget\\.crm-access\\.team\\.(provision|acceptance|admission)(\\.dead-letter)?)$';
 			const worker = process.role === 'worker';
 			const writes = worker
-				? '^(winwidget\\.manual-retry|winwidget\\.crm-access\\.team\\.(provision|acceptance|admission)(\\.dead-letter|\\.retry\\.[123])?)$'
-				: '^winwidget\\.(events|retry|dead-letter|manual-retry)$';
+				? '^winwidget\\.crm-access\\.team\\.(provision|acceptance|admission)(\\.dead-letter)?$'
+				: '^winwidget\\.(events|dead-letter|manual-retry)$';
 			await ctl([
 				'set_permissions',
 				'-p',
@@ -800,7 +794,7 @@ async function runRuntime(context) {
 			const allEvents =
 				'^(crm\\.access\\.(invitation-provision|admission-wake)\\.v1|identity\\.wincrm\\.invitation-accepted\\.v1)$';
 			const routes =
-				'^crm-access\\.team\\.(provision|acceptance|admission)(\\.dead-letter|\\.retry\\.[123])?$';
+				'^crm-access\\.team\\.(provision|acceptance|admission)\\.dead-letter$';
 			await ctl([
 				'set_topic_permissions',
 				'-p',
@@ -1129,7 +1123,7 @@ async function runRuntime(context) {
 		idleStatistics: statistics
 	};
 	say(
-		'Twelve image entrypoints healthy; 21 empty queues, six push consumers and four database identities verified'
+		'Twelve image entrypoints healthy; 12 empty queues, six push consumers and four database identities verified'
 	);
 	setStage('graceful-role-shutdown');
 	for (const process of [...runtime].reverse()) {

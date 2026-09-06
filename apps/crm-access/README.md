@@ -250,8 +250,20 @@ RabbitMQ. Для фоновых ролей обязательны `RABBITMQ_URL`
 `.acceptance`, `.admission`; routing keys соответственно
 `crm.access.invitation-provision.v1`, `identity.wincrm.invitation-accepted.v1`,
 `crm.access.admission-wake.v1` в `winwidget.events`. У каждой собственные
-retry `.retry.1|2|3` (30s/300s/1800s), `.dead-letter`, manual route
-`crm-access.team.<consumer>` в `winwidget.manual-retry`.
+`.dead-letter` и manual route `crm-access.team.<consumer>` в
+`winwidget.manual-retry`. Повторы 30s/300s/1800s планируются через
+`CrmTeamOutbox.availableAt` в одной транзакции с receipt; до этого срока
+publisher не захватывает запись. Доставка сразу в основную consumer queue
+требует confirm/mandatory, без промежуточных TTL → DLX очередей.
+
+Новый worker не создаёт `.retry.1|2|3`; старые очереди автоматически не
+удаляются. Publisher переводит только неопубликованные legacy `winwidget.retry`
+записи в direct manual route под своим CAS-lease, сохраняя message ID,
+payload, headers и срок не раньше `max(createdAt + retryDelay, availableAt)`.
+PUBLISHED не сбрасывается: старый confirm TTL queue не доказывает последующий
+DLX republish. Перед совместным rollout исключить mixed revisions,
+сверить старые queues/receipts/Outbox и обеспечить проверенный drain/recovery.
+Свежая установка CRM не требует создания legacy retry queues.
 
 До внешнего вызова берётся receipt `(eventId,consumer)` с PROCESSING и
 CAS-lease 300s (максимум четырёх последовательных HTTP фаз по 60s).
@@ -396,7 +408,7 @@ publishers не получают consumer/DDL права, Intake workers — pub
 Access worker сохраняет существующий ограниченный topology contract.
 Брокер намеренно выключен при запуске процессов: восемь background roles
 должны завершиться с ошибкой и автоматически перезапуститься. После запуска
-брокера проверяются health всех ролей, image/revision, 21 пустая очередь,
+брокера проверяются health всех ролей, image/revision, 12 пустых очередей,
 шесть push consumers, четыре database IDs и текущие pool connections.
 Повторное выключение брокера в работающей системе должно вернуть readiness
 503 у восьми фоновых ролей и сохранить 200 у четырёх API. После восстановления

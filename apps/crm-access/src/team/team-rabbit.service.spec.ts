@@ -96,8 +96,15 @@ describe('CRM team channel topology lifecycle', () => {
 		expect(service.isReady()).toBe(false);
 		barrier.resolve();
 		await running;
-		expect(channel.assertExchange).toHaveBeenCalledTimes(4);
-		expect(channel.assertQueue).toHaveBeenCalledTimes(15);
+		expect(channel.assertExchange).toHaveBeenCalledTimes(3);
+		expect(channel.assertQueue).toHaveBeenCalledTimes(6);
+		for (const [name, options] of channel.assertQueue.mock.calls) {
+			expect(name).not.toContain('.retry.');
+			expect(options).toEqual({ durable: true });
+		}
+		expect(
+			channel.assertExchange.mock.calls.map(([name]) => name)
+		).not.toContain('winwidget.retry');
 		expect(channel.consume.mock.calls.map(([queue]) => queue)).toEqual(
 			TEAM_CONSUMERS.map(teamQueue)
 		);
@@ -127,7 +134,7 @@ describe('CRM team channel topology lifecycle', () => {
 		expect(next.assertExchange).toHaveBeenCalledTimes(1);
 		barrier.resolve();
 		await running;
-		expect(next.assertQueue).toHaveBeenCalledTimes(15);
+		expect(next.assertQueue).toHaveBeenCalledTimes(6);
 		expect(next.consume).toHaveBeenCalledTimes(3);
 		expect(old.consume).toHaveBeenCalledTimes(3);
 		expect(service.isReady()).toBe(true);
@@ -152,8 +159,8 @@ describe('CRM team channel topology lifecycle', () => {
 		expect(channel.assertQueue).not.toHaveBeenCalled();
 		expect(service.isReady()).toBe(false);
 		await Promise.all(setups.map(setup => setup(channel.raw)));
-		expect(channel.assertExchange).toHaveBeenCalledTimes(5);
-		expect(channel.assertQueue).toHaveBeenCalledTimes(15);
+		expect(channel.assertExchange).toHaveBeenCalledTimes(4);
+		expect(channel.assertQueue).toHaveBeenCalledTimes(6);
 		expect(channel.consume).toHaveBeenCalledTimes(3);
 		expect(service.isReady()).toBe(true);
 		await service.onApplicationShutdown();

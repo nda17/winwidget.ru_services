@@ -299,9 +299,10 @@ production-топологии с её точными образами и scoped 
 
 ### P0 — безопасный rollout отложенных retry новых CRM workflows
 
-Перед выпуском database-delayed retry widget-control доказать outage, restart
-и повторную доставку после commit/ack на точных образах. Для widget-control
-и acceptance закрепить проверку целевой production-топологии и recovery.
+Перед выпуском database-delayed retry CRM Access team и Intake widget-control
+доказать outage, restart и повторную доставку после commit/ack на точных образах.
+Для team, widget-control и acceptance закрепить проверку целевой
+production-топологии и recovery.
 Если в целевой среде работала старая ревизия с classic TTL -> DLX, сначала
 остановить её publishers/workers, сохранить legacy queues и их доступные
 targets для drain и сверить ready/unacked с nonterminal job/receipt/Outbox.

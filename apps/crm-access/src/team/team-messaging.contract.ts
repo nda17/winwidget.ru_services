@@ -4,6 +4,7 @@ import {
 	isUuidV4
 } from '../internal/internal-http.config';
 import type { AcceptedInvitationEvent } from './team-admission.service';
+import type { CrmTeamOutbox } from '@prisma/crm-access-client';
 import { TEAM_EVENTS, type TeamConsumer } from './team.util';
 
 export const TEAM_CONSUMERS = Object.keys(TEAM_EVENTS) as TeamConsumer[];
@@ -12,8 +13,33 @@ export const teamQueue = (consumer: TeamConsumer) =>
 	`winwidget.crm-access.team.${consumer}`;
 export const teamRoute = (consumer: TeamConsumer) =>
 	`crm-access.team.${consumer}`;
-export const teamRetryRoute = (consumer: TeamConsumer, attempt: number) =>
-	`${teamRoute(consumer)}.retry.${attempt}`;
+// Only unpublished legacy TTL rows are converted; never reset PUBLISHED rows.
+export function legacyTeamRetryRoute(row: CrmTeamOutbox) {
+	if (row.exchange !== 'winwidget.retry') return null;
+	const match =
+		/^crm-access\.team\.(provision|acceptance|admission)\.retry\.([123])$/.exec(
+			row.routingKey
+		);
+	if (!match) throw new Error('INVALID_LEGACY_TEAM_RETRY');
+	const consumer = match[1] as TeamConsumer;
+	const attempt = Number(match[2]);
+	const deadline = Math.max(
+		row.createdAt.getTime() + TEAM_RETRY_DELAYS[attempt - 1],
+		row.availableAt.getTime()
+	);
+	if (
+		!Number.isFinite(deadline) ||
+		row.eventType !== TEAM_EVENTS[consumer] ||
+		!isRecord(row.headers) ||
+		row.headers['x-retry-attempt'] !== attempt
+	)
+		throw new Error('INVALID_LEGACY_TEAM_RETRY');
+	return {
+		exchange: 'winwidget.manual-retry',
+		routingKey: teamRoute(consumer),
+		availableAt: new Date(deadline)
+	};
+}
 export type TeamEvent =
 	| AcceptedInvitationEvent
 	| {
