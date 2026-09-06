@@ -9,7 +9,7 @@ ENV PNPM_VERSION=9.15.9
 
 RUN apk add --no-cache openssl \
 	&& corepack enable \
-	&& corepack prepare pnpm@${PNPM_VERSION} --activate
+	&& NODE_OPTIONS=--dns-result-order=ipv4first corepack prepare pnpm@${PNPM_VERSION} --activate
 
 FROM base AS deps
 

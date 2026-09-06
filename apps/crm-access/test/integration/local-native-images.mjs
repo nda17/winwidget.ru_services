@@ -415,9 +415,13 @@ export class NativeImageRuntime {
 				{
 					cwd: this.root,
 					env: this.baseEnvironment,
-					stdio: ['pipe', 'ignore', 'ignore']
+					stdio: ['pipe', 'ignore', 'pipe']
 				}
 			);
+			let diagnosticTail = '';
+			build.stderr.on('data', bytes => {
+				diagnosticTail = (diagnosticTail + bytes).slice(-65536);
+			});
 			archive.stdout.pipe(build.stdin);
 			build.stdin.on('error', () => {});
 			const timer = setTimeout(() => {
@@ -439,7 +443,9 @@ export class NativeImageRuntime {
 				assert.deepEqual(
 					codes,
 					[0, 0],
-					'Immutable native image build failed; logs suppressed'
+					'Immutable native image build failed; diagnostic codes=' +
+						nativeDiagnosticCodes(diagnosticTail).join(',') +
+						'; logs suppressed'
 				);
 			} finally {
 				clearTimeout(timer);
