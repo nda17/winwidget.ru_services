@@ -240,10 +240,14 @@ Customers и Sales — по API. Вместе с четырьмя PostgreSQL э�
 Compose обязательны CRM-only controller, проверка фактических OCI revisions,
 provisioning scoped credentials/DB roles и measured memory/CPU caps.
 Shape validator не подтверждает capacity и не разрешает rollout. Routine
-backend controller сейчас требует точный inventory контейнеров и RabbitMQ
-users: нельзя запускать дополнительный CRM project и тем самым блокировать
-дальнейшие обычные релизы. Сначала добавить доказанный совместимый inventory
-contract для обоих проектов, не разрешая произвольные посторонние сервисы.
+backend controller проверяет контейнеры своего project `winwidget`, но
+RabbitMQ users — глобально: новые scoped CRM users сейчас заблокируют
+дальнейшие обычные релизы. Сначала обновить точный broker inventory contract,
+не ослабляя его до wildcard. Для отдельного project `winwidget-crm` доказать
+сохранение чужих контейнеров/images при routine cleanup и общий deploy lock:
+cleanup сравнивает глобальные running IDs и image bindings, поэтому параллельный
+CRM rollout недопустим. Само наличие контейнеров другого project не является
+ошибкой текущего project-scoped inventory.
 Для локальной проверки заложить явные
 Prisma pool limits: API 5, worker 4, publisher 1 — 40 runtime connections
 (Access 10, Intake 20, Customers 5, Sales 5). Дополнительно резервировать
