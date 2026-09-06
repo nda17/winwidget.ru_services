@@ -70,9 +70,11 @@ pnpm start
 
 В production все internal URLs задаются явно: удалённые Identity и Billing
 доступны через точные HTTPS origins, локальный `crm-sales` может использовать
-loopback HTTP. Целевая схема предусматривает отдельный VPS для CRM backend;
-его rollout ещё не выполнен. Четыре независимых frontend-приложения планируются
-на существующем frontend VPS, WinCRM — на `crm.winwidget.ru`. Межсерверные обращения идут через защищённый
+loopback HTTP. CRM backend допускается на текущем backend VPS только после
+измерения ресурсного запаса; при его недостатке потребуется отдельный VPS.
+Rollout CRM backend ещё не выполнен. Четыре независимых frontend-приложения
+размещены на существующем frontend VPS, WinCRM — на `crm.winwidget.ru`.
+Межсерверные обращения идут через защищённый
 private ingress на стороне владельца сервиса; его listener остаётся локальным,
 а service token проверяется независимо от TLS и сетевого allowlist. Нельзя
 открывать внутренние API на публичном Gateway. HTTP redirects запрещены, чтобы
@@ -340,6 +342,47 @@ images/cache и Colima очищаются отдельно по правилам
 неопределённость Billing, scheduled release, tombstone, rollback и ACL.
 Unit/HTTP, typecheck, lint и build выполняются отдельно: `pnpm test`,
 `pnpm typecheck`, `pnpm lint`, `pnpm build`.
+
+### Локальная репетиция двенадцати процессов на Docker-образах
+
+Из корня services на пустом локальном Docker context `colima`:
+
+```bash
+WINCRM_IMAGE_REHEARSAL_ALLOW_MUTATION=true node apps/crm-access/test/integration/local-crm-image-topology.mjs --run
+```
+
+Образы собираются из `git archive HEAD:apps/<service>`: ignored env и
+неотслеживаемые исходники не попадают в image. Создаются четыре независимые
+PostgreSQL 18 с отдельными паролями, migration/runtime ролями и namespace
+guard. Миграции выполняются CLI из соответствующего образа, не с хоста.
+Все 12 runtime-процессов используют точные image IDs, production-mode,
+loopback HTTP и пулы 5/4/1 (API/worker/publisher), всего 40 подключений.
+Pairwise credentials не передаются сервисам, которым они не принадлежат.
+
+Отдельный тестовый RabbitMQ имеет восемь независимых runtime principals:
+publishers не получают consumer/DDL права, Intake workers — publish/DDL права.
+Access worker сохраняет существующий ограниченный topology contract.
+Брокер намеренно выключен при запуске процессов: восемь background roles
+должны завершиться с ошибкой и автоматически перезапуститься. После запуска
+брокера проверяются health всех ролей, image/revision, 21 пустая очередь,
+шесть push consumers, четыре database IDs и текущие pool connections.
+Повторное выключение брокера в работающей системе должно вернуть readiness
+503 у восьми фоновых ролей и сохранить 200 у четырёх API. После восстановления
+брокера все роли и шесть push consumers должны восстановиться без перезапуска
+application processes. Обычный SIGTERM проверяется отдельно: exit 0 всех ролей,
+нет queued/unacked сообщений. Итоговый `result.json` публикуется атомарно только
+после graceful shutdown и удаления собственных containers/volumes.
+Профиль не создаёт аккаунтов,
+бизнес-команд или внешних отправок, не изменяет production env и не обращается
+к VPS. Успех удаляет только собственные containers/volumes; ошибка сохраняет
+их вместе с private ownership metadata для разбора. После окончания действует
+общая обязательная очистка локальных images/cache и остановка Colima.
+
+Это доказательство холодного старта, **не capacity PASS** и не сквозная
+передача реальных заявок. Защитные лимиты стенда (384 MiB/process,
+256 MiB/PostgreSQL, 512 MiB/RabbitMQ) не являются production-рекомендацией.
+Idle statistics не заменяют burst/экспорт, рост соседних сервисов, CPU p95,
+WAL/disk/connection измерения и проверки native/acceptance workflows.
 
 Наличие этих контрактов не означает готовность paid production. Обязательны
 отдельные интеграционные проверки реальных сервисов/PG/Rabbit, rollout

@@ -33,6 +33,8 @@ jobs:
       - run: bash .github/scripts/static-check-services-lifecycle.sh
       - name: Verify isolated four-frontend browser harness
         run: node --test apps/crm-access/test/integration/local-frontends.test.mjs apps/crm-access/test/integration/local-browser-team.test.mjs
+      - name: Verify isolated CRM image topology contract
+        run: node --test apps/crm-access/test/integration/local-crm-image-topology.test.mjs
 
   service:
     name: ${{ matrix.app }}

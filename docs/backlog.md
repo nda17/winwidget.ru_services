@@ -370,7 +370,7 @@ Production-инцидент 06.09.2026 показал, что `process.exitCode 
 Compose недостаточно при автоматическом старте контейнеров после reboot VPS.
 
 Проверить аналогичные entrypoints Identity, Platform, Reporting,
-Widgets, Gateway и будущих `crm-*`: наличие того же catch в коде — риск,
+Widgets и Gateway: наличие того же catch в коде — риск,
 но не доказательство текущего отказа этих healthy сервисов. Перед их
 выборочным выпуском воспроизвести зависшие handles, проверить successful
 startup/обычный graceful shutdown и отсутствие преждевременной обработки.
