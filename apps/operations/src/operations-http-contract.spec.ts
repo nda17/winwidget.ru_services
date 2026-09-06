@@ -21,8 +21,35 @@ import { DatabaseRestoreController } from './restore/database-restore.controller
 import { OPERATIONS_SCALAR_QUERY_PIPE } from './common/operations-request-context';
 import { OPERATIONS_GLOBAL_PREFIX_EXCLUDES } from './runtime/operations-http.config';
 import { TelegramSettingsController } from './telegram/telegram-settings.controller';
+import { MessagingAdminController } from './messaging-admin/messaging-admin.controller';
+import { MessagingAdminService } from './messaging-admin/messaging-admin.service';
 
 describe('Operations HTTP access contract', () => {
+	it('keeps messaging overview ADMIN-visible and failure reads/actions DEV-only', () => {
+		expect(
+			Reflect.getMetadata(PATH_METADATA, MessagingAdminController)
+		).toBe('messaging/admin');
+		for (const [method, roles] of [
+			['overview', ['ADMIN', 'DEV']],
+			['failures', ['DEV']],
+			['retry', ['DEV']],
+			['close', ['DEV']]
+		] as const) {
+			expect(
+				Reflect.getMetadata(
+					OPERATIONS_REQUIRED_ROLES,
+					MessagingAdminController.prototype[method]
+				)
+			).toEqual(roles);
+		}
+		expect(
+			Reflect.getMetadata(
+				METHOD_METADATA,
+				MessagingAdminController.prototype.failures
+			)
+		).toBe(RequestMethod.GET);
+	});
+
 	it('accepts one scalar query value and rejects arrays or objects', () => {
 		expect(
 			OPERATIONS_SCALAR_QUERY_PIPE.transform('value', {} as never)
@@ -247,11 +274,29 @@ describe('Operations scalar query HTTP contract', () => {
 	const alerts = {
 		getAll: jest.fn().mockResolvedValue({ items: [] })
 	};
+	const failureRepository = {
+		findMany: jest.fn().mockResolvedValue([]),
+		count: jest.fn().mockResolvedValue(0)
+	};
+	const federation = {
+		getFailures: jest.fn().mockResolvedValue({ items: [], total: 0 })
+	};
+	const messaging = new MessagingAdminService(
+		{ integrationDeliveryFailure: failureRepository } as never,
+		federation as never,
+		{} as never,
+		{} as never,
+		{} as never
+	);
 
 	beforeAll(async () => {
+		jest.spyOn(messaging, 'getFailures');
 		const module = await Test.createTestingModule({
-			controllers: [AdminAlertsController],
-			providers: [{ provide: AdminAlertsService, useValue: alerts }]
+			controllers: [AdminAlertsController, MessagingAdminController],
+			providers: [
+				{ provide: AdminAlertsService, useValue: alerts },
+				{ provide: MessagingAdminService, useValue: messaging }
+			]
 		})
 			.overrideGuard(OperationsAuthGuard)
 			.useValue({ canActivate: () => true })
@@ -282,5 +327,30 @@ describe('Operations scalar query HTTP contract', () => {
 			severity: undefined,
 			type: undefined
 		});
+	});
+
+	it.each(['FAILED', 'RETRYING', 'RESOLVED', 'CLOSED', 'ALL'])(
+		'passes the public %s failure status without reinterpretation',
+		async status => {
+			const response = await fetch(
+				`${baseUrl}/messaging/admin/failures?page=2&limit=10&status=${status}`
+			);
+			expect(response.status).toBe(200);
+			expect(messaging.getFailures).toHaveBeenCalledWith(2, 10, {
+				integration: undefined,
+				category: undefined,
+				status
+			});
+		}
+	);
+
+	it('rejects repeated failure status before repository or owner federation access', async () => {
+		const response = await fetch(
+			`${baseUrl}/messaging/admin/failures?status=FAILED&status=ALL`
+		);
+		expect(response.status).toBe(400);
+		expect(failureRepository.findMany).not.toHaveBeenCalled();
+		expect(failureRepository.count).not.toHaveBeenCalled();
+		expect(federation.getFailures).not.toHaveBeenCalled();
 	});
 });

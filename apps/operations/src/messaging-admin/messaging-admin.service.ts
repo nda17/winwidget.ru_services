@@ -593,13 +593,18 @@ export class MessagingAdminService {
 		}
 		const status = filters.status?.trim().toUpperCase();
 		if (!status || status === 'ALL') return where;
-		if (status === 'OPEN' || status === 'UNRESOLVED')
+		if (status === 'FAILED') {
+			where.resolvedAt = null;
+			where.retryingAt = null;
+		} else if (status === 'OPEN' || status === 'UNRESOLVED')
 			where.resolvedAt = null;
 		else if (status === 'RETRYING') {
 			where.resolvedAt = null;
 			where.retryingAt = { not: null };
-		} else if (status === 'RESOLVED' || status === 'CLOSED') {
-			where.resolvedAt = { not: null };
+		} else if (status === 'RESOLVED') {
+			where.resolution = IntegrationFailureResolution.DELIVERED;
+		} else if (status === 'CLOSED') {
+			where.resolution = IntegrationFailureResolution.CLOSED_NO_RETRY;
 		} else
 			throw new BadRequestException('Некорректный статус ошибки доставки');
 		return where;
