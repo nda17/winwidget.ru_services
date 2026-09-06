@@ -191,14 +191,38 @@ Read-only аудит production API и личного кабинета ЮKassa �
 
 Отдельный CRM backend VPS не является обязательным условием: допустим
 проверенный deployment на текущий backend VPS при выполнении gates выше.
-Read-only замеры 06.09.2026 показали 5.29–5.33 GiB `MemAvailable` из
-7.751 GiB уже до добавления CRM: действующий rehearsal gate 6 GiB не проходит.
-При раздельных ролях native connector требуется 12 CRM application processes
-и четыре PostgreSQL, а не только четыре контейнера. Production Compose,
-memory/CPU caps и числовой budget каждого DB pool ещё не утверждены;
-короткие замеры низкой нагрузки не доказывают запас на peak/backup/recovery.
-До размещения подтвердить этот бюджет и резерв под нагрузкой либо согласовать
-увеличение ресурсов/другую топологию; очистка диска не устраняет нехватку RAM.
+Read-only замеры 06.09.2026 03:40–03:41 МСК показали 5.117–5.146 GiB
+`MemAvailable` из 7.751 GiB, 4 vCPU, 15.58 GiB свободного диска (80% занято)
+и 31 healthy контейнер без restarts/OOM. CPU busy 15.23–18.02%, но CPU PSI
+`avg10` достигает 8.08%: короткий снимок не доказывает запас под нагрузкой.
+Порог 6 GiB относится к отдельному restore rehearsal (два временных
+контейнера по 2 GiB плюс резерв 2 GiB), а не автоматически запрещает CRM runtime.
+Его невыполнение не разрешает ослаблять restore gate.
+
+При раздельных ролях native connector нужны 12 application processes:
+Access — API/worker/publisher; Intake — API, три workers и три publishers;
+Customers и Sales — по API. Вместе с четырьмя PostgreSQL это 16 новых
+контейнеров, без временных migration/release jobs. Production Compose и
+memory/CPU caps ещё не утверждены. Для локальной проверки заложить явные
+Prisma pool limits: API 5, worker 4, publisher 1 — 40 runtime connections
+(Access 10, Intake 20, Customers 5, Sales 5). Дополнительно резервировать
+по три подключения на БД для migration/backup/read-only probe и отдельные
+superuser slots. Старый и новый runtime при rollout могут удвоить pools:
+проектные `max_connections` 32/48/16/16 требуют проверки либо исключения overlap.
+Это предлагаемый бюджет, а не действующая конфигурация: сейчас CRM URLs
+передаются Prisma без явного `connection_limit`.
+
+На production-shaped стенде проверить 12 процессов и четыре раздельные БД,
+release images, worker prefetch/reconciliation и максимум одновременных
+экспортов. Предварительная граница: дополнительный пик CRM вместе с ростом
+RabbitMQ/Identity/Billing/Widgets не более 3 GiB при сохранении минимум 2 GiB
+`MemAvailable`; общий CPU p95 не выше 70% и без ухудшения существующих SLO.
+Не назначать произвольные жёсткие caps только по idle RSS. Подтвердить
+connection ceilings без pool timeouts, восстановление очередей после burst,
+WAL/место под новые и rollback images, migration и штатное резервное копирование.
+Без этого capacity PASS не доказан; при нехватке ресурсов согласовать
+увеличение VPS или другую топологию, не объединяя сервисы/БД.
+Очистка диска не устраняет нехватку RAM.
 Решение по frontend
 уточнено пользователем 05.09.2026: все четыре приложения, включая WinCRM,
 размещаются в отдельных контейнерах на одном текущем frontend VPS; отдельный
@@ -602,9 +626,12 @@ replicas.
 
 ### P1 — применить удаление пользовательской вкладки «Беклог» в production
 
-Перед миграцией Operations `20260910110000_remove_admin_backlog` получить
-явное согласие пользователя на перенос production safety dump с VPS в
-приватный локальный каталог для изолированной проверки восстановления.
+Миграцию Operations `20260910110000_remove_admin_backlog` пока не выполнять:
+06.09.2026 пользователь уточнил, что дополнительные копии ему не нужны.
+Не создавать ещё один dump и не скачивать production safety dump на Mac;
+существующие backups и штатное резервное копирование не удалять и не отключать.
+Возобновление destructive phase B требует отдельно согласованной проверки
+восстановления; отказ от дополнительной копии не заменяет эту проверку.
 Автопроверка безопасности отклонила скачивание из-за чувствительных данных:
 общее разрешение на реализацию/deploy не заменяет согласие на этот перенос.
 Не обходить отказ другим транспортом или промежуточным хранилищем. После
@@ -678,10 +705,18 @@ Operations runtime отклоняет до обращения к БД и сос�
 различать доставленные `RESOLVED` и закрытые без повторения `CLOSED`, не меняя
 исторические строки с неизвестным результатом.
 
-Не менять текущий Operations runtime во время получения Notes backup/restore
-evidence, привязанного к точному worker container/image. После завершения
-удаления Notes подготовить отдельный API-only rollout без CRM foundation,
-DDL и перезапуска workers. Проверить в браузере все пять фильтров, частичную
+Подготовить независимый PRE-B API-only rollout без CRM foundation, DDL,
+новых backup-копий и перезапуска workers: Notes-free runtime уже действует,
+а исправляемый read-фильтр не обращается к Notes. Требовать exact phase-A
+receipt/source worker/image/database UUID, 13 применённых migrations и
+неизменную pending Notes migration, сохранённые данные и writer fence,
+неизменные Gateway routes, restore=false и отсутствие активных restore jobs.
+Ограничить source/compiled diff только проверенным фильтром и тестами,
+проверить graceful stop/rollback API и неизменность 30 соседних контейнеров.
+Сохранённые Notes receipts и backup не переписывать: после замены только API
+старый phase-B admission должен оставаться закрытым до отдельной проверки
+нового сочетания revisions. Удаление Notes не является условием этого hotfix.
+Проверить в браузере все пять фильтров, частичную
 недоступность источника и существующие backend-права; не запускать retry/DLQ
 или внешние отправки ради проверки.
 
