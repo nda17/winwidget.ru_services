@@ -1,4 +1,8 @@
-import { ForbiddenException, Injectable } from '@nestjs/common';
+import {
+	ForbiddenException,
+	Injectable,
+	ServiceUnavailableException
+} from '@nestjs/common';
 import { CrmAccessLifecycle } from '@prisma/crm-access-client';
 import { getCrmAccessCorrelationId } from '../common/crm-access-request-context';
 import { BillingEntitlementClient } from '../internal/billing-entitlement.client';
@@ -214,6 +218,25 @@ export class CrmAuthorizationService {
 		}
 		const role: CrmRole =
 			membership.role === 'OWNER' ? 'OWNER' : member!.role;
+		// teamIds also bounds assignment in every domain service. Administrative
+		// roles must use current, service-owned teams from this workspace, not an
+		// absent OWNER member row or arbitrary team IDs supplied by the client.
+		let teamIds = member?.teams.map(team => team.teamId) ?? [];
+		if (role === 'OWNER' || role === 'CRM_ADMIN') {
+			const teams = await this.prisma.crmTeam.findMany({
+				where: { workspaceId, archivedAt: null },
+				select: { id: true },
+				orderBy: { id: 'asc' },
+				take: 1001
+			});
+			// Existing downstream contracts allow at most 1000 team IDs. Never
+			// silently truncate authority or widen scope when that bound is reached.
+			if (teams.length > 1000)
+				throw new ServiceUnavailableException(
+					'CRM team authority exceeds the supported contract limit'
+				);
+			teamIds = teams.map(team => team.id);
+		}
 		const state =
 			workspace.lifecycle === CrmAccessLifecycle.READ_ONLY ||
 			billing.status === 'READ_ONLY'
@@ -243,7 +266,7 @@ export class CrmAuthorizationService {
 					: role === 'TEAM_LEAD'
 						? ('TEAM' as const)
 						: ('ALL' as const),
-			teamIds: member?.teams.map(team => team.teamId) ?? [],
+			teamIds,
 			permissions: namespace
 				? permissions.filter(permission =>
 						permission.startsWith(`${namespace}:`)

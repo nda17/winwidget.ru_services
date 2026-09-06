@@ -92,6 +92,17 @@ Identity независимо от business-write и не открывает д�
 закрывает доступ с `503`; отсутствие entitlement признаётся только по успешному
 ответу Billing со статусом `NOT_ACTIVATED`.
 
+## Область отделов для доменных записей
+
+Авторизация использует прежний DTO `teamIds`: для `OWNER` и `CRM_ADMIN`
+это актуальные активные отделы только выбранного пространства, полученные
+из собственной БД Access. Для `MANAGER`, `TEAM_LEAD`, `ANALYST` сохраняются
+только активные назначения сотрудника. Владелец может назначать запись отделу
+без фиктивного OWNER member; произвольные или чужие UUID не разрешаются.
+Отделы перечитываются при каждой авторизации; архивированные не возвращаются.
+Существующий межсервисный предел — 1000 отделов: превышение закрывает доступ
+с `503`, а не обрезает список и не расширяет права.
+
 ## Финансовый BFF и ограничение мест
 
 `CRM_ACCESS_BILLING_ENABLED=false` по умолчанию закрывает финансовые маршруты.
@@ -327,6 +338,27 @@ push consumers; ручного `publishOne`, прямого seed CRM admissions 
 использует development-режим; production release gate не изменяется. Emails,
 SMS, Telegram и реальные платежи выключены. Проверка здесь не запускает Docker
 сама и не подтверждает браузерный результат лишь по readiness.
+
+При работающем `--browser-team` доступен отдельный HTTP companion:
+
+```bash
+WINCRM_LOCAL_STACK_ALLOW_MUTATION=true node apps/crm-access/test/integration/local-team-runtime.mjs /exact/private/browser-fixture.json
+```
+
+Он использует другие свежие fixture-персоны `owner`, `manager`, `teamLead`,
+не изменяя аккаунты браузерного сценария. Три входа проходят обычный Identity
+HTTP и расходуют реальные login slots. Все изменения — публичные команды
+через Gateway; workers/publishers уже работают отдельными `main.js`, без
+композиции классов, `publishOne`, JWT signing или seed бизнес-таблиц.
+Проверяются конкурентное принятие на последнее место, настоящий PostgreSQL
+lock у двух push handlers, FIFO, отключение/повторное включение, пять ролей,
+OWN/TEAM/ALL контактов и компаний, запрет чужого workspace в трёх доменных
+сервисах, ограничения аналитика и CAS/replay смены роли. PostgreSQL observer
+только читает результат и кратко удерживает тестовый advisory lock.
+Private `team-runtime-started.json` запрещает повторный запуск на частично
+изменённой персоне; после ошибки нужен новый изолированный стенд, не удаление
+marker. `team-runtime-result.json` не подтверждает браузер, email, Docker
+images или WIDGET snapshots; cleanup остаётся обязанностью wrapper.
 
 SIGINT/SIGTERM/SIGHUP закрывают собственный browser ingress, ждут durable
 Outbox/receipt drain, затем graceful exit своих background-процессов. Только

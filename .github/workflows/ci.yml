@@ -32,7 +32,7 @@ jobs:
           node-version: 20
       - run: bash .github/scripts/static-check-services-lifecycle.sh
       - name: Verify isolated four-frontend browser harness
-        run: node --test apps/crm-access/test/integration/local-frontends.test.mjs apps/crm-access/test/integration/local-browser-team.test.mjs
+        run: node --test apps/crm-access/test/integration/local-frontends.test.mjs apps/crm-access/test/integration/local-browser-team.test.mjs apps/crm-access/test/integration/local-team-runtime.test.mjs
       - name: Verify isolated CRM image topology contract
         run: node --test apps/crm-access/test/integration/local-crm-image-topology.test.mjs
       - name: Verify opt-in native image workflow contract

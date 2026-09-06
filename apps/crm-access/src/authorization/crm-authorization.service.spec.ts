@@ -48,6 +48,9 @@ function setup(role = 'OWNER', status = 'ACTIVE') {
 			.mockResolvedValue({ status, entitlement: { id: 'billing-id' } })
 	};
 	const prisma = {
+		crmTeam: {
+			findMany: jest.fn().mockResolvedValue([])
+		},
 		crmWorkspaceAccess: {
 			findUnique: jest.fn().mockResolvedValue({
 				lifecycle: 'ACTIVE',
@@ -314,6 +317,7 @@ describe('CRM service authorization', () => {
 		['MANAGER', 'OWN']
 	])('enforces the %s data scope', async (role, dataScope) => {
 		const current = setup(role);
+		current.prisma.crmTeam.findMany.mockResolvedValue([{ id: teamId }]);
 		expect(
 			await current.service.authorize(
 				'Bearer user',
@@ -327,6 +331,58 @@ describe('CRM service authorization', () => {
 			permissions: expect.arrayContaining(['sales:read', 'sales:write'])
 		});
 	});
+	it.each(['OWNER', 'CRM_ADMIN'])(
+		'uses only current workspace teams for %s assignment authority',
+		async role => {
+			const current = setup(role);
+			current.prisma.crmTeam.findMany.mockResolvedValue([{ id: teamId }]);
+			expect(
+				await current.service.authorize('Bearer user', workspaceId)
+			).toMatchObject({ role, dataScope: 'ALL', teamIds: [teamId] });
+			expect(current.prisma.crmTeam.findMany).toHaveBeenCalledWith({
+				where: { workspaceId, archivedAt: null },
+				select: { id: true },
+				orderBy: { id: 'asc' },
+				take: 1001
+			});
+			current.prisma.crmTeam.findMany.mockResolvedValue([]);
+			expect(
+				(await current.service.authorize('Bearer user', workspaceId))
+					.teamIds
+			).toEqual([]);
+			expect(current.prisma.crmTeam.findMany).toHaveBeenCalledTimes(2);
+		}
+	);
+	it.each(['MANAGER', 'TEAM_LEAD', 'ANALYST'])(
+		'never expands %s assignment authority to other workspace teams',
+		async role => {
+			const current = setup(role);
+			expect(
+				(await current.service.authorize('Bearer user', workspaceId))
+					.teamIds
+			).toEqual([teamId]);
+			expect(current.prisma.crmTeam.findMany).not.toHaveBeenCalled();
+		}
+	);
+	it.each(['OWNER', 'CRM_ADMIN'])(
+		'preserves the existing team contract bound for %s without truncation',
+		async role => {
+			const current = setup(role);
+			current.prisma.crmTeam.findMany.mockResolvedValue(
+				Array.from({ length: 1000 }, () => ({ id: teamId }))
+			);
+			expect(
+				(await current.service.authorize('Bearer user', workspaceId))
+					.teamIds
+			).toHaveLength(1000);
+			current.prisma.crmTeam.findMany.mockResolvedValue(
+				Array.from({ length: 1001 }, () => ({ id: teamId }))
+			);
+			await expect(
+				current.service.authorize('Bearer user', workspaceId)
+			).rejects.toBeInstanceOf(ServiceUnavailableException);
+		}
+	);
 	it('only permits aggregate analytics to an ANALYST', async () => {
 		const current = setup('ANALYST');
 		expect(
