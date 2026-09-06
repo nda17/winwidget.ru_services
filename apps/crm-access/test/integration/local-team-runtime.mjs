@@ -125,7 +125,44 @@ export async function readBoundedJson(response) {
 
 export async function verifyTeamRuntime(fixture, log = () => {}) {
 	validateTeamRuntimeFixture(fixture);
-	const { runId, accounts } = fixture;
+	return verifyTeamWorkflow({
+		runId: fixture.runId,
+		accounts: fixture.accounts,
+		foreignWorkspaceId: fixture.accounts.browserOwner.workspaceId,
+		log,
+		assertReady: async () => {
+			for (const [port, service, label] of [
+				[5301, 'crm-access', 'crm-access-worker'],
+				[5302, 'crm-access', 'crm-access-outbox-publisher'],
+				[4902, 'identity', 'identity-outbox-publisher']
+			]) {
+				process.kill(fixture.children[label], 0);
+				const response = await fetch(
+					`http://127.0.0.1:${port}/health/ready`,
+					{ redirect: 'error', signal: AbortSignal.timeout(5000) }
+				);
+				assert.equal(response.status, 200);
+				assertRuntimeHealth(
+					await readBoundedJson(response),
+					service,
+					fixture.runId
+				);
+			}
+		}
+	});
+}
+
+// Both drivers use the same ordinary HTTP business commands. The image driver
+// proves OCI ownership/readiness separately; this function never claims images.
+export async function verifyTeamWorkflow({
+	runId,
+	accounts,
+	foreignWorkspaceId,
+	assertReady,
+	log = () => {}
+}) {
+	assert.match(runId, /^[a-f0-9]{10}$/);
+	assert.match(foreignWorkspaceId, /^[a-f0-9-]{36}$/);
 	const workspaceId = accounts.owner.workspaceId;
 	let phase = 'runtime readiness',
 		accessDb,
@@ -170,19 +207,7 @@ export async function verifyTeamRuntime(fixture, log = () => {}) {
 		...data
 	});
 	try {
-		for (const [port, service, label] of [
-			[5301, 'crm-access', 'crm-access-worker'],
-			[5302, 'crm-access', 'crm-access-outbox-publisher'],
-			[4902, 'identity', 'identity-outbox-publisher']
-		]) {
-			process.kill(fixture.children[label], 0);
-			const response = await fetch(
-				`http://127.0.0.1:${port}/health/ready`,
-				{ redirect: 'error', signal: AbortSignal.timeout(5000) }
-			);
-			assert.equal(response.status, 200);
-			assertRuntimeHealth(await readBoundedJson(response), service, runId);
-		}
+		await assertReady();
 		const db = (app, schema, packageName) => {
 			const require = createRequire(
 				join(servicesRoot, 'apps', app, 'package.json')
@@ -486,7 +511,7 @@ export async function verifyTeamRuntime(fixture, log = () => {}) {
 			'/crm/sales/tasks'
 		])
 			await request(
-				`${path}?workspaceId=${accounts.browserOwner.workspaceId}&page=1&pageSize=25`,
+				`${path}?workspaceId=${foreignWorkspaceId}&page=1&pageSize=25`,
 				{ token, expected: 403 }
 			);
 		await request(

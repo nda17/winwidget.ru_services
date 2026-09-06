@@ -450,6 +450,40 @@ RabbitMQ все восемь фоновых процессов завершил�
 Idle statistics не заменяют burst/экспорт, рост соседних сервисов, CPU p95,
 WAL/disk/connection измерения и проверки native/acceptance workflows.
 
+### Команда и database-delayed retry на настоящих образах
+
+```bash
+WINCRM_LOCAL_STACK_ALLOW_MUTATION=true node apps/crm-access/test/integration/local-wincrm-stack.mjs --backend-only --verify-team-images --smoke-and-stop
+```
+
+Это отдельный профиль: флаги активации, прямого CRM seed, Widgets и прочих
+проверок с ним несовместимы. Нужен тот же локальный `wincrm-mvp-postgres18`
+на loopback `55440`, других контейнеров быть не должно. Семь API images
+(Identity, Billing, четыре CRM, Gateway), Access worker/publisher и Identity
+publisher запускаются из точного HEAD. Шесть логических БД имеют отдельные
+migration/runtime роли, но разделяют один тестовый PostgreSQL; это не
+production-shaped capacity proof. RabbitMQ topology создаёт provisioner;
+три независимых runtime principals не имеют configure permission.
+
+Обычные HTTP login/Trial/template/invitation/acceptance проходят общий
+сценарий `local-team-runtime.mjs`: Trial 2 с владельцем, pending без места,
+конкурентное занятие последнего места, FIFO, disable/re-enable, все пять
+CRM-ролей, OWN/TEAM/ALL и запрет доступа в другое workspace. Отдельное
+свежее workspace проходит outage Identity/Billing последовательно для
+`provision`, `acceptance`, `admission`. Наблюдаются receipt и retry Outbox,
+проверяются неизменные payload/token/messageId и реальная 30-секундная
+задержка после остановки/запуска Access worker/publisher и RabbitMQ.
+Повтор committed events под scoped publisher credentials не должен
+создавать новых приглашений/admission/membership или изменять receipts.
+Скрипт не создаёт host-экземпляры business workers и не меняет таблицы
+CRM для имитации бизнес-команд. Email/внешние провайдеры отключены.
+
+`team-images-result.json` появляется только после успешного сценария,
+пустых шести очередей, graceful shutdown и удаления собственных image
+контейнеров. Общий тестовый PostgreSQL и images/cache требуют отдельной
+обязательной очистки. Браузер, реальные оплаты, целевая topology и capacity
+остаются самостоятельными release gates; наличие профиля не означает PASS.
+
 ### Native Widgets → Inbox на настоящих API/worker/publisher images
 
 Отдельный неинтерактивный профиль из корня services:

@@ -182,12 +182,20 @@ export function nativeImageEnvironment(app, values, revision) {
 }
 
 export class NativeImageRuntime {
-	constructor({ servicesRoot, stateDirectory, runId, log }) {
+	constructor({
+		servicesRoot,
+		stateDirectory,
+		runId,
+		log,
+		profile = 'native'
+	}) {
 		assert.match(runId, /^[a-f0-9]{10}$/);
+		assert.ok(['native', 'team'].includes(profile));
+		this.profile = profile;
 		this.root = servicesRoot;
 		this.directory = stateDirectory;
 		this.runId = runId;
-		this.label = 'native-images-' + runId;
+		this.label = profile + '-images-' + runId;
 		this.log = log;
 		this.images = new Map();
 		this.processes = new Map();
@@ -254,7 +262,7 @@ export class NativeImageRuntime {
 	}
 	async record() {
 		await writeFile(
-			join(this.directory, 'native-images-ownership.json'),
+			join(this.directory, this.profile + '-images-ownership.json'),
 			JSON.stringify(
 				{
 					runId: this.runId,
@@ -327,7 +335,9 @@ export class NativeImageRuntime {
 			await this.command('git', ['rev-parse', 'HEAD'])
 		).output;
 		assert.match(this.revision, /^[a-f0-9]{40}$/);
-		for (const app of NATIVE_IMAGE_APPS) await this.build(app);
+		for (const app of NATIVE_IMAGE_APPS)
+			if (this.profile !== 'team' || app !== 'widgets')
+				await this.build(app);
 		await this.prepareBroker();
 	}
 	async build(app) {
@@ -470,7 +480,7 @@ export class NativeImageRuntime {
 		await this.inspect(id);
 		return id;
 	}
-	async prepareBroker() {
+	async createBroker() {
 		this.stage = 'scoped-native-broker';
 		await this.docker(['pull', NATIVE_IMAGE_BROKER], { timeout: 180_000 });
 		const password = randomBytes(24).toString('hex');
@@ -522,6 +532,9 @@ export class NativeImageRuntime {
 		this.amqp = createRequire(
 			join(this.root, 'apps/crm-access/package.json')
 		)('amqplib');
+	}
+	async prepareBroker() {
+		await this.createBroker();
 		const connection = await this.amqp.connect(this.provisionerUrl);
 		try {
 			const channel = await connection.createChannel();
@@ -784,7 +797,10 @@ export class NativeImageRuntime {
 		);
 		assert.equal(this.owned.length, 0);
 		assert.equal(evidence.revision, this.revision);
-		const path = join(this.directory, 'native-images-result.json');
+		const path = join(
+			this.directory,
+			this.profile + '-images-result.json'
+		);
 		await writeFile(
 			path + '.pending',
 			JSON.stringify(
@@ -829,7 +845,7 @@ export class NativeImageRuntime {
 		}
 		// Only allowlisted driver codes survive; raw logs can contain request data.
 		await writeFile(
-			join(this.directory, 'native-images-failure.json'),
+			join(this.directory, this.profile + '-images-failure.json'),
 			JSON.stringify({
 				runId: this.runId,
 				revision: this.revision,

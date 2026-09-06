@@ -568,7 +568,7 @@ test('tracked harness and CI wire the opt-in observer to real entrypoints, not m
 	);
 	assert.match(
 		harness,
-		/if \(withBrowserTeam\) \{\s*await browserTeamAnonymousPreflight\(\);/
+		/if \(withBrowserTeam \|\| withTeamImages\) \{\s*await browserTeamAnonymousPreflight\(\);/
 	);
 	assert.match(harness, /else await smoke\(accounts\)/);
 	assert.match(

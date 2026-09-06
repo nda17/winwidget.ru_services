@@ -36,7 +36,7 @@ jobs:
       - name: Verify isolated CRM image topology contract
         run: node --test apps/crm-access/test/integration/local-crm-image-topology.test.mjs
       - name: Verify opt-in native image workflow contract
-        run: node --test apps/crm-access/test/integration/local-native-images.test.mjs
+        run: node --test apps/crm-access/test/integration/local-native-images.test.mjs apps/crm-access/test/integration/local-team-images.test.mjs
       - name: Verify opt-in CRM Compose isolation without starting services
         run: node --test .github/scripts/validate-crm-compose.test.mjs
 

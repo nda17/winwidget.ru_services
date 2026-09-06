@@ -29,6 +29,12 @@ import {
 	nativeImageArguments
 } from './local-native-images.mjs';
 import {
+	TeamImageRuntime,
+	TEAM_IMAGE_ROLES,
+	teamImageArguments,
+	verifyTeamImages
+} from './local-team-images.mjs';
+import {
 	BROWSER_TEAM_PERSONAS,
 	BROWSER_TEAM_ROLES,
 	assertBrowserTeamReadiness,
@@ -98,6 +104,8 @@ if (process.argv[2] === '--refresh-frontends') {
 
 const args = new Set(process.argv.slice(2));
 const withNativeImages = nativeImageArguments(process.argv.slice(2));
+const withTeamImages = teamImageArguments(process.argv.slice(2));
+const withImageRuntime = withNativeImages || withTeamImages;
 if (args.has('--help')) {
 	console.log(`Usage: WINCRM_LOCAL_STACK_ALLOW_MUTATION=true node apps/crm-access/test/integration/local-wincrm-stack.mjs [--backend-only] [--activate-owner] [--with-widgets] [--verify-native-widget-http | --verify-native-widget-http-all] [--verify-domain] [--verify-billing] [--verify-billing-http] [--verify-acceptance-http] [--verify-team-http] [--smoke-and-stop] | --browser-team
 
@@ -122,10 +130,15 @@ It additionally proves public Quiz submit -> real Widgets Outbox publisher -> Ra
 proving the same path for QUIZ/WHEEL/CALLBACK/TIMER/STOP_OFFER/CALCULATOR in sequence.
 Both profiles use built dist classes, not release images; Reporting is a test sink only.
 --verify-native-images is a separate profile with exactly --backend-only --activate-owner
---with-widgets --smoke-and-stop. It runs eight immutable API images and five native
+--with-widgets --smoke-and-stop. It runs eight immutable API images and seven native
 background roles in production mode, applies image-owned migrations to seven fresh
 logical databases on the local test PostgreSQL, and proves all six Widgets via real HTTP/RabbitMQ.
 It does not prove browser UX, external providers or full twelve-role/four-PostgreSQL capacity.
+--verify-team-images is a separate profile with exactly --backend-only --smoke-and-stop.
+It runs seven immutable API images and actual Access worker/publisher and Identity publisher,
+normal login/Trial/onboarding/invitations, concurrent admission at Trial2, roles/FIFO,
+then 30-second durable retries for all three consumers across dependency, process and
+broker restarts. Six logical databases share one local PostgreSQL; no browser/email/capacity claim.
 --verify-domain runs Customers, Intake and Sales PostgreSQL 18 integration scenarios.
 It includes the service-owned native Widget transfer PostgreSQL gate.
 --verify-billing proves Billing commerce transactions and Access admission fences on PostgreSQL 18.
@@ -166,6 +179,7 @@ for (const arg of args) {
 			'--verify-native-widget-http',
 			'--verify-native-widget-http-all',
 			'--verify-native-images',
+			'--verify-team-images',
 			'--verify-domain',
 			'--verify-billing',
 			'--verify-billing-http',
@@ -400,7 +414,7 @@ function sql(database, query, role = bootstrapRole) {
 }
 
 function databaseUrl(service, role) {
-	return `postgresql://${role}@127.0.0.1:55440/${service.database}?schema=${service.schema}&sslmode=disable${withBrowserTeam ? '&connection_limit=3' : withNativeImages ? '&connection_limit=1' : ''}`;
+	return `postgresql://${role}@127.0.0.1:55440/${service.database}?schema=${service.schema}&sslmode=disable${withBrowserTeam ? '&connection_limit=3' : withImageRuntime ? '&connection_limit=1' : ''}`;
 }
 
 async function assertFreePort(port) {
@@ -550,7 +564,7 @@ REVOKE ALL ON ALL TABLES IN SCHEMA foreign_service_guard FROM PUBLIC;
 		'node_modules/prisma/build/index.js'
 	);
 	for (const command of ['generate', 'migrate']) {
-		if (withNativeImages && command === 'migrate') {
+		if (withImageRuntime && command === 'migrate') {
 			await nativeImages.migrate(service, env[service.databaseVariable]);
 			continue;
 		}
@@ -2064,7 +2078,7 @@ async function start(
 	env,
 	cwd = stateDirectory
 ) {
-	if (withNativeImages) {
+	if (withImageRuntime) {
 		const port = label === 'api-gateway' ? 4100 : byApp[label].port;
 		await nativeImages.start(label, label, env, port);
 		return;
@@ -2467,15 +2481,23 @@ try {
 	const ports = [
 		4100,
 		...serviceDefinitions.map(service => service.port),
-		...(withNativeImages
-			? [5675, ...NATIVE_IMAGE_ROLES.map(role => role[3])]
+		...(withImageRuntime
+			? [
+					5675,
+					...(withTeamImages ? TEAM_IMAGE_ROLES : NATIVE_IMAGE_ROLES).map(
+						role => role[3]
+					)
+				]
 			: []),
 		...(withBrowserTeam ? BROWSER_TEAM_ROLES.map(role => role.port) : []),
 		...(args.has('--backend-only') ? [] : [3000, 3001, 3002, 3003, 3100])
 	];
 	for (const port of ports) await assertFreePort(port);
-	if (withNativeImages) {
-		nativeImages = new NativeImageRuntime({
+	if (withImageRuntime) {
+		const ImageRuntime = withTeamImages
+			? TeamImageRuntime
+			: NativeImageRuntime;
+		nativeImages = new ImageRuntime({
 			servicesRoot,
 			stateDirectory,
 			runId,
@@ -2566,7 +2588,7 @@ try {
 		}
 	);
 	await waitForHttp('api-gateway', 'http://127.0.0.1:4100/health/ready');
-	if (withBrowserTeam) {
+	if (withBrowserTeam || withTeamImages) {
 		await browserTeamAnonymousPreflight();
 		log(
 			'Browser preflight: anonymous guards intact, startup login requests=0; normal rate limit unchanged'
@@ -2764,6 +2786,21 @@ try {
 			})
 		});
 	}
+	if (withTeamImages) {
+		nativeImageEvidence = await verifyTeamImages({
+			runtime: nativeImages,
+			servicesRoot,
+			runId,
+			accounts,
+			serviceEnvironment: app => ({
+				...ownedEnvironment(app, common),
+				[byApp[app].databaseVariable]: databaseUrl(
+					byApp[app],
+					byApp[app].runtimeRole
+				)
+			})
+		});
+	}
 	if (args.has('--verify-acceptance-http')) {
 		const { verifyAcceptanceHttp } =
 			await import('./local-acceptance-http.integration.mjs');
@@ -2849,6 +2886,7 @@ try {
 				billingHttp: billingHttpEvidence,
 				teamHttp: teamHttpEvidence,
 				...(withNativeImages ? { nativeImages: nativeImageEvidence } : {}),
+				...(withTeamImages ? { teamImages: nativeImageEvidence } : {}),
 				...(withBrowserTeam
 					? {
 							browserTeam: {
