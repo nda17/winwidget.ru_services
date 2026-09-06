@@ -1,0 +1,36 @@
+{
+	"version": 1,
+	"service": "crm-intake",
+	"tables": {
+		"service_identity": ["SELECT"],
+		"_prisma_migrations": [],
+		"inbox_entries": ["SELECT", "INSERT", "UPDATE"],
+		"intake_sources": ["SELECT", "INSERT", "UPDATE"],
+		"intake_commands": ["SELECT", "INSERT"],
+		"intake_activities": ["SELECT", "INSERT"],
+		"inbound_receipts": ["SELECT", "INSERT"],
+		"ingestion_rate_buckets": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+		"acceptances": ["SELECT", "INSERT", "UPDATE"],
+		"acceptance_outbox": ["SELECT", "INSERT", "UPDATE"],
+		"acceptance_receipts": ["SELECT", "INSERT", "UPDATE"],
+		"csv_imports": ["SELECT", "INSERT"],
+		"csv_import_rows": ["SELECT", "INSERT"],
+		"export_audit": ["SELECT", "INSERT"],
+		"managed_widget_sources": ["SELECT", "INSERT", "UPDATE"],
+		"widget_control_jobs": ["SELECT", "INSERT", "UPDATE"],
+		"widget_control_receipts": ["SELECT", "INSERT", "UPDATE"],
+		"widget_control_outbox": ["SELECT", "INSERT", "UPDATE"],
+		"widget_transfer_receipts": ["SELECT", "INSERT", "UPDATE"],
+		"widget_entry_snapshots": ["SELECT", "INSERT"],
+		"widget_transfer_outbox": ["SELECT", "INSERT", "UPDATE"]
+	},
+	"sequences": {},
+	"types": [],
+	"routines": [
+		"check_csv_import_integrity",
+		"widget_control_immutable",
+		"widget_control_integrity",
+		"widget_transfer_immutable",
+		"widget_transfer_integrity"
+	]
+}

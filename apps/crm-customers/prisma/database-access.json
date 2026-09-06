@@ -1,0 +1,18 @@
+{
+	"version": 1,
+	"service": "crm-customers",
+	"tables": {
+		"service_identity": ["SELECT"],
+		"_prisma_migrations": [],
+		"contacts": ["SELECT", "INSERT", "UPDATE"],
+		"companies": ["SELECT", "INSERT", "UPDATE"],
+		"customer_commands": ["SELECT", "INSERT"],
+		"customer_activities": ["SELECT", "INSERT"],
+		"intake_operation_slots": ["SELECT", "INSERT"],
+		"intake_operation_commands": ["SELECT", "INSERT"],
+		"export_audit": ["SELECT", "INSERT"]
+	},
+	"sequences": {},
+	"types": [],
+	"routines": []
+}

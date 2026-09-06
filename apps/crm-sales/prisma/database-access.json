@@ -1,0 +1,22 @@
+{
+	"version": 1,
+	"service": "crm-sales",
+	"tables": {
+		"service_identity": ["SELECT"],
+		"_prisma_migrations": [],
+		"pipelines": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+		"pipeline_stages": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+		"pipeline_template_installations": ["SELECT", "INSERT"],
+		"pipeline_template_installation_commands": ["SELECT", "INSERT"],
+		"deals": ["SELECT", "INSERT", "UPDATE"],
+		"tasks": ["SELECT", "INSERT", "UPDATE"],
+		"deal_timeline": ["SELECT", "INSERT"],
+		"command_receipts": ["SELECT", "INSERT"],
+		"intake_operation_slots": ["SELECT", "INSERT"],
+		"intake_operation_commands": ["SELECT", "INSERT"],
+		"export_audit": ["SELECT", "INSERT"]
+	},
+	"sequences": {},
+	"types": ["CrmPipelineStageState", "SalesTaskStatus"],
+	"routines": ["check_sales_next_action", "reject_intake_proof_mutation"]
+}

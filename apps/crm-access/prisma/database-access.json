@@ -1,0 +1,27 @@
+{
+	"version": 1,
+	"service": "crm-access",
+	"tables": {
+		"service_identity": ["SELECT"],
+		"_prisma_migrations": [],
+		"crm_workspace_access": ["SELECT", "INSERT", "UPDATE"],
+		"crm_workspace_members": ["SELECT", "INSERT", "UPDATE"],
+		"crm_teams": ["SELECT", "INSERT", "UPDATE"],
+		"crm_member_teams": ["SELECT", "INSERT", "DELETE"],
+		"crm_invitation_intents": ["SELECT", "INSERT", "UPDATE"],
+		"crm_admissions": ["SELECT", "INSERT", "UPDATE"],
+		"crm_team_command_receipts": ["SELECT", "INSERT"],
+		"crm_team_audit": ["SELECT", "INSERT"],
+		"crm_team_outbox": ["SELECT", "INSERT", "UPDATE"],
+		"crm_team_deliveries": ["SELECT", "INSERT", "UPDATE"],
+		"crm_billing_capacity": ["SELECT", "INSERT", "UPDATE"],
+		"crm_billing_operations": ["SELECT", "INSERT", "UPDATE"]
+	},
+	"sequences": { "crm_admissions_position_seq": ["SELECT", "USAGE"] },
+	"types": ["CrmAccessLifecycle", "CrmMemberRole"],
+	"routines": [
+		"reject_team_history_mutation",
+		"guard_billing_operation",
+		"guard_billing_capacity"
+	]
+}

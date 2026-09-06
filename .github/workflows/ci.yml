@@ -39,6 +39,8 @@ jobs:
         run: node --test apps/crm-access/test/integration/local-native-images.test.mjs apps/crm-access/test/integration/local-team-images.test.mjs
       - name: Verify opt-in CRM Compose isolation without starting services
         run: node --test .github/scripts/validate-crm-compose.test.mjs
+      - name: Verify service-owned CRM database access contracts
+        run: node --test deploy/crm/database-access.test.mjs
 
   service:
     name: ${{ matrix.app }}
@@ -468,6 +470,31 @@ jobs:
         run: pnpm --dir "apps/${{ matrix.app }}" run build
       - name: Run service integration
         run: pnpm --dir "apps/${{ matrix.app }}" run test:integration
+
+  crm-database-access:
+    name: CRM isolated PostgreSQL 18 access / ${{ matrix.app }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        app: [crm-access, crm-intake, crm-customers, crm-sales]
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.9
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 20
+          cache: pnpm
+          cache-dependency-path: apps/${{ matrix.app }}/pnpm-lock.yaml
+      - name: Install owner migration tooling
+        run: pnpm --dir "apps/${{ matrix.app }}" install --frozen-lockfile
+      - name: Prove exact migrations and least-privilege roles in disposable owner cluster
+        run: node deploy/crm/database-access.integration.mjs --ci "${{ matrix.app }}"
 
   crm-migration-smoke:
     name: CRM PostgreSQL 18 migration / ${{ matrix.app }}
@@ -1232,6 +1259,7 @@ jobs:
       - billing-wincrm-commerce-integration
       - billing-crm-provenance-migration
       - crm-migration-smoke
+      - crm-database-access
       - crm-domain-integration
       - crm-sales-integration
       - lifecycle-contract
