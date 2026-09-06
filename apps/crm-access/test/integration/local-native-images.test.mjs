@@ -4,11 +4,14 @@ import { test } from 'node:test';
 import {
 	NATIVE_IMAGE_APPS,
 	NATIVE_IMAGE_ROLES,
+	nativeBrokerPermissions,
+	nativeDiagnosticCodes,
 	nativeImageArguments,
 	nativeImageEnvironment,
 	nativeRevisionPath,
 	NativeImageRuntime
 } from './local-native-images.mjs';
+import { verifyNativeInboxAcceptance } from './local-native-inbox-workflow.mjs';
 
 const revision = 'a'.repeat(40);
 const flags = [
@@ -18,6 +21,39 @@ const flags = [
 	'--verify-native-images',
 	'--smoke-and-stop'
 ];
+
+test('native failure diagnostics retain driver codes but never raw log or secret values', () => {
+	assert.deepEqual(
+		nativeDiagnosticCodes(
+			'password=synthetic-only token=synthetic-token P2024 PrismaClientKnownRequestError P2024 55P03'
+		),
+		['55P03', 'P2024', 'PrismaClientKnownRequestError']
+	);
+	assert.deepEqual(
+		nativeDiagnosticCodes(
+			'https://private.invalid credentials=synthetic-only'
+		),
+		[]
+	);
+});
+
+test('acceptance driver respects the actual unpaginated pipeline query contract', async () => {
+	const stop = new Error('Stop before synthetic business commands');
+	const workspaceId = '11111111-1111-4111-8111-111111111111';
+	await assert.rejects(
+		verifyNativeInboxAcceptance({
+			workspaceId,
+			request: async path => {
+				assert.equal(
+					path,
+					'/crm/sales/pipelines?workspaceId=' + workspaceId
+				);
+				throw stop;
+			}
+		}),
+		error => error === stop
+	);
+});
 
 test('native image proof is an explicit standalone non-interactive profile', () => {
 	assert.equal(nativeImageArguments(flags), true);
@@ -37,10 +73,10 @@ test('native image proof is an explicit standalone non-interactive profile', () 
 		assert.throws(() => nativeImageArguments([...flags, flag]));
 });
 
-test('eight actual API images and five dedicated background processes have immutable definitions', () => {
+test('eight actual API images and seven dedicated background processes have immutable definitions', () => {
 	assert.equal(NATIVE_IMAGE_APPS.length, 8);
-	assert.equal(NATIVE_IMAGE_ROLES.length, 5);
-	assert.equal(new Set(NATIVE_IMAGE_ROLES.map(item => item[3])).size, 5);
+	assert.equal(NATIVE_IMAGE_ROLES.length, 7);
+	assert.equal(new Set(NATIVE_IMAGE_ROLES.map(item => item[3])).size, 7);
 	assert.ok(Object.isFrozen(NATIVE_IMAGE_APPS));
 	assert.ok(Object.isFrozen(NATIVE_IMAGE_ROLES));
 	assert.ok(NATIVE_IMAGE_ROLES.every(Object.isFrozen));
@@ -49,6 +85,52 @@ test('eight actual API images and five dedicated background processes have immut
 			item => item[2] !== 'all' && NATIVE_IMAGE_APPS.includes(item[1])
 		)
 	);
+});
+
+test('each native and acceptance worker reads only its queue; publishers cannot consume or configure', () => {
+	for (const [label, app, role] of NATIVE_IMAGE_ROLES) {
+		const [configure, write, read] = nativeBrokerPermissions(label).map(
+			value => new RegExp(value)
+		);
+		const queue = label.includes('widget-control')
+			? 'winwidget.crm-intake.widget-control.v1'
+			: label.includes('widget-transfer')
+				? 'winwidget.crm-intake.widget-transfer.v1'
+				: 'winwidget.crm-intake.acceptance.v1';
+		for (const name of [
+			'winwidget.crm-intake.acceptance.v1',
+			'winwidget.crm-intake.widget-control.v1',
+			'winwidget.crm-intake.widget-transfer.v1',
+			'winwidget.events',
+			'unrelated'
+		]) {
+			assert.equal(configure.test(name), false);
+			assert.equal(
+				read.test(name),
+				role.endsWith('worker') && name === queue
+			);
+		}
+		const ownExchange =
+			app === 'widgets'
+				? 'winwidget.events'
+				: label.includes('acceptance')
+					? 'winwidget.crm-intake.events'
+					: label.includes('widget-control')
+						? 'winwidget.crm-intake.widget-control.events'
+						: 'winwidget.crm-intake.widget-transfer.events';
+		for (const name of [
+			'winwidget.events',
+			'winwidget.crm-intake.events',
+			'winwidget.crm-intake.widget-control.events',
+			'winwidget.crm-intake.widget-transfer.events',
+			'winwidgetXcrm-intakeXevents'
+		])
+			assert.equal(
+				write.test(name),
+				!role.endsWith('worker') && name === ownExchange
+			);
+	}
+	assert.throws(() => nativeBrokerPermissions('unreviewed-publisher'));
 });
 
 test('release images retain production guards and remove only test provider overrides', () => {
@@ -184,6 +266,35 @@ test('image workflow never composes or monkeypatches business workers in the hos
 	assert.match(workflow, /capacityVerified: false/);
 	assert.match(workflow, /browserVerified: false/);
 	assert.match(workflow, /postgresInstances: 1/);
+});
+
+test('native Inbox scope and acceptance proof uses actual HTTP and push workers with separate evidence', async () => {
+	const source = await readFile(
+		new URL('./local-native-inbox-workflow.mjs', import.meta.url),
+		'utf8'
+	);
+	assert.doesNotMatch(
+		source,
+		/dist\/src|\.prototype|\.processEvent\(|intakeDb\.\w+\.(?:update|create|delete)|Date\.now\s*=/
+	);
+	for (const marker of [
+		'CREATE_FROM_ENTRY',
+		'EXISTING',
+		'RETRY_SCHEDULED',
+		'RETRY_WAIT',
+		'nativeCrossWorkspaceDenied',
+		'nativeTeamRevocationVerified',
+		'acceptanceBrokerReplayVerified',
+		'publishedAt.getTime() >= original.availableAt.getTime()',
+		'invitationAdmissionVerified: false'
+	])
+		assert.ok(source.includes(marker));
+	const driver = await readFile(
+		new URL('./local-native-images-workflow.mjs', import.meta.url),
+		'utf8'
+	);
+	assert.match(driver, /verifyNativeInboxScope\(/);
+	assert.match(driver, /verifyNativeInboxAcceptance\(/);
 });
 
 test('image profile retains existing native quota fixture and granular writer grants', async () => {

@@ -2742,6 +2742,10 @@ try {
 			runId,
 			apiUrl: publicApi,
 			account: accounts.owner,
+			managerAccount: accounts.manager,
+			foreignAccount: accounts.analyst,
+			prepareTeamFixtures: () =>
+				seedTeamFixtures(accounts, accounts.owner.workspaceId),
 			widgets: widgetsFixture,
 			widgetsDatabaseUrl: databaseUrl(
 				byApp.widgets,

@@ -12,6 +12,11 @@ import {
 	NATIVE_TRANSFER_QUEUE,
 	NATIVE_CONTROL_QUEUE
 } from './local-native-images.mjs';
+import {
+	changeNativeMember,
+	verifyNativeInboxScope,
+	verifyNativeInboxAcceptance
+} from './local-native-inbox-workflow.mjs';
 
 // Business commands go only through actual API images. Prisma below observes
 // service-owned test data; no processor/publisher/consumer class is instantiated.
@@ -21,6 +26,9 @@ export async function verifyNativeImages({
 	runId,
 	apiUrl,
 	account,
+	managerAccount,
+	foreignAccount,
+	prepareTeamFixtures,
 	widgets,
 	widgetsDatabaseUrl,
 	intakeDatabaseUrl,
@@ -53,9 +61,11 @@ export async function verifyNativeImages({
 	assert.equal(apiUrl, 'http://localhost:4100/api/v1');
 	let phase = 'normal-login';
 	let token;
+	let managerToken;
 	let leadSequence = 0;
 	const submissions = [];
 	const evidence = [];
+	const sourceTokens = new Map();
 	const controlConflictRecoveries = [];
 	const stage = value => {
 		phase = value;
@@ -64,7 +74,13 @@ export async function verifyNativeImages({
 	};
 	const request = async (
 		path,
-		{ body, expected = 200, base = apiUrl, anonymous = false } = {}
+		{
+			body,
+			expected = 200,
+			base = apiUrl,
+			anonymous = false,
+			actorToken = token
+		} = {}
 	) => {
 		const response = await fetch(base + path, {
 			method: body ? 'POST' : 'GET',
@@ -72,8 +88,8 @@ export async function verifyNativeImages({
 			signal: AbortSignal.timeout(15_000),
 			headers: {
 				'content-type': 'application/json',
-				...(!anonymous && token
-					? { authorization: 'Bearer ' + token }
+				...(!anonymous && actorToken
+					? { authorization: 'Bearer ' + actorToken }
 					: {}),
 				...(body?.commandId ? { 'idempotency-key': body.commandId } : {}),
 				origin: 'http://localhost:3000'
@@ -311,6 +327,25 @@ export async function verifyNativeImages({
 		assert.equal(session.user.id, account.userId);
 		token = session.accessToken;
 		assert.ok(typeof token === 'string' && token.length > 100);
+		await prepareTeamFixtures();
+		managerToken = (
+			await request('/auth/login', {
+				anonymous: true,
+				body: {
+					email: managerAccount.email,
+					password: managerAccount.password
+				}
+			})
+		).accessToken;
+		assert.ok(
+			typeof managerToken === 'string' && managerToken.length > 100
+		);
+		await changeNativeMember(
+			request,
+			account.workspaceId,
+			managerAccount.crmMemberId,
+			{ role: 'CRM_ADMIN' }
+		);
 		stage('six-explicit-managed-connections');
 		const candidates = await request(
 			'/crm/intake/widget-sources/candidates?workspaceId=' +
@@ -319,7 +354,13 @@ export async function verifyNativeImages({
 		);
 		assert.equal(candidates.eligibility.plan, 'EASY');
 		assert.equal(candidates.items.length, 6);
-		for (const widget of fixtures) {
+		for (const [index, widget] of fixtures.entries()) {
+			sourceTokens.set(
+				widget.widgetType,
+				index % 2 ? managerToken : token
+			);
+			widget.creatorSubject =
+				index % 2 ? managerAccount.userId : account.userId;
 			const command = {
 				schemaVersion: 1,
 				workspaceId: account.workspaceId,
@@ -327,10 +368,11 @@ export async function verifyNativeImages({
 				name: 'Image proof ' + widget.widgetType,
 				widgetType: widget.widgetType,
 				widgetId: widget.widgetId,
-				teamId: null
+				teamId: managerAccount.crmTeamId
 			};
 			const created = await request('/crm/intake/widget-sources', {
 				body: command,
+				actorToken: sourceTokens.get(widget.widgetType),
 				expected: 202
 			});
 			assert.equal(created.command.state, 'QUEUED');
@@ -417,6 +459,7 @@ export async function verifyNativeImages({
 			assert.deepEqual(
 				await request('/crm/intake/widget-sources', {
 					body: widget.controlCommand,
+					actorToken: sourceTokens.get(widget.widgetType),
 					expected: 202
 				}),
 				widget.queuedResponse
@@ -440,7 +483,8 @@ export async function verifyNativeImages({
 		);
 		assert.equal(await intakeDb.widgetTransferReceipt.count(), 0);
 		for (const spec of NATIVE_IMAGE_ROLES.filter(
-			item => !item[2].startsWith('widget-control')
+			item =>
+				item[2].startsWith('widget-transfer') || item[1] === 'widgets'
 		))
 			await runtime.startNativeRole(spec, serviceEnvironment(spec[1]));
 		for (const submission of submissions) {
@@ -922,6 +966,36 @@ export async function verifyNativeImages({
 			await channel.close();
 		});
 		assert.equal(reported.size, submissions.length);
+		// Native delivery is now drained. Retain its immutable snapshots and reuse
+		// the exact API images, but stop its five processes before two acceptance
+		// processes are started. This is not a production capacity measurement.
+		await settleQueues();
+		for (const spec of NATIVE_IMAGE_ROLES.filter(
+			item => !item[0].includes('-acceptance-')
+		))
+			await runtime.stop(runtime.processes.get(spec[0]).id);
+		await runtime.stop(runtime.processes.get('widgets').id);
+		stage('retained-widget-snapshots-own-team-cross-workspace');
+		const scopeEvidence = await verifyNativeInboxScope({
+			request,
+			account,
+			managerAccount,
+			foreignAccount,
+			managerToken,
+			evidence,
+			fixtures
+		});
+		stage('unnamed-widget-acceptance-and-retry');
+		const acceptanceEvidence = await verifyNativeInboxAcceptance({
+			runtime,
+			request,
+			intakeDb,
+			workspaceId: account.workspaceId,
+			evidence,
+			serviceEnvironment,
+			restart,
+			existingSubmission: submissions[6]
+		});
 		for (const [label, process] of runtime.processes) {
 			const item = await runtime.inspect(process.id);
 			assert.equal(item.Image, runtime.images.get(process.app));
@@ -938,7 +1012,7 @@ export async function verifyNativeImages({
 			revision: runtime.revision,
 			images: Object.fromEntries(runtime.images),
 			apiImages: 8,
-			backgroundProcesses: 5,
+			backgroundProcesses: 7,
 			widgetTypes: evidence,
 			controlConflictRecoveries: controlConflictRecoveries.length,
 			submittedLeads: submissions.length,
@@ -952,6 +1026,8 @@ export async function verifyNativeImages({
 			explicitRevocationVerified: true,
 			expiryVerified: true,
 			retryDlqVerified: true,
+			...scopeEvidence,
+			...acceptanceEvidence,
 			browserVerified: false,
 			externalProvidersVerified: false,
 			capacityVerified: false,
@@ -960,6 +1036,13 @@ export async function verifyNativeImages({
 			postgresAuthentication: 'local-test-trust'
 		};
 	} catch (error) {
+		try {
+			await runtime.failureEvidence(phase);
+		} catch {
+			runtime.log(
+				'Bounded native failure diagnostics could not be recorded'
+			);
+		}
 		// Report only bounded status/driver codes and this test's line number.
 		// Never expose provider bodies, Prisma diagnostics, tokens or credentials.
 		const status = Number.isInteger(error?.nativeHttpStatus)
@@ -968,15 +1051,18 @@ export async function verifyNativeImages({
 		const code = /^P\d{4}$/.test(error?.code)
 			? '; code=' + error.code
 			: '';
-		const line = String(error?.stack || '').match(
-			/local-native-images-workflow\.mjs:(\d+):\d+/
-		)?.[1];
+		const stack = String(error?.stack || '');
+		const location =
+			stack.match(/(local-native-inbox-workflow\.mjs):(\d+):\d+/) ||
+			stack.match(/(local-native-images-workflow\.mjs):(\d+):\d+/);
 		throw new Error(
 			'Native release-image workflow failed during ' +
 				phase +
 				status +
 				code +
-				(line ? '; testLine=' + line : '') +
+				(location
+					? '; testLocation=' + location[1] + ':' + location[2]
+					: '') +
 				'; dependency details suppressed'
 		);
 	} finally {

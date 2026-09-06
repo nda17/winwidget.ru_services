@@ -42,6 +42,8 @@ export const NATIVE_IMAGE_ROLES = Object.freeze(
 			'widget-transfer-publisher',
 			5316
 		],
+		['crm-intake-acceptance-worker', 'crm-intake', 'worker', 5311],
+		['crm-intake-acceptance-publisher', 'crm-intake', 'publisher', 5312],
 		['widgets-publisher', 'widgets', 'publisher', 4701]
 	].map(Object.freeze)
 );
@@ -55,6 +57,48 @@ export const NATIVE_CONTROL_EVENT =
 	'crm.intake.widget-control.requested.v1';
 export const NATIVE_CONTROL_QUEUE =
 	'winwidget.crm-intake.widget-control.v1';
+export const NATIVE_ACCEPTANCE_EVENT =
+	'crm.intake.acceptance.requested.v1';
+export const NATIVE_ACCEPTANCE_QUEUE =
+	'winwidget.crm-intake.acceptance.v1';
+
+export function nativeDiagnosticCodes(text) {
+	return [
+		...new Set(
+			String(text).match(
+				/\b(?:P20\d{2}|55P03|57014|40001|40P01|ECONNREFUSED|ECONNRESET|ETIMEDOUT|UND_ERR_[A-Z_]+|PrismaClient[A-Za-z]+Error|TimeoutError|AbortError)\b/g
+			) || []
+		)
+	].sort();
+}
+
+export function nativeBrokerPermissions(label) {
+	const spec = NATIVE_IMAGE_ROLES.find(item => item[0] === label);
+	assert.ok(
+		spec,
+		'Only a reviewed native process may receive broker access'
+	);
+	const [, app, role] = spec;
+	if (app === 'widgets') return ['^$', '^winwidget\\.events$', '^$'];
+	const kind = role.startsWith('widget-control')
+		? 'widget-control'
+		: role.startsWith('widget-transfer')
+			? 'widget-transfer'
+			: 'acceptance';
+	const prefix =
+		kind === 'acceptance'
+			? 'winwidget\\.crm-intake'
+			: 'winwidget\\.crm-intake\\.' + kind;
+	const queue =
+		kind === 'acceptance'
+			? NATIVE_ACCEPTANCE_QUEUE
+			: kind === 'widget-control'
+				? NATIVE_CONTROL_QUEUE
+				: NATIVE_TRANSFER_QUEUE;
+	return role.endsWith('worker')
+		? ['^$', '^$', '^' + queue.replaceAll('.', '\\.') + '$']
+		: ['^$', '^' + prefix + '\\.(events|dead-letter)$', '^$'];
+}
 
 export function nativeRevisionPath(app) {
 	assert.ok(NATIVE_IMAGE_APPS.includes(app));
@@ -167,12 +211,14 @@ export class NativeImageRuntime {
 			});
 			let output = '';
 			let diagnosticBytes = 0;
+			let diagnosticTail = '';
 			const timer = setTimeout(() => child.kill('SIGTERM'), timeout);
 			child.stdout.on('data', bytes => {
 				output = (output + bytes).slice(-2 * 1024 * 1024);
 			});
 			child.stderr.on('data', bytes => {
 				diagnosticBytes += bytes.length;
+				diagnosticTail = (diagnosticTail + bytes).slice(-65536);
 			});
 			child.once('error', () => {
 				clearTimeout(timer);
@@ -180,7 +226,12 @@ export class NativeImageRuntime {
 			});
 			child.once('close', code => {
 				clearTimeout(timer);
-				resolve({ code, output: output.trim(), diagnosticBytes });
+				resolve({
+					code,
+					output: output.trim(),
+					diagnosticBytes,
+					diagnosticCodes: nativeDiagnosticCodes(diagnosticTail)
+				});
 			});
 			child.stdin.on('error', () => {});
 			child.stdin.end(input);
@@ -479,9 +530,13 @@ export class NativeImageRuntime {
 			});
 			for (const [kind, queue, event] of [
 				['widget-control', NATIVE_CONTROL_QUEUE, NATIVE_CONTROL_EVENT],
-				['widget-transfer', NATIVE_TRANSFER_QUEUE, NATIVE_TRANSFER_EVENT]
+				['widget-transfer', NATIVE_TRANSFER_QUEUE, NATIVE_TRANSFER_EVENT],
+				['acceptance', NATIVE_ACCEPTANCE_QUEUE, NATIVE_ACCEPTANCE_EVENT]
 			]) {
-				const prefix = 'winwidget.crm-intake.' + kind;
+				const prefix =
+					kind === 'acceptance'
+						? 'winwidget.crm-intake'
+						: 'winwidget.crm-intake.' + kind;
 				for (const suffix of ['events', 'dead-letter'])
 					await channel.assertExchange(prefix + '.' + suffix, 'direct', {
 						durable: true
@@ -511,31 +566,16 @@ export class NativeImageRuntime {
 		} finally {
 			await connection.close();
 		}
-		for (const [label, app, role] of NATIVE_IMAGE_ROLES) {
+		for (const [label, app] of NATIVE_IMAGE_ROLES) {
 			const secret = randomBytes(24).toString('hex');
 			const user = 'native_' + label.replaceAll('-', '_');
 			await this.ctl(['add_user', user, secret]);
-			const worker = role.endsWith('worker');
-			const prefix =
-				app === 'widgets'
-					? 'winwidget.events'
-					: 'winwidget.crm-intake.' +
-						(role.startsWith('widget-control')
-							? 'widget-control'
-							: 'widget-transfer');
-			const escaped = prefix.replaceAll('.', '\\.');
 			await this.ctl([
 				'set_permissions',
 				'-p',
 				this.vhost,
 				user,
-				'^$',
-				worker
-					? '^$'
-					: '^' +
-						escaped +
-						(app === 'widgets' ? '$' : '\\.(events|dead-letter)$'),
-				worker ? '^' + escaped + '\\.v1$' : '^$'
+				...nativeBrokerPermissions(label)
 			]);
 			if (app === 'widgets')
 				await this.ctl([
@@ -553,7 +593,7 @@ export class NativeImageRuntime {
 			);
 		}
 		this.log(
-			'Native broker ready with five independent process principals'
+			'Native broker ready with seven independent process principals'
 		);
 	}
 	ctl(args) {
@@ -762,6 +802,41 @@ export class NativeImageRuntime {
 		await rename(path + '.pending', path);
 		this.log(
 			'Native image proof completed after graceful cleanup: ' + path
+		);
+	}
+	async failureEvidence(phase) {
+		const processes = [];
+		for (const [label, process] of this.processes) {
+			const item = await this.inspect(process.id);
+			const logs = await this.command(
+				'docker',
+				['--context', 'colima', 'logs', '--tail', '500', process.id],
+				{ timeout: 10_000 }
+			);
+			processes.push({
+				label,
+				image: item.Image,
+				running: item.State.Running,
+				oomKilled: item.State.OOMKilled,
+				restartCount: item.RestartCount,
+				codes: [
+					...new Set([
+						...nativeDiagnosticCodes(logs.output),
+						...logs.diagnosticCodes
+					])
+				].sort()
+			});
+		}
+		// Only allowlisted driver codes survive; raw logs can contain request data.
+		await writeFile(
+			join(this.directory, 'native-images-failure.json'),
+			JSON.stringify({
+				runId: this.runId,
+				revision: this.revision,
+				phase,
+				processes
+			}),
+			{ mode: 0o600, flag: 'wx' }
 		);
 	}
 }
