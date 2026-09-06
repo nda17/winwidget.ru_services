@@ -422,10 +422,10 @@ exactFiles('deploy', ['docker-compose.prod.yml']);
 
 const servicesWorkflow = readFileSync('.github/workflows/ci.yml', 'utf8');
 const pinnedInfraRevision =
-	'acb80bf51c59ef099aafa387bf9a38729e483edf';
-const operationsEnvSha256 = '06f1affe7b715a3c2d96d2a00975fab168e2060623a8af72d33c62bb4055799e';
-if (!/^[a-f0-9]{64}$/.test(operationsEnvSha256)) {
-	throw new Error('Operations owner env must be synchronized and its exact hash reviewed before release');
+	'0d8743469572ac5c7c6e3f4efac203782937f5f6';
+const platformEnvSha256 = 'f7230f2feeb6483f0a3cd5fb49a87f27f8e7e715a7980644a01b4973d6ca398c';
+if (!/^[a-f0-9]{64}$/.test(platformEnvSha256)) {
+	throw new Error('Platform owner env must be synchronized and its exact hash reviewed before release');
 }
 for (const evidence of [
 	"cancel-in-progress: ${{ github.ref != 'refs/heads/prod' }}",
@@ -486,14 +486,14 @@ if (
 	infraReleaseReferences.length !== 1 ||
 	infraReleaseReferences.some(reference => reference[1] !== pinnedInfraRevision)
 ) {
-	throw new Error('the Operations API production job must use the exact reviewed infra SHA');
+	throw new Error('the Platform API production job must use the exact reviewed infra SHA');
 }
-// This PRE-B caller replaces only Operations API with the reviewed read-filter
-// fix. Workers, Notes data/fence, backups and the pending migration stay intact.
-const operationsRuntimeRevision = '65025008d4aa993adb96df435a744a29c4f021d3';
-const approvedApplicationsTree = '139df42fb3e049199a4f51c91b469e9a91b5f55b';
-const expectedApiJob = [
-	'    name: Deploy Operations API read filters only',
+// This caller replaces only Platform API with the reviewed CMS extension.
+// Publisher, other services, owner schemas, migrations and env remain unchanged.
+const platformRuntimeRevision = '484e546451088671e23ae37ae4026b9b3fe500c5';
+const approvedApplicationsTree = '12febea3f27d6aa3b25c0fbf35436a9cffcf95b8';
+const expectedPlatformJob = [
+	'    name: Deploy Platform marketing API only',
 	'    needs:',
 	'      - lifecycle-contract',
 	'      - operations-control-ledger',
@@ -506,9 +506,9 @@ const expectedApiJob = [
 	`    uses: nda17/winwidget.ru_infra/.github/workflows/deploy-production.yml@${pinnedInfraRevision}`,
 	'    with:',
 	'      services_revision: ${{ github.sha }}',
-	'      release_scope: operations-api-runtime',
-	`      expected_live_revision: '${operationsRuntimeRevision}'`,
-	`      expected_service_env_sha256: '${operationsEnvSha256}'`,
+	'      release_scope: platform-marketing-runtime',
+	`      expected_live_revision: '${platformRuntimeRevision}'`,
+	`      expected_service_env_sha256: '${platformEnvSha256}'`,
 	'    secrets:',
 	'      BACKEND_PRODUCTION_SSH_HOST: ${{ secrets.PRODUCTION_SSH_HOST }}',
 	'      BACKEND_PRODUCTION_SSH_PORT: ${{ secrets.PRODUCTION_SSH_PORT }}',
@@ -518,14 +518,14 @@ const expectedApiJob = [
 	'      BACKEND_PRODUCTION_ENV_SHA256: ${{ secrets.BACKEND_PRODUCTION_ENV_SHA256 }}',
 	''
 ].join('\n');
-const assertOperationsApiCaller = (workflow, applicationsTree) => {
+const assertPlatformCaller = (workflow, applicationsTree) => {
 	const jobParts = workflow.split('  deploy-production:\n');
 	if (
-		jobParts.length !== 2 || jobParts[1] !== expectedApiJob ||
+		jobParts.length !== 2 || jobParts[1] !== expectedPlatformJob ||
 		(workflow.match(/release_scope:/g) ?? []).length !== 1 ||
 		applicationsTree !== approvedApplicationsTree
 	) {
-		throw new Error('Operations API caller must preserve the reviewed source tree, phase-A identities and API-only authority');
+		throw new Error('Platform caller must preserve the reviewed source tree, live identity and API-only authority');
 	}
 };
 // HEAD's own tree exists in actions/checkout's depth-1 clone; no ancestor fetch
@@ -533,43 +533,44 @@ const assertOperationsApiCaller = (workflow, applicationsTree) => {
 const applicationsTree = execFileSync('git', ['rev-parse', 'HEAD:apps'], {
 	encoding: 'utf8'
 }).trim();
-assertOperationsApiCaller(servicesWorkflow, applicationsTree);
-const apiCallerMutations = [
-	['release_scope: operations-api-runtime', 'release_scope: operations-runtime'],
-	['release_scope: operations-api-runtime', 'release_scope: operations-backlog-backup'],
-	['release_scope: operations-api-runtime', 'release_scope: operations-backlog-finalize'],
-	['release_scope: operations-api-runtime', 'release_scope: workers-bootstrap-recovery'],
-	['release_scope: operations-api-runtime', 'release_scope: identity-with-operations-manifest'],
-	['release_scope: operations-api-runtime', 'release_scope: operations-federation-config'],
-	['release_scope: operations-api-runtime', 'release_scope: gateway-remove-notes'],
-	['release_scope: operations-api-runtime', 'release_scope: all'],
-	[`expected_live_revision: '${operationsRuntimeRevision}'`, `expected_live_revision: '${'a'.repeat(40)}'`],
-	[`expected_service_env_sha256: '${operationsEnvSha256}'`, `expected_service_env_sha256: '${'c'.repeat(64)}'`],
+assertPlatformCaller(servicesWorkflow, applicationsTree);
+const platformCallerMutations = [
+	['release_scope: platform-marketing-runtime', 'release_scope: operations-api-runtime'],
+	['release_scope: platform-marketing-runtime', 'release_scope: operations-runtime'],
+	['release_scope: platform-marketing-runtime', 'release_scope: operations-backlog-backup'],
+	['release_scope: platform-marketing-runtime', 'release_scope: operations-backlog-finalize'],
+	['release_scope: platform-marketing-runtime', 'release_scope: workers-bootstrap-recovery'],
+	['release_scope: platform-marketing-runtime', 'release_scope: identity-with-operations-manifest'],
+	['release_scope: platform-marketing-runtime', 'release_scope: operations-federation-config'],
+	['release_scope: platform-marketing-runtime', 'release_scope: gateway-remove-notes'],
+	['release_scope: platform-marketing-runtime', 'release_scope: all'],
+	[`expected_live_revision: '${platformRuntimeRevision}'`, `expected_live_revision: '${'a'.repeat(40)}'`],
+	[`expected_service_env_sha256: '${platformEnvSha256}'`, `expected_service_env_sha256: '${'c'.repeat(64)}'`],
 	[`deploy-production.yml@${pinnedInfraRevision}`, 'deploy-production.yml@prod'],
 	[`deploy-production.yml@${pinnedInfraRevision}`, `deploy-production.yml@${'b'.repeat(40)}`],
 	['      - operations-restore-rehearsal\n', ''],
 	["if: github.event_name == 'push' && github.ref == 'refs/heads/prod'", 'if: always()'],
-	['services_revision: ${{ github.sha }}', `services_revision: '${operationsRuntimeRevision}'`],
-	['    secrets:\n', `      operations_runtime_revision: '${operationsRuntimeRevision}'\n    secrets:\n`],
+	['services_revision: ${{ github.sha }}', `services_revision: '${platformRuntimeRevision}'`],
+	['    secrets:\n', `      operations_runtime_revision: '${platformRuntimeRevision}'\n    secrets:\n`],
 	['    secrets:\n', `      operations_evidence_sha256: '${'d'.repeat(64)}'\n    secrets:\n`],
-	['    secrets:\n', `      expected_operations_revision: '${operationsRuntimeRevision}'\n    secrets:\n`],
-	['    secrets:\n', `      expected_operations_api_revision: '${operationsRuntimeRevision}'\n    secrets:\n`],
-	['    secrets:\n', `      expected_operations_env_sha256: '${operationsEnvSha256}'\n    secrets:\n`],
+	['    secrets:\n', `      expected_operations_revision: '${platformRuntimeRevision}'\n    secrets:\n`],
+	['    secrets:\n', `      expected_operations_api_revision: '${platformRuntimeRevision}'\n    secrets:\n`],
+	['    secrets:\n', `      expected_operations_env_sha256: '${platformEnvSha256}'\n    secrets:\n`],
 	['    secrets:\n', `      expected_support_env_sha256: '${'d'.repeat(64)}'\n    secrets:\n`],
 	['    secrets:\n', '      deploy_frontend: true\n    secrets:\n'],
 	['    secrets:\n', '      release_scope: operations-runtime\n    secrets:\n'],
 	['    secrets:\n', '    secrets: inherit\n'],
 	['BACKEND_PRODUCTION_ENV_SHA256:', 'FRONTEND_PRODUCTION_ENV_SHA256:']
 ];
-for (const [before, after] of apiCallerMutations) {
-	const changedJob = expectedApiJob.replace(before, after);
-	if (changedJob === expectedApiJob) throw new Error('API caller negative fixture did not mutate');
-	throws(() => assertOperationsApiCaller(`  deploy-production:\n${changedJob}`, approvedApplicationsTree));
+for (const [before, after] of platformCallerMutations) {
+	const changedJob = expectedPlatformJob.replace(before, after);
+	if (changedJob === expectedPlatformJob) throw new Error('Platform caller negative fixture did not mutate');
+	throws(() => assertPlatformCaller(`  deploy-production:\n${changedJob}`, approvedApplicationsTree));
 }
-throws(() => assertOperationsApiCaller(servicesWorkflow, 'e'.repeat(40)));
-throws(() => assertOperationsApiCaller(servicesWorkflow, ''));
-throws(() => assertOperationsApiCaller(`${servicesWorkflow}  deploy-production:\n${expectedApiJob}`, approvedApplicationsTree));
-process.stdout.write(`operations_api_caller_negative_cases=${apiCallerMutations.length + 3}\n`);
+throws(() => assertPlatformCaller(servicesWorkflow, 'e'.repeat(40)));
+throws(() => assertPlatformCaller(servicesWorkflow, ''));
+throws(() => assertPlatformCaller(`${servicesWorkflow}  deploy-production:\n${expectedPlatformJob}`, approvedApplicationsTree));
+process.stdout.write(`platform_caller_negative_cases=${platformCallerMutations.length + 3}\n`);
 
 const rootReadme = readFileSync('README.md', 'utf8');
 if (

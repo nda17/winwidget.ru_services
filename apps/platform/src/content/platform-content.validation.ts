@@ -47,7 +47,108 @@ const sectionWithFeatureItems = object({
 	items: required(array(featureCard))
 });
 
+const marketingSeo = object({
+	title: required(string(500)),
+	description: required(string(2_000)),
+	keywords: required(array(string(200), 50)),
+	ogTitle: required(string(500)),
+	ogDescription: required(string(2_000))
+});
+const marketingHero = {
+	eyebrow: required(string(500)),
+	title: required(string(500)),
+	subtitle: required(string(2_000))
+};
+const marketingSection = {
+	enabled: required(boolean()),
+	title: required(string(500)),
+	subtitle: required(string(2_000)),
+	items: required(
+		array(
+			object({
+				title: required(string(500)),
+				text: required(string(2_000))
+			}),
+			50
+		)
+	)
+};
+const marketingIntegration = object({
+	...marketingSection,
+	note: required(string(2_000))
+});
+const marketingFaq = object({
+	enabled: required(boolean()),
+	title: required(string(500)),
+	items: required(
+		array(
+			object({
+				question: required(string(2_000)),
+				answer: required(string(2_000))
+			}),
+			50
+		)
+	)
+});
+const marketingCta = {
+	enabled: required(boolean()),
+	title: required(string(500)),
+	text: required(string(2_000))
+};
+const productButtons = {
+	widgetsButtonText: required(string(500)),
+	crmButtonText: required(string(500))
+};
+const productCard = object({
+	description: required(string(2_000)),
+	features: required(array(string(2_000), 50)),
+	buttonText: required(string(500))
+});
+
 const STRUCTURED_HOME_CONTENT_SCHEMA = object({
+	// Optional only at the page boundary: an old admin client may omit the
+	// new pages. A supplied page must satisfy its complete, strict schema.
+	ecosystem: optional(
+		object({
+			seo: required(marketingSeo),
+			hero: required(object(marketingHero)),
+			products: required(
+				object({
+					title: required(string(500)),
+					subtitle: required(string(2_000)),
+					widgets: required(productCard),
+					crm: required(productCard)
+				})
+			),
+			integration: required(marketingIntegration),
+			plans: required(
+				object({
+					enabled: required(boolean()),
+					title: required(string(500)),
+					subtitle: required(string(2_000)),
+					...productButtons,
+					note: required(string(2_000))
+				})
+			),
+			faq: required(marketingFaq),
+			cta: required(object({ ...marketingCta, ...productButtons }))
+		})
+	),
+	crmProduct: optional(
+		object({
+			seo: required(marketingSeo),
+			hero: required(
+				object({ ...marketingHero, buttonText: required(string(500)) })
+			),
+			features: required(object(marketingSection)),
+			workflow: required(object(marketingSection)),
+			integration: required(marketingIntegration),
+			faq: required(marketingFaq),
+			cta: required(
+				object({ ...marketingCta, buttonText: required(string(500)) })
+			)
+		})
+	),
 	seo: required(
 		object({
 			title: required(string(500)),

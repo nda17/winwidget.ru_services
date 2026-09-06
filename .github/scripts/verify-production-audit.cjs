@@ -181,7 +181,7 @@ const assertPlatformSanitizerBoundary = () => {
 		.join('\n');
 	if (
 		sha256(productionSourceManifest) !==
-		'a070ee6a1e5a1c5f3103e0f0cc2c5561cd78748e15b3a7bc599567420e5ffe23'
+		'ff490f9676d106ffb1724cb2338c61aaf955b0945fe101ba4f6ec620579cf614'
 	) {
 		throw new Error(
 			'Platform production TypeScript source manifest drifted while the sanitizer exception is active'

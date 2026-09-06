@@ -449,7 +449,7 @@ jobs:
           "apps/${{ matrix.app }}"
 
   deploy-production:
-    name: Deploy Operations API read filters only
+    name: Deploy Platform marketing API only
     needs:
       - lifecycle-contract
       - operations-control-ledger
@@ -459,12 +459,12 @@ jobs:
       - service-integration
       - widgets-integration
     if: github.event_name == 'push' && github.ref == 'refs/heads/prod'
-    uses: nda17/winwidget.ru_infra/.github/workflows/deploy-production.yml@acb80bf51c59ef099aafa387bf9a38729e483edf
+    uses: nda17/winwidget.ru_infra/.github/workflows/deploy-production.yml@0d8743469572ac5c7c6e3f4efac203782937f5f6
     with:
       services_revision: ${{ github.sha }}
-      release_scope: operations-api-runtime
-      expected_live_revision: '65025008d4aa993adb96df435a744a29c4f021d3'
-      expected_service_env_sha256: '06f1affe7b715a3c2d96d2a00975fab168e2060623a8af72d33c62bb4055799e'
+      release_scope: platform-marketing-runtime
+      expected_live_revision: '484e546451088671e23ae37ae4026b9b3fe500c5'
+      expected_service_env_sha256: 'f7230f2feeb6483f0a3cd5fb49a87f27f8e7e715a7980644a01b4973d6ca398c'
     secrets:
       BACKEND_PRODUCTION_SSH_HOST: ${{ secrets.PRODUCTION_SSH_HOST }}
       BACKEND_PRODUCTION_SSH_PORT: ${{ secrets.PRODUCTION_SSH_PORT }}
