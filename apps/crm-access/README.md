@@ -475,6 +475,10 @@ CRM-ролей, OWN/TEAM/ALL и запрет доступа в другое work
 задержка после остановки/запуска Access worker/publisher и RabbitMQ.
 Повтор committed events под scoped publisher credentials не должен
 создавать новых приглашений/admission/membership или изменять receipts.
+До и после replay проверяется стабильное завершение обоих service-owned
+Outbox, всех team receipts и шести RabbitMQ queues. Пустой broker без
+проверки PostgreSQL недостаточен: admission создаёт следующий FIFO wake
+в транзакции, а publisher может отправить его позже.
 Скрипт не создаёт host-экземпляры business workers и не меняет таблицы
 CRM для имитации бизнес-команд. Email/внешние провайдеры отключены.
 
@@ -483,6 +487,22 @@ CRM для имитации бизнес-команд. Email/внешние пр
 контейнеров. Общий тестовый PostgreSQL и images/cache требуют отдельной
 обязательной очистки. Браузер, реальные оплаты, целевая topology и capacity
 остаются самостоятельными release gates; наличие профиля не означает PASS.
+
+Локальный прогон 06.09.2026 `5b6798d104` на точной ревизии
+`709967cb82be429961f8f84c6006464d64abae9a` завершился успешно:
+обычные HTTP-команды приглашений, конкурентный последний seat, FIFO,
+disable/re-enable, все пять ролей и межпространственный запрет;
+три отдельные реальные 30-секундные retry для provision/acceptance/admission
+с сохранением deadline/payload/messageId после остановки и запуска
+dependency, Access worker/publisher и RabbitMQ. Повтор каждого завершённого
+события дважды не изменил invitation/membership/admission/receipt snapshots.
+Зафиксированы graceful exit и удаление собственных контейнеров. Семь API
+images и три background processes использовали шесть логических БД на одном
+локальном PostgreSQL 18, а не четыре production PostgreSQL instances.
+После прогона отдельно удалены шесть синтетических БД, 12 ролей,
+тестовый PostgreSQL/volume, все локальные images/cache; Colima остановлена.
+Этот PASS не закрывает браузер, email, внешние платежи, Intake widget-control,
+целевые production credentials/topology или нагрузочную capacity-проверку.
 
 ### Native Widgets → Inbox на настоящих API/worker/publisher images
 
