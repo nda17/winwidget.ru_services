@@ -245,8 +245,11 @@ provisioning scoped credentials/DB roles и measured memory/CPU caps.
 Shape validator не подтверждает capacity и не разрешает rollout. Routine
 backend controller проверяет контейнеры своего project `winwidget`, но
 RabbitMQ users — глобально: перед первым provisioning выпустить controller
-с точным `CRM_RABBITMQ_CONTRACT=disabled|native-v1` и согласованно включить
-`native-v1` под общим deploy lock после создания восьми principals/ACL/bindings.
+с точным `CRM_RABBITMQ_CONTRACT=disabled|mvp-v1` и согласованно включить
+`mvp-v1` под общим deploy lock после создания восьми CRM process principals
+и отдельного `winwidget-billing-wincrm-provider-worker`, их ACL/bindings.
+Платёжный consumer работает внутри существующего Billing worker, без нового
+CRM-сервиса. Полный inventory содержит 25 пользователей, не 24.
 На VPS этот переход ещё не проверен. Не ослаблять inventory до wildcard
 и не возвращать `disabled` при rollback runtime, пока существуют CRM users
 или события. До старта Access worker provisioner создаёт
@@ -254,6 +257,22 @@ RabbitMQ users — глобально: перед первым provisioning вы
 runtime с `CRM_ACCESS_RABBITMQ_ASSERT_TOPOLOGY=false` получает только read
 на основные очереди, без configure/write. Подтвердить этот контракт на
 целевом брокере, включая reconnect и fail-closed при отсутствующей очереди.
+Подключить AMQP-компонент `infra/scripts/crm-broker-topology.mjs` к реальному
+controller: shared lock/env/image fence, provision scoped users/ACL и безопасный
+private transport остаются обязательными. Отдельный metadata/provisioning
+тест не заменяет эти gates или проверку бизнес-сообщений на production.
+Перед запуском приглашений/оплаты проверить полный companion-контракт:
+Identity publisher должен иметь два точных routes принятия/письма приглашения,
+Notification Delivery — opt-in reader `wincrm-invitation-email` с прежними kinds,
+Billing publisher — provider-operation route и write на отдельный provider DLQ
+exchange. Новый Billing provider principal получает только read своей основной
+очереди; queue/DLQ/bindings создаёт provisioner, без TTL retry.
+В текущем production Compose ещё отсутствует явная передача ряда CRM variables
+существующим Identity/Billing/Notification Delivery. Перед cutover согласованно
+синхронизировать canonical/service env и process-scoped Compose: provider URL
+только Billing worker, private tokens только нужным caller/receiver, email flag
+только после готовности reader. Не считать локальный image harness, который
+передаёт env самостоятельно, доказательством этой production wiring.
 Для отдельного project `winwidget-crm` при первом
 rollout проверить сохранение контейнеров/images в целевой среде при routine
 cleanup, включая неиспользуемые CRM candidate/rollback tags, и общий deploy lock:
