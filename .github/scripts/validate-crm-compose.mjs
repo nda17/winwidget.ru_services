@@ -891,6 +891,8 @@ export function validateCrmCompose(config) {
 				test: [
 					'CMD',
 					'pg_isready',
+					'-h',
+					'127.0.0.1',
 					'-U',
 					'winwidget_' + schema + '_admin',
 					'-d',

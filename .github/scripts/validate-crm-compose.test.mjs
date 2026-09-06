@@ -340,6 +340,24 @@ test('real Compose normalization validates twenty isolated CRM definitions witho
 	assert.equal(report.releaseApproved, false);
 });
 
+test('all CRM database health checks wait for the final TCP server, not the initdb socket', () => {
+	for (const [app] of CRM_SERVICES) {
+		const changed = structuredClone(config);
+		const health = changed.services[app + '-postgres'].healthcheck;
+		assert.deepEqual(health.test.slice(0, 4), [
+			'CMD',
+			'pg_isready',
+			'-h',
+			'127.0.0.1'
+		]);
+		health.test.splice(2, 2);
+		assert.throws(
+			() => validateCrmCompose(changed),
+			/health check differs/
+		);
+	}
+});
+
 for (const [profiles, count] of [
 	[[], 0],
 	[['crm-runtime'], 12],

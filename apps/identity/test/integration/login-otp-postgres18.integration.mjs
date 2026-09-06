@@ -1,10 +1,17 @@
 import assert from 'node:assert/strict';
 import { randomBytes, randomUUID, createHash } from 'node:crypto';
 import { createRequire } from 'node:module';
+import { writeSync } from 'node:fs';
 import { setTimeout as delay } from 'node:timers/promises';
 
 const require = createRequire(import.meta.url);
 let stage = 'guards';
+function checkpoint(value) {
+	stage = value;
+	// Only fixed stage names: preserve diagnostics even on a native-engine
+	// crash, without logging queries, users, codes or credentials.
+	writeSync(1, `Identity login OTP PostgreSQL18 stage: ${stage}\n`);
+}
 
 function target(name) {
 	const raw = process.env[name]?.trim();
@@ -32,6 +39,7 @@ const context = ip => ({
 });
 
 async function main() {
+	checkpoint('guards');
 	assert.equal(process.env.IDENTITY_INTEGRATION_ALLOW_MUTATION, 'true');
 	const runtimeTarget = target('IDENTITY_TEST_DATABASE_URL');
 	const migrationTarget = target('IDENTITY_TEST_MIGRATION_DATABASE_URL');
@@ -90,7 +98,7 @@ async function main() {
 	);
 	let failure = null;
 	try {
-		stage = 'database-role';
+		checkpoint('database-role');
 		const [role] =
 			await runtime.$queryRawUnsafe(`SELECT current_user AS name, current_setting('server_version_num')::integer AS version,
 			NOT rolsuper AND NOT rolcreatedb AND NOT rolcreaterole AND NOT rolbypassrls AND NOT rolinherit AND NOT rolreplication AS restricted
@@ -121,7 +129,7 @@ async function main() {
 		}
 		assert.equal((await service.capabilities()).available, true);
 
-		stage = 'request-and-decoy-envelope';
+		checkpoint('request-and-decoy-envelope');
 		const started = performance.now();
 		const issued = await service.request(
 			{ channel: 'EMAIL', destination: emails[0].toUpperCase() },
@@ -189,7 +197,7 @@ async function main() {
 		);
 		rejectDelivery = false;
 
-		stage = 'parallel-correct-single-session';
+		checkpoint('parallel-correct-single-session');
 		const dto = {
 			challengeId: issued.challengeId,
 			browserToken: issued.browserToken,
@@ -242,7 +250,7 @@ async function main() {
 			return { challengeId: id, browserToken, code };
 		}
 
-		stage = 'parallel-wrong-attempt-cap';
+		checkpoint('parallel-wrong-attempt-cap');
 		const wrong = await seed();
 		const wrongAttempts = await Promise.allSettled(
 			Array.from({ length: 16 }, () =>
@@ -270,7 +278,7 @@ async function main() {
 			0
 		);
 
-		stage = 'user-deactivation-and-contact-rebind';
+		checkpoint('user-deactivation-and-contact-rebind');
 		const revoked = await seed();
 		await migrator.user.update({
 			where: { id: users[1] },
@@ -297,7 +305,7 @@ async function main() {
 			data: { verifiedAt }
 		});
 
-		stage = 'rollback-preserves-unconsumed-code';
+		checkpoint('rollback-preserves-unconsumed-code');
 		const rollback = await seed();
 		const proxy = new Proxy(runtime, {
 			get(target, key) {
@@ -352,7 +360,7 @@ async function main() {
 			1
 		);
 
-		stage = 'signing-failure-rolls-back';
+		checkpoint('signing-failure-rolls-back');
 		const signing = await seed();
 		const brokenSigner = new LoginOtpService(
 			runtime,
@@ -382,7 +390,7 @@ async function main() {
 			1
 		);
 
-		stage = 'contact-update-race';
+		checkpoint('contact-update-race');
 		const racing = await seed();
 		const previousContactChallenge = await seed();
 		let signalLocked;
@@ -485,7 +493,7 @@ async function main() {
 			2
 		);
 
-		stage = 'durable-cooldown-parallel-request';
+		checkpoint('durable-cooldown-parallel-request');
 		const globalKey = digest('LOGIN_FALLBACK:request:EMAIL:hour');
 		const beforeGlobal = (
 			await migrator.loginOtpRateLimit.findUniqueOrThrow({
@@ -537,7 +545,7 @@ async function main() {
 			beforeGlobal + 1
 		);
 
-		stage = 'constraints';
+		checkpoint('constraints');
 		await assert.rejects(
 			migrator.loginOtpChallenge.update({
 				where: { id: rollback.challengeId },
@@ -556,10 +564,11 @@ async function main() {
 				data: { expiresAt: new Date(Date.now() + 900_000) }
 			})
 		);
-		stage = 'complete';
+		checkpoint('complete');
 	} catch (error) {
 		failure = error;
 	} finally {
+		writeSync(1, 'Identity login OTP PostgreSQL18 cleanup: start\n');
 		// This fixture is a fresh dedicated test DB. Remove only its seeded users;
 		// the owning test runner disposes its complete DB and rate counters.
 		await migrator.user.deleteMany({ where: { id: { in: users } } });
@@ -567,6 +576,7 @@ async function main() {
 			runtime.$disconnect(),
 			migrator.$disconnect()
 		]);
+		writeSync(1, 'Identity login OTP PostgreSQL18 cleanup: complete\n');
 	}
 	if (failure) {
 		process.stderr.write(

@@ -219,6 +219,10 @@ for (const service of args[1] === 'all' ? services : [args[1]]) {
 				'exec',
 				container,
 				'pg_isready',
+				// initdb starts a temporary socket-only server before the real
+				// TCP listener. Bootstrap uses TCP and must wait for that listener.
+				'-h',
+				'127.0.0.1',
 				'-U',
 				roles.admin,
 				'-d',

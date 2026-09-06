@@ -229,6 +229,8 @@ services:
         [
           'CMD',
           'pg_isready',
+          '-h',
+          '127.0.0.1',
           '-U',
           'winwidget_crm_access_admin',
           '-d',
@@ -471,6 +473,8 @@ services:
         [
           'CMD',
           'pg_isready',
+          '-h',
+          '127.0.0.1',
           '-U',
           'winwidget_crm_intake_admin',
           '-d',
@@ -539,6 +543,8 @@ services:
         [
           'CMD',
           'pg_isready',
+          '-h',
+          '127.0.0.1',
           '-U',
           'winwidget_crm_customers_admin',
           '-d',
@@ -607,6 +613,8 @@ services:
         [
           'CMD',
           'pg_isready',
+          '-h',
+          '127.0.0.1',
           '-U',
           'winwidget_crm_sales_admin',
           '-d',
