@@ -12,6 +12,7 @@ import {
 	NativeImageRuntime
 } from './local-native-images.mjs';
 import { verifyNativeInboxAcceptance } from './local-native-inbox-workflow.mjs';
+import { assertPendingWidgetControlRetry } from './local-native-images-workflow.mjs';
 
 const revision = 'a'.repeat(40);
 const flags = [
@@ -21,6 +22,82 @@ const flags = [
 	'--verify-native-images',
 	'--smoke-and-stop'
 ];
+
+test('control image retry requires the same immutable command and a durable five-second MAIN publication', () => {
+	const payload = {
+		eventId: 'event',
+		commandId: 'command',
+		sourceId: 'source',
+		workspaceId: 'workspace'
+	};
+	const original = { id: 'initial', eventId: 'event', payload };
+	const job = {
+		...payload,
+		activeEventId: 'event',
+		status: 'PENDING',
+		lastErrorCode: 'DEPENDENCY_UNAVAILABLE'
+	};
+	const receipt = {
+		...payload,
+		consumer: 'crm-intake.widget-control.v1',
+		status: 'FAILED',
+		retryAttempt: 0
+	};
+	const outbox = {
+		id: 'retry',
+		eventId: 'event',
+		payload,
+		status: 'PENDING',
+		route: 'MAIN',
+		retryAttempt: 1,
+		publishedAt: null,
+		lastErrorCode: 'DEPENDENCY_UNAVAILABLE',
+		createdAt: new Date('2026-09-06T10:00:00Z'),
+		availableAt: new Date('2026-09-06T10:00:05Z')
+	};
+	const fixture = { job, receipt, outbox, original };
+	assertPendingWidgetControlRetry(fixture);
+	for (const patch of [
+		{ status: 'PUBLISHED' },
+		{ route: 'RETRY_1' },
+		{ retryAttempt: 0 },
+		{ publishedAt: new Date() },
+		{ payload: { ...payload, commandId: 'other' } },
+		{ eventId: 'other' },
+		{ id: 'initial' },
+		{ availableAt: outbox.createdAt },
+		{ availableAt: new Date('2026-09-06T10:00:30Z') }
+	])
+		assert.throws(() =>
+			assertPendingWidgetControlRetry({
+				...fixture,
+				outbox: { ...outbox, ...patch }
+			})
+		);
+	for (const patch of [
+		{ status: 'DELIVERED' },
+		{ retryAttempt: 1 },
+		{ consumer: 'other' },
+		{ sourceId: 'other' }
+	])
+		assert.throws(() =>
+			assertPendingWidgetControlRetry({
+				...fixture,
+				receipt: { ...receipt, ...patch }
+			})
+		);
+	for (const patch of [
+		{ status: 'PROCESSING' },
+		{ activeEventId: 'other' },
+		{ workspaceId: 'other' }
+	])
+		assert.throws(() =>
+			assertPendingWidgetControlRetry({
+				...fixture,
+				job: { ...job, ...patch }
+			})
+		);
+});
 
 test('Alpine CRM builds prefer IPv4 only for Corepack download without changing runtime DNS or TLS', async () => {
 	for (const app of ['crm-intake', 'crm-customers', 'crm-sales']) {
@@ -283,6 +360,13 @@ test('image workflow never composes or monkeypatches business workers in the hos
 	assert.match(workflow, /capacityVerified: false/);
 	assert.match(workflow, /browserVerified: false/);
 	assert.match(workflow, /postgresInstances: 1/);
+	assert.match(workflow, /assertPendingWidgetControlRetry\(/);
+	assert.match(workflow, /controlDurableRetryRestartVerified: true/);
+	assert.match(workflow, /controlCommittedReplayVerified: true/);
+	assert.match(
+		workflow,
+		/assert\.deepEqual\(await controlSnapshot\(\), beforeControlReplay\)/
+	);
 });
 
 test('native Inbox scope and acceptance proof uses actual HTTP and push workers with separate evidence', async () => {

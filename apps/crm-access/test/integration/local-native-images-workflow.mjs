@@ -10,13 +10,47 @@ import {
 	NATIVE_IMAGE_ROLES,
 	NATIVE_TRANSFER_EVENT,
 	NATIVE_TRANSFER_QUEUE,
-	NATIVE_CONTROL_QUEUE
+	NATIVE_CONTROL_QUEUE,
+	NATIVE_CONTROL_EVENT
 } from './local-native-images.mjs';
 import {
 	changeNativeMember,
 	verifyNativeInboxScope,
 	verifyNativeInboxAcceptance
 } from './local-native-inbox-workflow.mjs';
+
+export function assertPendingWidgetControlRetry({
+	job,
+	receipt,
+	outbox,
+	original
+}) {
+	assert.equal(job.status, 'PENDING');
+	assert.equal(job.lastErrorCode, 'DEPENDENCY_UNAVAILABLE');
+	assert.equal(receipt.status, 'FAILED');
+	assert.equal(receipt.retryAttempt, 0);
+	assert.equal(receipt.consumer, 'crm-intake.widget-control.v1');
+	assert.equal(outbox.status, 'PENDING');
+	assert.equal(outbox.route, 'MAIN');
+	assert.equal(outbox.retryAttempt, 1);
+	assert.equal(outbox.publishedAt, null);
+	assert.equal(outbox.lastErrorCode, 'DEPENDENCY_UNAVAILABLE');
+	assert.notEqual(outbox.id, original.id);
+	assert.deepEqual(outbox.payload, original.payload);
+	assert.equal(outbox.eventId, original.eventId);
+	assert.equal(outbox.eventId, outbox.payload.eventId);
+	assert.equal(job.activeEventId, outbox.eventId);
+	assert.equal(receipt.eventId, outbox.eventId);
+	for (const field of ['commandId', 'sourceId', 'workspaceId']) {
+		assert.equal(job[field], outbox.payload[field]);
+		assert.equal(receipt[field], outbox.payload[field]);
+	}
+	const delay = outbox.availableAt.getTime() - outbox.createdAt.getTime();
+	assert.ok(
+		delay >= 4000 && delay <= 6000,
+		'Real first control retry retains its five-second deadline'
+	);
+}
 
 // Business commands go only through actual API images. Prisma below observes
 // service-owned test data; no processor/publisher/consumer class is instantiated.
@@ -391,10 +425,105 @@ export async function verifyNativeImages({
 			}),
 			6
 		);
-		for (const spec of NATIVE_IMAGE_ROLES.filter(item =>
+		stage('control-durable-retry-dependency-outage');
+		const controlRoles = NATIVE_IMAGE_ROLES.filter(item =>
 			item[2].startsWith('widget-control')
-		))
-			await runtime.startNativeRole(spec, serviceEnvironment(spec[1]));
+		);
+		const controlPublisher = controlRoles.find(item =>
+			item[2].endsWith('publisher')
+		);
+		const controlWorker = controlRoles.find(item =>
+			item[2].endsWith('worker')
+		);
+		const initialControlOutbox =
+			await intakeDb.widgetControlOutbox.findMany({
+				where: { route: 'MAIN', retryAttempt: 0 },
+				orderBy: { id: 'asc' }
+			});
+		assert.equal(initialControlOutbox.length, 6);
+		// Publish the six initial commands first, then stop the publisher so the
+		// five-second retries remain observable across the controlled restart.
+		await runtime.startNativeRole(
+			controlPublisher,
+			serviceEnvironment('crm-intake')
+		);
+		await runtime.wait(
+			async () =>
+				(await intakeDb.widgetControlOutbox.count({
+					where: { status: 'PUBLISHED' }
+				})) === 6,
+			'Initial control commands were not confirmed'
+		);
+		await runtime.stop(runtime.processes.get(controlPublisher[0]).id);
+		await runtime.stop(runtime.processes.get('widgets').id);
+		await runtime.startNativeRole(
+			controlWorker,
+			serviceEnvironment('crm-intake')
+		);
+		const controlRetries = await runtime.wait(async () => {
+			const rows = await intakeDb.widgetControlOutbox.findMany({
+				where: { route: 'MAIN', retryAttempt: 1 },
+				orderBy: { id: 'asc' }
+			});
+			return (
+				rows.length === 6 &&
+				rows.every(row => row.status === 'PENDING') &&
+				rows
+			);
+		}, 'Six control dependency failures did not create durable retries');
+		for (const outbox of controlRetries) {
+			const job = await intakeDb.widgetControlJob.findUniqueOrThrow({
+				where: { commandId: outbox.payload.commandId }
+			});
+			const receipt =
+				await intakeDb.widgetControlReceipt.findUniqueOrThrow({
+					where: {
+						eventId_consumer: {
+							eventId: outbox.eventId,
+							consumer: 'crm-intake.widget-control.v1'
+						}
+					}
+				});
+			assertPendingWidgetControlRetry({
+				job,
+				receipt,
+				outbox,
+				original: initialControlOutbox.find(
+					row => row.eventId === outbox.eventId
+				)
+			});
+		}
+		assert.equal(await widgetsDb.wincrmConnector.count(), 0);
+		stage('control-durable-retry-process-and-broker-restart');
+		await runtime.stop(runtime.processes.get(controlWorker[0]).id);
+		await runtime.stop(runtime.brokerId);
+		for (const outbox of controlRetries)
+			assert.deepEqual(
+				await intakeDb.widgetControlOutbox.findUniqueOrThrow({
+					where: { id: outbox.id }
+				}),
+				outbox
+			);
+		await restart('widgets');
+		await runtime.docker(['start', runtime.brokerId]);
+		await runtime.wait(
+			async () =>
+				(
+					await runtime.command('docker', [
+						'--context',
+						'colima',
+						'exec',
+						'--user=rabbitmq',
+						runtime.brokerId,
+						'rabbitmq-diagnostics',
+						'-q',
+						'check_port_connectivity'
+					])
+				).code === 0,
+			'Control broker restart deadline'
+		);
+		await restart(controlWorker[0]);
+		await restart(controlPublisher[0]);
 		const settledSources = await runtime.wait(async () => {
 			const rows = await intakeDb.managedWidgetSource.findMany({
 				where: { workspaceId: account.workspaceId }
@@ -452,9 +581,121 @@ export async function verifyNativeImages({
 				(await intakeDb.widgetControlOutbox.count({
 					where: { status: 'PUBLISHED', route: 'MAIN' }
 				})) ===
-				6 + controlConflictRecoveries.length,
+				6 + controlRetries.length + controlConflictRecoveries.length,
 			'Control publisher did not confirm six commands'
 		);
+		for (const original of controlRetries) {
+			const published =
+				await intakeDb.widgetControlOutbox.findUniqueOrThrow({
+					where: { id: original.id }
+				});
+			assert.equal(published.status, 'PUBLISHED');
+			assert.equal(
+				published.availableAt.getTime(),
+				original.availableAt.getTime()
+			);
+			assert.ok(
+				published.publishedAt.getTime() >= original.availableAt.getTime()
+			);
+			assert.deepEqual(published.payload, original.payload);
+			assert.equal(published.eventId, original.eventId);
+			assert.equal(published.retryAttempt, original.retryAttempt);
+			assert.equal(published.route, 'MAIN');
+		}
+		stage('control-committed-event-replay');
+		const controlQuiet = () =>
+			runtime.wait(async () => {
+				if (
+					await intakeDb.widgetControlOutbox.count({
+						where: { status: { not: 'PUBLISHED' } }
+					})
+				)
+					return false;
+				if (
+					await intakeDb.widgetControlJob.count({
+						where: { status: { in: ['PENDING', 'PROCESSING'] } }
+					})
+				)
+					return false;
+				return (await queueRows()).some(
+					row =>
+						row.name === NATIVE_CONTROL_QUEUE &&
+						row.messages_ready === 0 &&
+						row.messages_unacknowledged === 0 &&
+						row.consumers === 1
+				);
+			}, 'Control durable work did not drain');
+		await controlQuiet();
+		const controlSnapshot = async () => ({
+			jobs: await intakeDb.widgetControlJob.findMany({
+				orderBy: { commandId: 'asc' }
+			}),
+			receipts: await intakeDb.widgetControlReceipt.findMany({
+				orderBy: { eventId: 'asc' }
+			}),
+			outbox: await intakeDb.widgetControlOutbox.findMany({
+				orderBy: { id: 'asc' }
+			}),
+			sources: await intakeDb.managedWidgetSource.findMany({
+				orderBy: { id: 'asc' }
+			}),
+			connectors: await widgetsDb.wincrmConnector.findMany({
+				orderBy: { id: 'asc' }
+			}),
+			commands: await widgetsDb.wincrmConnectorCommand.findMany({
+				orderBy: { commandId: 'asc' }
+			})
+		});
+		const beforeControlReplay = await controlSnapshot();
+		const appliedControlRetries = controlRetries.filter(outbox =>
+			beforeControlReplay.receipts.some(
+				row =>
+					row.eventId === outbox.eventId &&
+					row.status === 'DELIVERED' &&
+					row.retryAttempt === 1
+			)
+		);
+		assert.ok(
+			appliedControlRetries.length > 0,
+			'At least one delayed control must be applied without manual conflict recovery'
+		);
+		const replayConnection = await runtime.amqp.connect(
+			runtime.brokerUrls.get(controlPublisher[0])
+		);
+		replayConnection.on('error', () => {});
+		try {
+			const channel = await replayConnection.createConfirmChannel();
+			let returned = false;
+			channel.on('return', () => {
+				returned = true;
+			});
+			for (const outbox of appliedControlRetries)
+				for (const retryAttempt of [0, 1])
+					channel.publish(
+						'winwidget.crm-intake.widget-control.events',
+						NATIVE_CONTROL_EVENT,
+						Buffer.from(JSON.stringify(outbox.payload)),
+						{
+							contentType: 'application/json',
+							persistent: true,
+							mandatory: true,
+							messageId: outbox.eventId,
+							type: NATIVE_CONTROL_EVENT,
+							headers: { 'x-retry-attempt': retryAttempt }
+						}
+					);
+			await channel.waitForConfirms();
+			assert.equal(
+				returned,
+				false,
+				'Committed control replay was unroutable'
+			);
+			await channel.close();
+		} finally {
+			await replayConnection.close();
+		}
+		await controlQuiet();
+		assert.deepEqual(await controlSnapshot(), beforeControlReplay);
 		for (const widget of fixtures) {
 			assert.deepEqual(
 				await request('/crm/intake/widget-sources', {
@@ -1018,6 +1259,10 @@ export async function verifyNativeImages({
 			submittedLeads: submissions.length,
 			reportedLeads: reported.size,
 			managedControlImagesVerified: true,
+			controlDurableRetryRestartVerified: true,
+			controlCommittedReplayVerified: true,
+			controlDurableRetryCount: controlRetries.length,
+			controlAppliedReplayCount: appliedControlRetries.length,
 			outboxToInboxImagesVerified: true,
 			atLeastOnceReplayVerified: true,
 			mandatoryReturnRecoveryVerified: true,
