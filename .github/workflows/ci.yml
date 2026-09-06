@@ -32,7 +32,7 @@ jobs:
           node-version: 20
       - run: bash .github/scripts/static-check-services-lifecycle.sh
       - name: Verify isolated four-frontend browser harness
-        run: node --test apps/crm-access/test/integration/local-frontends.test.mjs
+        run: node --test apps/crm-access/test/integration/local-frontends.test.mjs apps/crm-access/test/integration/local-browser-team.test.mjs
 
   service:
     name: ${{ matrix.app }}

@@ -23,6 +23,18 @@ import {
 	nativeWidgetHttpCase
 } from './local-native-widget-http.integration.mjs';
 import { teamHttpBrokerEnvironment } from './local-team-http.integration.mjs';
+import {
+	BROWSER_TEAM_PERSONAS,
+	BROWSER_TEAM_ROLES,
+	assertBrowserTeamReadiness,
+	assertBrowserTeamSnapshot,
+	browserTeamAnonymousPreflight,
+	browserTeamProcessSpecs,
+	browserTeamRequested,
+	createBrowserTeamObserver,
+	stopBrowserTeamChildren,
+	waitBrowserTeamQuiet
+} from './local-browser-team.mjs';
 
 // Local integration harness only. The normal login, JWT, Identity introspection,
 // CRM access checks and service-owned databases run without runtime overrides.
@@ -31,6 +43,7 @@ const servicesRoot = resolve(
 	'../../../..'
 );
 const workspaceRoot = dirname(servicesRoot);
+const withBrowserTeam = browserTeamRequested(process.argv.slice(2));
 if (process.argv[2] === '--refresh-frontends') {
 	assert.equal(
 		process.argv.length,
@@ -80,7 +93,7 @@ if (process.argv[2] === '--refresh-frontends') {
 
 const args = new Set(process.argv.slice(2));
 if (args.has('--help')) {
-	console.log(`Usage: WINCRM_LOCAL_STACK_ALLOW_MUTATION=true node apps/crm-access/test/integration/local-wincrm-stack.mjs [--backend-only] [--activate-owner] [--with-widgets] [--verify-native-widget-http | --verify-native-widget-http-all] [--verify-domain] [--verify-billing] [--verify-billing-http] [--verify-acceptance-http] [--verify-team-http] [--smoke-and-stop]
+	console.log(`Usage: WINCRM_LOCAL_STACK_ALLOW_MUTATION=true node apps/crm-access/test/integration/local-wincrm-stack.mjs [--backend-only] [--activate-owner] [--with-widgets] [--verify-native-widget-http | --verify-native-widget-http-all] [--verify-domain] [--verify-billing] [--verify-billing-http] [--verify-acceptance-http] [--verify-team-http] [--smoke-and-stop] | --browser-team
 
 Requires local Colima container wincrm-mvp-postgres18, PostgreSQL 18 on
 127.0.0.1:55440 with local test-only trust and bootstrap role crm_bootstrap_ci.
@@ -120,6 +133,13 @@ Requires CRM_ACCESS_TEAM_HTTP_TEST_{PROVISIONER,WORKER,PUBLISHER,IDENTITY_PUBLIS
 on one isolated loopback test vhost. Run separately from activation/direct-seed,
 Widgets, domain and Billing profiles. Email delivery stays disabled; dist classes
 are exercised, not release images, browser clicks or external delivery.
+--browser-team is a separate persistent interactive profile, never combined with
+the flags above. It starts actual Access worker/publisher and Identity publisher
+entrypoints on 5301/5302/4902 with the same four scoped team RabbitMQ principals.
+Fresh browserOwner/browserInviteeA/browserInviteeB accounts have no CRM activation
+or admission. Use normal browser login, Trial, invitations and role controls.
+Shutdown requires graceful owned process exit and a real durable/queue drain;
+an incomplete drain preserves resources for review and is never reported green.
 Use --refresh-frontends /exact/private/browser-fixture.json to refresh source snapshots.
 Generated account credentials are saved only to a private 0600 fixture file.
 SIGINT/SIGTERM stops only this harness's child processes. Database/container
@@ -139,6 +159,7 @@ for (const arg of args) {
 			'--verify-billing-http',
 			'--verify-acceptance-http',
 			'--verify-team-http',
+			'--browser-team',
 			'--smoke-and-stop'
 		].includes(arg),
 		'Unsupported local-stack argument'
@@ -198,6 +219,9 @@ const secrets = new Set();
 const children = new Map();
 const frontendSnapshots = {};
 let frontendProxy;
+let browserTeamObserver;
+let browserTeamBackgroundReady = false;
+let browserSetupSequence = 0;
 let stopping = false;
 let ready = false;
 const generated = () => {
@@ -274,12 +298,31 @@ function execute(command, commandArgs, options = {}) {
 		const child = spawn(command, commandArgs, {
 			cwd: options.cwd || stateDirectory,
 			env: { ...safeEnvironment, ...options.env },
+			...(withBrowserTeam ? { detached: true } : {}),
 			stdio: ['pipe', 'pipe', 'pipe']
 		});
-		const timeout = setTimeout(
-			() => child.kill('SIGKILL'),
-			options.timeoutMs || 180000
-		);
+		const setupLabel = withBrowserTeam
+			? `browser-setup-${++browserSetupSequence}`
+			: null;
+		const setupState = { child, exited: false };
+		if (setupLabel) children.set(setupLabel, setupState);
+		let timedOut = false;
+		const timeout = setTimeout(() => {
+			if (!withBrowserTeam) return child.kill('SIGKILL');
+			timedOut = true;
+			if (Number.isSafeInteger(child.pid) && child.pid > 1) {
+				try {
+					process.kill(-child.pid, 'SIGTERM');
+				} catch {
+					/* Shutdown verifies exit; never force-kill an owned setup command. */
+				}
+			}
+			reject(
+				new Error(
+					'Browser setup command timed out; graceful stop only, preserve resources'
+				)
+			);
+		}, options.timeoutMs || 180000);
 		let output = '';
 		const collect = chunk => {
 			output = (output + chunk.toString()).slice(-24_000);
@@ -288,6 +331,8 @@ function execute(command, commandArgs, options = {}) {
 		child.stderr.on('data', collect);
 		child.once('error', error => {
 			clearTimeout(timeout);
+			setupState.exited = true;
+			if (setupLabel) children.delete(setupLabel);
 			reject(
 				new Error(
 					safeFailure(
@@ -299,7 +344,9 @@ function execute(command, commandArgs, options = {}) {
 		});
 		child.once('exit', code => {
 			clearTimeout(timeout);
-			if (code === 0) resolveCommand(output.trim());
+			setupState.exited = true;
+			if (setupLabel) children.delete(setupLabel);
+			if (code === 0 && !timedOut) resolveCommand(output.trim());
 			else
 				reject(new Error(safeFailure(options.label || command, output)));
 		});
@@ -337,7 +384,7 @@ function sql(database, query, role = bootstrapRole) {
 }
 
 function databaseUrl(service, role) {
-	return `postgresql://${role}@127.0.0.1:55440/${service.database}?schema=${service.schema}&sslmode=disable`;
+	return `postgresql://${role}@127.0.0.1:55440/${service.database}?schema=${service.schema}&sslmode=disable${withBrowserTeam ? '&connection_limit=3' : ''}`;
 }
 
 async function assertFreePort(port) {
@@ -1341,6 +1388,9 @@ async function seedIdentity() {
 			['manager', ['USER']],
 			['teamLead', ['USER']],
 			['analyst', ['USER']],
+			...(withBrowserTeam
+				? BROWSER_TEAM_PERSONAS.map(name => [name, ['USER']])
+				: []),
 			...(withTeamHttp
 				? [
 						['teamOwner', ['USER']],
@@ -2252,6 +2302,64 @@ WHERE event_type = 'admin.audit.event.v1' AND payload->'metadata'->>'commandId' 
 async function shutdown(exitCode = 0) {
 	if (stopping) return;
 	stopping = true;
+	if (withBrowserTeam) {
+		let failure = false;
+		let drained = false;
+		const background = BROWSER_TEAM_ROLES.map(role => role.label);
+		const ingress = [...children.keys()].filter(
+			label => label.startsWith('frontend-') || label === 'api-gateway'
+		);
+		try {
+			await frontendProxy?.close();
+			await stopBrowserTeamChildren(children, ingress);
+			if (browserTeamBackgroundReady) {
+				await waitBrowserTeamQuiet(browserTeamObserver);
+				await stopBrowserTeamChildren(children, background);
+				// After every publisher/consumer process has exited, closed channels
+				// requeue any unacked delivery: passive queue checks now prove none
+				// remain. A pre-stop messageCount alone never proves this.
+				assertBrowserTeamSnapshot(
+					await browserTeamObserver.snapshot(),
+					true
+				);
+				drained = true;
+			}
+		} catch {
+			failure = true;
+			log(
+				'Browser team drain incomplete; preserve owned resources for review'
+			);
+		} finally {
+			try {
+				await stopBrowserTeamChildren(children, [...children.keys()]);
+			} catch {
+				failure = true;
+				log('Owned browser child did not exit; no forced kill performed');
+			}
+			try {
+				await browserTeamObserver?.close();
+			} catch {
+				failure = true;
+			}
+		}
+		await writeFile(
+			join(stateDirectory, 'browser-team-shutdown.json'),
+			`${JSON.stringify({
+				runId,
+				ownedMarker: `wincrm-local-stack:${runId}`,
+				drained,
+				childrenStopped: [...children.values()].every(
+					state => state.exited
+				),
+				preserveResources: failure || !drained || exitCode !== 0
+			})}\n`,
+			{ mode: 0o600 }
+		);
+		log(
+			'Browser team stopped only owned processes; shared Docker cleanup remains separately authorized'
+		);
+		process.exit(failure || !drained ? 1 : exitCode);
+	}
 	await frontendProxy?.close();
 	for (const { child, exited } of children.values()) {
 		if (!exited && child.pid) {
@@ -2283,13 +2391,19 @@ async function shutdown(exitCode = 0) {
 	process.exit(exitCode);
 }
 
-process.once('SIGINT', () => void shutdown());
-process.once('SIGTERM', () => void shutdown());
+if (withBrowserTeam) {
+	for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP'])
+		process.on(signal, () => void shutdown());
+} else {
+	process.once('SIGINT', () => void shutdown());
+	process.once('SIGTERM', () => void shutdown());
+}
 
 try {
-	const teamHttpBroker = withTeamHttp
-		? teamHttpBrokerEnvironment(process.env, value => secrets.add(value))
-		: null;
+	const teamHttpBroker =
+		withTeamHttp || withBrowserTeam
+			? teamHttpBrokerEnvironment(process.env, value => secrets.add(value))
+			: null;
 	const billingHttpBroker = withBillingHttp
 		? billingHttpBrokerEnvironment()
 		: null;
@@ -2300,6 +2414,7 @@ try {
 	const ports = [
 		4100,
 		...serviceDefinitions.map(service => service.port),
+		...(withBrowserTeam ? BROWSER_TEAM_ROLES.map(role => role.port) : []),
 		...(args.has('--backend-only') ? [] : [3000, 3001, 3002, 3003, 3100])
 	];
 	for (const port of ports) await assertFreePort(port);
@@ -2386,7 +2501,58 @@ try {
 		}
 	);
 	await waitForHttp('api-gateway', 'http://127.0.0.1:4100/health/ready');
-	await smoke(accounts);
+	if (withBrowserTeam) {
+		await browserTeamAnonymousPreflight();
+		log(
+			'Browser preflight: anonymous guards intact, startup login requests=0; normal rate limit unchanged'
+		);
+	} else await smoke(accounts);
+	if (withBrowserTeam) {
+		const databaseUrls = Object.fromEntries(
+			['identity', 'crm-access'].map(app => [
+				app,
+				databaseUrl(byApp[app], byApp[app].runtimeRole)
+			])
+		);
+		const specs = browserTeamProcessSpecs({
+			servicesRoot,
+			runId,
+			broker: teamHttpBroker,
+			databaseUrls,
+			environments: Object.fromEntries(
+				['identity', 'crm-access'].map(app => [
+					app,
+					ownedEnvironment(app, common)
+				])
+			)
+		});
+		for (const spec of specs) {
+			start(spec.label, process.execPath, [spec.entrypoint], spec.env);
+			const url = `http://127.0.0.1:${spec.port}/health/ready`;
+			await waitForHttp(spec.label, url);
+			const response = await fetch(url, {
+				redirect: 'error',
+				signal: AbortSignal.timeout(5000)
+			});
+			assert.equal(response.status, 200);
+			assertBrowserTeamReadiness(
+				await response.json(),
+				spec,
+				safeEnvironment.APP_REVISION
+			);
+		}
+		browserTeamObserver = await createBrowserTeamObserver({
+			servicesRoot,
+			runId,
+			databaseUrls,
+			broker: teamHttpBroker
+		});
+		assertBrowserTeamSnapshot(await browserTeamObserver.snapshot());
+		browserTeamBackgroundReady = true;
+		log(
+			'Browser team background ready: actual owner entrypoints, three push consumers and automatic Outbox lifecycles; no browser result claimed'
+		);
+	}
 	if (withTeamHttp) {
 		const { verifyTeamHttp } =
 			await import('./local-team-http.integration.mjs');
@@ -2581,6 +2747,19 @@ try {
 				widgets: widgetsFixture,
 				billingHttp: billingHttpEvidence,
 				teamHttp: teamHttpEvidence,
+				...(withBrowserTeam
+					? {
+							browserTeam: {
+								backgroundReady: browserTeamBackgroundReady,
+								personas: BROWSER_TEAM_PERSONAS,
+								processes: BROWSER_TEAM_ROLES,
+								startupLoginRequests: 0,
+								browserVerified: false,
+								emailDeliveryVerified: false,
+								releaseImagesVerified: false
+							}
+						}
+					: {}),
 				rabbitTransportVerified: false,
 				databases: serviceDefinitions.map(
 					({ app, database, migrationRole, runtimeRole }) => ({

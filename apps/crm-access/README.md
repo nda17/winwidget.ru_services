@@ -276,6 +276,44 @@ Billing или domain fault profiles. Он доказывает built dist HTTP/
 Собственные подключения закрываются тестом; wrapper локальной проверки
 удаляет только свои БД/роли и Rabbit container/vhost, сохраняя общий PG.
 
+Для настоящей интерактивной браузерной проверки отдельно запускается
+`WINCRM_LOCAL_STACK_ALLOW_MUTATION=true node apps/crm-access/test/integration/local-wincrm-stack.mjs --browser-team`
+из корня services. Этот режим несовместим со всеми остальными flags и не
+изменяет `--verify-team-http`. Нужны тот же PG18 и четыре scoped
+`CRM_ACCESS_TEAM_HTTP_TEST_*_RABBITMQ_URL` (передаются приватным wrapper через
+env, не печатаются). Помимо API, Gateway и четырёх Next-приложений запускаются
+настоящие built `main.js`: Access worker/publisher на 5301/5302 и Identity
+publisher на 4902. Публикация — штатный Outbox lifecycle, доставка — Rabbit
+push consumers; ручного `publishOne`, прямого seed CRM admissions или JWT нет.
+
+Три новые обычные USER-персоны `browserOwner`, `browserInviteeA`,
+`browserInviteeB` получают только собственные Identity workspaces. Пароли
+случайные, email подтверждены только в изолированном fixture. Данные входа
+сохраняются исключительно в `browser-fixture.json` с mode0600 под private0700
+каталогом; не выводить файл, пароли или сессии в лог. Trial активируется кнопкой
+в браузере, приглашения и пять CRM-ролей проверяются реальными UI-командами.
+При Trial2 роли проверяются последовательно, без увеличения квоты. Сохраняется
+обычный лимит входа 10/IP/600 секунд: не сбрасывать его ради проверки.
+Стартовый preflight выполняет только анонимные GET и не расходует login slots
+(`startupLoginRequests=0`); старый административный smoke в этом режиме не идёт.
+Только этот локальный профиль задаёт `connection_limit=3` для owner clients
+(до 27 соединений девяти runtime-процессов и два read-only observer clients);
+это ограничение fixture, не измеренный production capacity budget.
+
+Нужны свободные loopback-порты 3000/3001/3002/3003/3100/4100/4800/4900/4902/
+5300/5301/5302/5310/5320/5330, PG55440 и Rabbit5673. Standalone frontend mirror
+использует development-режим; production release gate не изменяется. Emails,
+SMS, Telegram и реальные платежи выключены. Проверка здесь не запускает Docker
+сама и не подтверждает браузерный результат лишь по readiness.
+
+SIGINT/SIGTERM/SIGHUP закрывают собственный browser ingress, ждут durable
+Outbox/receipt drain, затем graceful exit своих background-процессов. Только
+после выхода consumers проверяются пустые очереди без consumers (pre-stop
+`messageCount` не доказывает отсутствие unacked). Force-kill отсутствует;
+timeout/ошибка создаёт private `browser-team-shutdown.json` с
+`preserveResources=true` и требует отдельного review. DB/роли, контейнеры,
+images/cache и Colima очищаются отдельно по правилам workspace, не вслепую.
+
 `pnpm run test:integration:billing` использует те же opt-in переменные и
 изоляцию после применения миграции `20260906120000_crm_billing_capacity`.
 Проверяет конкурентные admission/уменьшение мест, durable fence, replay,
