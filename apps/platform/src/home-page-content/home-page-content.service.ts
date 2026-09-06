@@ -87,6 +87,18 @@ export class PlatformHomePageContentService {
 				const content =
 					kind === 'STRUCTURED'
 						? {
+								// Retain only these known optional page extensions when an
+								// already-open pre-ecosystem admin submits its old contract.
+								...Object.fromEntries(
+									['ecosystem', 'crmProduct']
+										.filter(key =>
+											Object.prototype.hasOwnProperty.call(
+												currentContent,
+												key
+											)
+										)
+										.map(key => [key, currentContent[key]])
+								),
 								...patch,
 								head: this.rawSection(currentContent.head),
 								body: this.rawSection(currentContent.body)
@@ -111,12 +123,12 @@ export class PlatformHomePageContentService {
 							: 'PLATFORM_HOME_PAGE_RAW_CODE_UPDATE',
 					description:
 						kind === 'STRUCTURED'
-							? 'Обновлён структурированный контент главной страницы'
+							? 'Обновлён структурированный контент публичных страниц'
 							: 'Обновлён DEV-код head/body главной страницы',
 					entity: {
 						type: 'home_page_content',
 						id: 'singleton',
-						label: 'Главная страница'
+						label: 'Контент сайта'
 					},
 					metadata: {
 						updateKind: kind,
