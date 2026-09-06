@@ -99,15 +99,17 @@ test('control image retry requires the same immutable command and a durable five
 		);
 });
 
-test('Alpine CRM builds prefer IPv4 only for Corepack download without changing runtime DNS or TLS', async () => {
-	for (const app of ['crm-intake', 'crm-customers', 'crm-sales']) {
+test('CRM and dependency builds prefer IPv4 only for dependency download without changing runtime DNS or TLS', async () => {
+	for (const app of NATIVE_IMAGE_APPS) {
 		const source = await readFile(
 			new URL(`../../../${app}/Dockerfile`, import.meta.url),
 			'utf8'
 		);
 		assert.match(
 			source,
-			/&& NODE_OPTIONS=--dns-result-order=ipv4first corepack prepare pnpm@\$\{PNPM_VERSION\} --activate/
+			['identity', 'billing', 'crm-access'].includes(app)
+				? /RUN NODE_OPTIONS=--dns-result-order=ipv4first pnpm install --frozen-lockfile/
+				: /&& NODE_OPTIONS=--dns-result-order=ipv4first corepack prepare pnpm@\$\{PNPM_VERSION\} --activate/
 		);
 		assert.doesNotMatch(
 			source,

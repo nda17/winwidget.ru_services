@@ -12,7 +12,7 @@ RUN corepack enable
 WORKDIR /app
 
 COPY package.json pnpm-lock.yaml ./
-RUN pnpm install --frozen-lockfile
+RUN NODE_OPTIONS=--dns-result-order=ipv4first pnpm install --frozen-lockfile
 
 COPY . .
 RUN pnpm prisma:generate \

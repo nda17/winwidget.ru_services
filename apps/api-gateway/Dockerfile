@@ -3,7 +3,7 @@ FROM node:20.20.2-alpine3.23@sha256:fb4cd12c85ee03686f6af5362a0b0d56d50c58a04632
 WORKDIR /app
 ENV PNPM_VERSION=9.15.9
 RUN corepack enable \
-	&& corepack prepare pnpm@${PNPM_VERSION} --activate
+	&& NODE_OPTIONS=--dns-result-order=ipv4first corepack prepare pnpm@${PNPM_VERSION} --activate
 
 COPY package.json pnpm-lock.yaml ./
 RUN pnpm install --frozen-lockfile
