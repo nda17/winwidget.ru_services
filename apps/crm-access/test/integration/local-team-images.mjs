@@ -29,6 +29,48 @@ export const TEAM_IMAGE_ROLES = Object.freeze(
 );
 const consumers = ['provision', 'acceptance', 'admission'];
 
+// Empty broker queues alone do not prove completion: a committed consumer can
+// create the next admission wake in PostgreSQL before its publisher runs.
+export function teamDrainProbe({
+	readDurable,
+	readQueues,
+	now = Date.now
+}) {
+	let quietSince;
+	const durableIsQuiet = counts =>
+		counts.length === 3 && counts.every(count => count === 0);
+	return async () => {
+		const before = await readDurable();
+		const rows = await readQueues();
+		const after = await readDurable();
+		const queuesAreQuiet =
+			rows.length === 6 &&
+			consumers.every(consumer => {
+				const queue = 'winwidget.crm-access.team.' + consumer;
+				return [queue, queue + '.dead-letter'].every(name =>
+					rows.some(
+						row =>
+							row.name === name &&
+							row.messages_ready === 0 &&
+							row.messages_unacknowledged === 0 &&
+							row.consumers === (name === queue ? 1 : 0)
+					)
+				);
+			});
+		if (
+			!durableIsQuiet(before) ||
+			!durableIsQuiet(after) ||
+			!queuesAreQuiet
+		) {
+			quietSince = undefined;
+			return false;
+		}
+		const observedAt = now();
+		quietSince ??= observedAt;
+		return observedAt - quietSince >= 1500;
+	};
+}
+
 export function teamImageArguments(args) {
 	if (!args.includes('--verify-team-images')) return false;
 	assert.deepEqual([...args].sort(), [
@@ -203,25 +245,12 @@ export class TeamImageRuntime extends NativeImageRuntime {
 			])
 		);
 	}
-	async quiet() {
-		await this.wait(async () => {
-			const rows = await this.queues();
-			return (
-				rows.length === 6 &&
-				consumers.every(consumer => {
-					const queue = 'winwidget.crm-access.team.' + consumer;
-					return [queue, queue + '.dead-letter'].every(name =>
-						rows.some(
-							row =>
-								row.name === name &&
-								row.messages_ready === 0 &&
-								row.messages_unacknowledged === 0 &&
-								row.consumers === (name === queue ? 1 : 0)
-						)
-					);
-				})
-			);
-		}, 'Team image queues did not drain');
+	async quiet(readDurable) {
+		assert.equal(typeof readDurable, 'function');
+		await this.wait(
+			teamDrainProbe({ readDurable, readQueues: () => this.queues() }),
+			'Team image durable work and queues did not drain'
+		);
 	}
 }
 
@@ -275,8 +304,6 @@ export async function verifyTeamImages({
 			},
 			log: runtime.log
 		});
-		await runtime.quiet();
-		stage('three-consumer-durable-retries');
 		const db = (app, schema) => {
 			const require = createRequire(
 				join(servicesRoot, 'apps', app, 'package.json')
@@ -292,6 +319,20 @@ export async function verifyTeamImages({
 		};
 		accessDb = db('crm-access', 'crm_access');
 		identityDb = db('identity', 'identity');
+		const readDurable = () =>
+			Promise.all([
+				accessDb.crmTeamOutbox.count({
+					where: { status: { not: 'PUBLISHED' } }
+				}),
+				identityDb.outboxEvent.count({
+					where: { status: { not: 'PUBLISHED' } }
+				}),
+				accessDb.crmTeamDelivery.count({
+					where: { status: { not: 'DELIVERED' } }
+				})
+			]);
+		await runtime.quiet(readDurable);
+		stage('three-consumer-durable-retries');
 		const workspaceId = accounts.analyst.workspaceId;
 		const request = async (path, { body, token, expected = 200 } = {}) => {
 			const response = await fetch('http://localhost:4100/api/v1' + path, {
@@ -488,7 +529,7 @@ export async function verifyTeamImages({
 		await recover(acceptance, 'identity');
 		const admission = await retry('admission');
 		await recover(admission, 'billing');
-		await runtime.quiet();
+		await runtime.quiet(readDurable);
 		const roster = await request(
 			'/crm/access/team/members?workspaceId=' +
 				workspaceId +
@@ -565,7 +606,7 @@ export async function verifyTeamImages({
 				await connection.close();
 			}
 		}
-		await runtime.quiet();
+		await runtime.quiet(readDurable);
 		assert.deepEqual(await snapshot(), before);
 		assert.equal(
 			await accessDb.crmTeamOutbox.count({

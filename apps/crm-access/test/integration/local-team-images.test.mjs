@@ -6,7 +6,8 @@ import {
 	TeamImageRuntime,
 	teamImageArguments,
 	validateTeamImageAccounts,
-	assertPendingTeamRetry
+	assertPendingTeamRetry,
+	teamDrainProbe
 } from './local-team-images.mjs';
 import { accessTeamBrokerPermissions } from './local-crm-image-topology.mjs';
 
@@ -18,6 +19,114 @@ const runtime = () =>
 		runId,
 		log() {}
 	});
+
+const emptyTeamQueues = () =>
+	['provision', 'acceptance', 'admission'].flatMap(consumer =>
+		['', '.dead-letter'].map(suffix => ({
+			name: 'winwidget.crm-access.team.' + consumer + suffix,
+			messages_ready: 0,
+			messages_unacknowledged: 0,
+			consumers: suffix ? 0 : 1
+		}))
+	);
+
+test('drain waits for a delayed Outbox wake and its receipt before taking a replay snapshot', async () => {
+	let clock = 0;
+	let durable = [0, 0, 0];
+	let queues = emptyTeamQueues();
+	const probe = teamDrainProbe({
+		readDurable: async () => durable,
+		readQueues: async () => queues,
+		now: () => clock
+	});
+	assert.equal(await probe(), false);
+	clock = 1400;
+	durable = [1, 0, 0]; // Committed follow-up wake, not published yet.
+	assert.equal(await probe(), false);
+	clock = 2000;
+	durable = [0, 0, 0];
+	queues[4].messages_unacknowledged = 1;
+	assert.equal(await probe(), false);
+	clock = 3000;
+	durable = [0, 0, 1]; // Consumer has claimed the new receipt.
+	queues = emptyTeamQueues();
+	assert.equal(await probe(), false);
+	clock = 4000;
+	durable = [0, 0, 0];
+	assert.equal(await probe(), false);
+	clock = 5499;
+	assert.equal(await probe(), false);
+	clock = 5500;
+	assert.equal(await probe(), true);
+});
+
+test('drain brackets broker observations with both service Outboxes and delivery state', async () => {
+	for (const index of [0, 1, 2]) {
+		for (const side of ['before', 'after']) {
+			let reads = 0;
+			let clock = 0;
+			const calls = [];
+			const pending = [0, 0, 0];
+			pending[index] = 1;
+			const probe = teamDrainProbe({
+				readDurable: async () => {
+					calls.push('database');
+					reads += 1;
+					return reads % 2 === (side === 'before' ? 1 : 0)
+						? pending
+						: [0, 0, 0];
+				},
+				readQueues: async () => {
+					calls.push('broker');
+					return emptyTeamQueues();
+				},
+				now: () => clock
+			});
+			assert.equal(await probe(), false);
+			clock = 10000;
+			assert.equal(await probe(), false);
+			assert.deepEqual(calls, [
+				'database',
+				'broker',
+				'database',
+				'database',
+				'broker',
+				'database'
+			]);
+		}
+	}
+});
+
+test('drain rejects missing queues, missing consumers, queued and unacked work, including DLQ', async () => {
+	for (const mutate of [
+		rows => rows.pop(),
+		rows => {
+			rows[0].consumers = 0;
+		},
+		rows => {
+			rows[0].messages_ready = 1;
+		},
+		rows => {
+			rows[0].messages_unacknowledged = 1;
+		},
+		rows => {
+			rows[1].messages_ready = 1;
+		}
+	]) {
+		const rows = emptyTeamQueues();
+		mutate(rows);
+		let clock = 0;
+		const probe = teamDrainProbe({
+			readDurable: async () => [0, 0, 0],
+			readQueues: async () => rows,
+			now: () => clock
+		});
+		assert.equal(await probe(), false);
+		clock = 10000;
+		assert.equal(await probe(), false);
+	}
+	await assert.rejects(runtime().quiet());
+});
 
 test('team images require the isolated non-interactive profile without direct CRM seeding or extra flags', () => {
 	const flags = [
