@@ -428,7 +428,7 @@ if (!servicesWorkflow.includes('node .github/scripts/test-crm-bootstrap-failure.
 	throw new Error('CRM bounded bootstrap process gate is missing');
 }
 const pinnedInfraRevision =
-	'b602ae559223c5fc20de0c319d9d8250ab5aa5d3';
+	'6ab9828d9e8fdc058780514a5b434855c9924b07';
 for (const evidence of [
 	"cancel-in-progress: ${{ github.ref != 'refs/heads/prod' }}",
 	'operations-control-ledger:',
@@ -483,10 +483,22 @@ const infraReleaseReferences = [
 	)
 ];
 if (
-	infraReleaseReferences.length !== 1 ||
-	infraReleaseReferences[0][1] !== pinnedInfraRevision
+	infraReleaseReferences.length !== 2 ||
+	infraReleaseReferences.some(reference => reference[1] !== pinnedInfraRevision)
 ) {
 	throw new Error('production release workflow is not pinned to one exact infra SHA');
+}
+// Both stages run for one immutable source SHA. No routine/all rollout is
+// allowed while this candidate initializes only the isolated CRM databases.
+for (const [job, scope] of [['deploy-production', 'crm-prepare'], ['deploy-crm-databases', 'crm-databases']]) {
+	const block = servicesWorkflow.match(new RegExp('^  ' + job + ':\\n([\\s\\S]*?)(?=^  [a-z][a-z0-9-]*:|$(?![\\s\\S]))', 'm'))?.[1];
+	if (!block || !block.includes('release_scope: ' + scope) ||
+		!block.includes('services_revision: ${{ github.sha }}') ||
+		!block.includes("expected_live_revision: '484e546451088671e23ae37ae4026b9b3fe500c5'") ||
+		!block.includes("expected_service_env_sha256: '4f0b6410c124fbae9b5608da9e28c74b19229cf529b662e0cc9971dc4f6aee6b'") ||
+		(job === 'deploy-crm-databases' && !block.includes('needs: deploy-production'))) {
+		throw new Error('CRM database release stages must share the exact approved baseline and run sequentially');
+	}
 }
 
 const rootReadme = readFileSync('README.md', 'utf8');
