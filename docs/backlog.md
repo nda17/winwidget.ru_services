@@ -115,9 +115,8 @@ backend/business gates MVP.
 платежей остаются обязательными. Подготовка образов и четырёх CRM-БД может идти
 до открытия приложения; сама по себе она не разрешает Trial или продажи.
 
-Локальная foundation WinCRM и четыре независимых `crm-*` приложения не должны
-попасть в production обычным рестартом существующего контура. До merge/deploy
-ветки CRM обязательно:
+Четыре независимых `crm-*` приложения нельзя включать обычным рестартом
+существующего контура. До открытия рабочего приложения обязательно:
 
 - пройти сквозные UI/API сценарии контактов/компаний, сделок, задач,
   входящих обращений и агрегированной аналитики; отдельно проверить
@@ -133,8 +132,8 @@ backend/business gates MVP.
 - доказать paid CRM checkout/продление/дополнительные места в браузере и
   согласованном внешнем платёжном контуре; отдельно проверить в UI
   просмотр/экспорт после `TRIAL 5 дней -> GRACE 3 дня -> READ_ONLY`; изменения и новые заявки
-  запрещены в READ_ONLY, автоудаления нет. Перед продажами подтвердить суммы:
-  временные значения разрешены для разработки и настраиваются в `/admin/crm`,
+  запрещены в READ_ONLY, автоудаления нет. По решению пользователя временные
+  цены и лимиты MVP устанавливает ADMIN в `/admin/crm`,
   условия начатого периода сохраняются как snapshot Billing;
 - доказать реальные автосписания WinCRM по согласованной модели Widgets: первоначальная
   оплата с явным согласием на привязку способа оплаты и автопродление,
@@ -177,12 +176,12 @@ backend/business gates MVP.
   origin `https://crm.winwidget.ru` и
   обновить route-manifest только вместе с полной двусторонней синхронизацией
   production env;
-- создать для каждого `crm-*` собственные runtime/migration/backup роли и БД,
-  подключить отдельный `deploy/docker-compose.crm.yml` к проверенному
-  CRM-only release controller, выполнить migration jobs и health/smoke,
-  определить service-owned backup/restore и независимый
-  rollback; нельзя объединять CRM-схемы или давать сервисам доступ к чужим
-  таблицам;
+- подключить профиль `crm-runtime` отдельного `deploy/docker-compose.crm.yml`
+  к CRM-only release controller и проверить приложения с уже подготовленными
+  owner БД и ролями; сохранить независимое восстановление runtime без
+  автоматического down/reset миграций. Новые dump/backup-копии не являются
+  условием этого запуска по решению пользователя. Нельзя объединять
+  CRM-схемы или давать сервисам доступ к чужим таблицам;
 - проверить возможность размещения четырёх CRM-сервисов на текущем backend
   VPS: пользователь разрешил этот вариант 06.09.2026 при достаточном запасе
   ресурсов. До размещения подтвердить стабильность workers, измерить
@@ -234,21 +233,18 @@ backend/business gates MVP.
 
 Отдельный CRM backend VPS не является обязательным условием: допустим
 проверенный deployment на текущий backend VPS при выполнении gates выше.
-Read-only замер 06.09.2026 22:20:27 МСК показал 4.964 GiB
-`MemAvailable` из 7.751 GiB, 15.143 GiB свободного диска (81% занято)
-и 31 healthy контейнер без restarts/OOM. Четыре секундных интервала
-`vmstat` показали CPU busy 1–54% (без первой строки со средним с момента
-старта): короткий снимок не доказывает p95, CPU PSI или запас под нагрузкой.
+Наличие свободной памяти после подготовки БД не доказывает запас под
+нагрузкой всех CRM-процессов; перед runtime rollout нужен свежий замер.
 Порог 6 GiB относится к отдельному restore rehearsal (два временных
 контейнера по 2 GiB плюс резерв 2 GiB), а не автоматически запрещает CRM runtime.
 Его невыполнение не разрешает ослаблять restore gate.
 
 При раздельных ролях native connector нужны 12 application processes:
 Access — API/worker/publisher; Intake — API, три workers и три publishers;
-Customers и Sales — по API. Вместе с четырьмя PostgreSQL это 16 новых
-контейнеров, без временных migration/release jobs. Перед применением отдельного
-Compose обязательны CRM-only controller, проверка фактических OCI revisions,
-provisioning scoped credentials/DB roles и measured memory/CPU caps.
+Customers и Sales — по API. Требуется запустить эти 12 application containers
+поверх четырёх owner PostgreSQL, без постоянных migration/release jobs.
+Перед запуском обязательны CRM-only controller, проверка фактических OCI
+revisions, provisioning broker credentials и measured memory/CPU caps.
 Shape validator не подтверждает capacity и не разрешает rollout. Routine
 backend controller проверяет контейнеры своего project `winwidget`, но
 RabbitMQ users — глобально: перед первым provisioning выпустить controller
@@ -296,10 +292,9 @@ Prisma pool limits: API 5, worker 4, publisher 1 — 40 runtime connections
 по три подключения на БД для migration/backup/read-only probe и отдельные
 superuser slots. Старый и новый runtime при rollout могут удвоить pools:
 проектные `max_connections` 32/48/16/16 требуют проверки либо исключения overlap.
-Это предлагаемый бюджет, а не действующая production-конфигурация: реальные
-CRM URLs ещё нужно сформировать и проверить. Отдельный Compose validator
-требует `connection_limit` 5/4/1 и `pool_timeout=10`; применение бюджетов
-остаётся заблокированным до нагрузочной проверки.
+Отдельный Compose validator требует `connection_limit` 5/4/1 и
+`pool_timeout=10`; соблюдение этих бюджетов всеми одновременно работающими
+приложениями ещё нужно подтвердить нагрузочной проверкой.
 
 На production-shaped стенде проверить 12 процессов и четыре раздельные БД,
 release images, worker prefetch/reconciliation и максимум одновременных
