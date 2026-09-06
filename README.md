@@ -63,6 +63,19 @@ Compose `environment`. S3-ключи аватаров получает толь�
 Корневой `.env.example` — только агрегированный структурный контракт для
 production Compose и CI-валидаторов; он не является общим runtime env.
 
+Отдельный `deploy/docker-compose.crm.yml` описывает opt-in топологию WinCRM:
+12 процессов, четыре PostgreSQL и четыре однократных задания миграций.
+Его структурный вход — `deploy/crm/.env.example`; пустые обязательные
+credentials, immutable images и resource caps намеренно не позволяют
+запуск по примеру. Это не часть routine backend deploy и не разрешение
+активировать CRM. Инструкция и оставшиеся rollout gates находятся в
+`winwidget.ru_infra/docs/runbook.md`, ограничения — в `docs/backlog.md`.
+Проверка без запуска контейнеров:
+
+```bash
+node --test .github/scripts/validate-crm-compose.test.mjs
+```
+
 Локальный запуск также не читает общий корневой env: каждый сервис использует
 только собственный `apps/<service>/.env`, созданный на основе его
 `.env.example`.

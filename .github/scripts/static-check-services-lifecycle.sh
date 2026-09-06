@@ -415,11 +415,13 @@ exactFiles('.github/workflows', ['ci.yml']);
 exactFiles('.github/scripts', [
 	'static-check-services-lifecycle.sh',
 	'test-crm-bootstrap-failure.mjs',
+	'validate-crm-compose.mjs',
+	'validate-crm-compose.test.mjs',
 	'validate-production-compose.cjs',
 	'validate-production-compose.sh',
 	'verify-production-audit.cjs'
 ]);
-exactFiles('deploy', ['docker-compose.prod.yml']);
+exactFiles('deploy', ['docker-compose.prod.yml', 'docker-compose.crm.yml']);
 
 const servicesWorkflow = readFileSync('.github/workflows/ci.yml', 'utf8');
 if (!servicesWorkflow.includes('node .github/scripts/test-crm-bootstrap-failure.mjs "${{ matrix.app }}"')) {

@@ -169,7 +169,9 @@ Read-only аудит production API и личного кабинета ЮKassa �
   обновить route-manifest только вместе с полной двусторонней синхронизацией
   production env;
 - создать для каждого `crm-*` собственные runtime/migration/backup роли и БД,
-  Compose services, migration jobs, health/smoke, backup/restore и независимый
+  подключить отдельный `deploy/docker-compose.crm.yml` к проверенному
+  CRM-only release controller, выполнить migration jobs и health/smoke,
+  определить service-owned backup/restore и независимый
   rollback; нельзя объединять CRM-схемы или давать сервисам доступ к чужим
   таблицам;
 - проверить возможность размещения четырёх CRM-сервисов на текущем backend
@@ -234,15 +236,24 @@ Read-only замеры 06.09.2026 03:40–03:41 МСК показали 5.117–
 При раздельных ролях native connector нужны 12 application processes:
 Access — API/worker/publisher; Intake — API, три workers и три publishers;
 Customers и Sales — по API. Вместе с четырьмя PostgreSQL это 16 новых
-контейнеров, без временных migration/release jobs. Production Compose и
-memory/CPU caps ещё не утверждены. Для локальной проверки заложить явные
+контейнеров, без временных migration/release jobs. Перед применением отдельного
+Compose обязательны CRM-only controller, проверка фактических OCI revisions,
+provisioning scoped credentials/DB roles и measured memory/CPU caps.
+Shape validator не подтверждает capacity и не разрешает rollout. Routine
+backend controller сейчас требует точный inventory контейнеров и RabbitMQ
+users: нельзя запускать дополнительный CRM project и тем самым блокировать
+дальнейшие обычные релизы. Сначала добавить доказанный совместимый inventory
+contract для обоих проектов, не разрешая произвольные посторонние сервисы.
+Для локальной проверки заложить явные
 Prisma pool limits: API 5, worker 4, publisher 1 — 40 runtime connections
 (Access 10, Intake 20, Customers 5, Sales 5). Дополнительно резервировать
 по три подключения на БД для migration/backup/read-only probe и отдельные
 superuser slots. Старый и новый runtime при rollout могут удвоить pools:
 проектные `max_connections` 32/48/16/16 требуют проверки либо исключения overlap.
-Это предлагаемый бюджет, а не действующая конфигурация: сейчас CRM URLs
-передаются Prisma без явного `connection_limit`.
+Это предлагаемый бюджет, а не действующая production-конфигурация: реальные
+CRM URLs ещё нужно сформировать и проверить. Отдельный Compose validator
+требует `connection_limit` 5/4/1 и `pool_timeout=10`; применение бюджетов
+остаётся заблокированным до нагрузочной проверки.
 
 На production-shaped стенде проверить 12 процессов и четыре раздельные БД,
 release images, worker prefetch/reconciliation и максимум одновременных

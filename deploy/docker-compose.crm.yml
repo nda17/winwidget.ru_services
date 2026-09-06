@@ -1,0 +1,677 @@
+# Standalone opt-in CRM topology. Never merge into docker-compose.prod.yml.
+# This is not an activation controller or a capacity/rollout approval.
+name: winwidget-crm
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: 10m
+    max-file: '3'
+
+x-runtime: &runtime
+  profiles: [crm-runtime]
+  network_mode: host
+  user: '1001:1001'
+  read_only: true
+  tmpfs: ['/tmp:rw,nosuid,nodev,noexec,size=64m']
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  pids_limit: 128
+  init: true
+  restart: unless-stopped
+  stop_grace_period: 45s
+  logging: *logging
+
+x-migration: &migration
+  profiles: [crm-migrations]
+  network_mode: host
+  user: '1001:1001'
+  read_only: true
+  tmpfs: ['/tmp:rw,nosuid,nodev,noexec,size=64m']
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  pids_limit: 128
+  init: true
+  restart: 'no'
+  stop_grace_period: 60s
+  mem_limit: ${CRM_MIGRATION_MEMORY_LIMIT:?CRM_MIGRATION_MEMORY_LIMIT is required}
+  memswap_limit: ${CRM_MIGRATION_MEMORY_LIMIT:?CRM_MIGRATION_MEMORY_LIMIT is required}
+  cpus: ${CRM_MIGRATION_CPUS:?CRM_MIGRATION_CPUS is required}
+  logging: *logging
+  entrypoint: ['./node_modules/.bin/prisma']
+  command: ['migrate', 'deploy', '--schema', 'prisma/schema.prisma']
+
+x-postgres: &postgres
+  profiles: [crm-databases]
+  image: ${CRM_POSTGRES_IMAGE:?CRM_POSTGRES_IMAGE is required}
+  restart: unless-stopped
+  stop_grace_period: 60s
+  shm_size: ${CRM_POSTGRES_SHM_SIZE:?CRM_POSTGRES_SHM_SIZE is required}
+  mem_limit: ${CRM_POSTGRES_MEMORY_LIMIT:?CRM_POSTGRES_MEMORY_LIMIT is required}
+  memswap_limit: ${CRM_POSTGRES_MEMORY_LIMIT:?CRM_POSTGRES_MEMORY_LIMIT is required}
+  cpus: ${CRM_POSTGRES_CPUS:?CRM_POSTGRES_CPUS is required}
+  pids_limit: 200
+  logging: *logging
+  healthcheck: &postgres-healthcheck
+    interval: 10s
+    timeout: 5s
+    retries: 12
+    start_period: 10s
+
+x-crm-access-env: &crm-access-env
+  NODE_ENV: production
+  MODE: production
+  APP_REVISION: ${CRM_ACCESS_REVISION:?CRM_ACCESS_REVISION is required}
+  CRM_ACCESS_LISTEN_HOST: 127.0.0.1
+  CORS_ALLOWED_ORIGINS: https://crm.winwidget.ru
+  IDENTITY_INTERNAL_BASE_URL: ${IDENTITY_INTERNAL_BASE_URL:-http://127.0.0.1:4900}
+  BILLING_INTERNAL_BASE_URL: ${BILLING_INTERNAL_BASE_URL:-http://127.0.0.1:4800}
+  CRM_SALES_INTERNAL_BASE_URL: ${CRM_SALES_INTERNAL_BASE_URL:-http://127.0.0.1:5330}
+  IDENTITY_CRM_ACCESS_TOKEN: ${IDENTITY_CRM_ACCESS_TOKEN:?IDENTITY_CRM_ACCESS_TOKEN is required}
+  BILLING_CRM_ACCESS_TOKEN: ${BILLING_CRM_ACCESS_TOKEN:?BILLING_CRM_ACCESS_TOKEN is required}
+  BILLING_CRM_ACCESS_COMMERCE_TOKEN: ${BILLING_CRM_ACCESS_COMMERCE_TOKEN:?BILLING_CRM_ACCESS_COMMERCE_TOKEN is required}
+  CRM_SALES_CRM_ACCESS_TOKEN: ${CRM_SALES_CRM_ACCESS_TOKEN:?CRM_SALES_CRM_ACCESS_TOKEN is required}
+  CRM_ACCESS_CRM_CUSTOMERS_TOKEN: ${CRM_ACCESS_CRM_CUSTOMERS_TOKEN:?CRM_ACCESS_CRM_CUSTOMERS_TOKEN is required}
+  CRM_ACCESS_CRM_SALES_TOKEN: ${CRM_ACCESS_CRM_SALES_TOKEN:?CRM_ACCESS_CRM_SALES_TOKEN is required}
+  CRM_ACCESS_CRM_INTAKE_TOKEN: ${CRM_ACCESS_CRM_INTAKE_TOKEN:?CRM_ACCESS_CRM_INTAKE_TOKEN is required}
+  TRUST_PROXY: loopback
+  CRM_ACCESS_BILLING_ENABLED: '${CRM_ACCESS_BILLING_ENABLED:-false}'
+
+x-crm-intake-env: &crm-intake-env
+  NODE_ENV: production
+  MODE: production
+  APP_REVISION: ${CRM_INTAKE_REVISION:?CRM_INTAKE_REVISION is required}
+  CRM_INTAKE_LISTEN_HOST: 127.0.0.1
+  CORS_ALLOWED_ORIGINS: https://crm.winwidget.ru
+  CRM_ACCESS_INTERNAL_BASE_URL: ${CRM_ACCESS_INTERNAL_BASE_URL:-http://127.0.0.1:5300}
+  CRM_CUSTOMERS_INTERNAL_BASE_URL: ${CRM_CUSTOMERS_INTERNAL_BASE_URL:-http://127.0.0.1:5320}
+  CRM_SALES_INTERNAL_BASE_URL: ${CRM_SALES_INTERNAL_BASE_URL:-http://127.0.0.1:5330}
+  WIDGETS_INTERNAL_BASE_URL: ${WIDGETS_INTERNAL_BASE_URL:-http://127.0.0.1:4700}
+  CRM_ACCESS_CRM_INTAKE_TOKEN: ${CRM_ACCESS_CRM_INTAKE_TOKEN:?CRM_ACCESS_CRM_INTAKE_TOKEN is required}
+  CRM_CUSTOMERS_CRM_INTAKE_TOKEN: ${CRM_CUSTOMERS_CRM_INTAKE_TOKEN:?CRM_CUSTOMERS_CRM_INTAKE_TOKEN is required}
+  CRM_SALES_CRM_INTAKE_TOKEN: ${CRM_SALES_CRM_INTAKE_TOKEN:?CRM_SALES_CRM_INTAKE_TOKEN is required}
+  WIDGETS_CRM_INTAKE_TOKEN: ${WIDGETS_CRM_INTAKE_TOKEN:?WIDGETS_CRM_INTAKE_TOKEN is required}
+  CRM_INTAKE_RABBITMQ_ASSERT_TOPOLOGY: 'false'
+  CRM_INTAKE_WIDGETS_ENABLED: '${CRM_INTAKE_WIDGETS_ENABLED:-false}'
+  CRM_INTAKE_WIDGET_TRANSFERS_ENABLED: '${CRM_INTAKE_WIDGET_TRANSFERS_ENABLED:-false}'
+
+x-crm-customers-env: &crm-customers-env
+  NODE_ENV: production
+  MODE: production
+  APP_REVISION: ${CRM_CUSTOMERS_REVISION:?CRM_CUSTOMERS_REVISION is required}
+  CRM_CUSTOMERS_LISTEN_HOST: 127.0.0.1
+  CORS_ALLOWED_ORIGINS: https://crm.winwidget.ru
+  CRM_ACCESS_INTERNAL_BASE_URL: ${CRM_ACCESS_INTERNAL_BASE_URL:-http://127.0.0.1:5300}
+  CRM_ACCESS_CRM_CUSTOMERS_TOKEN: ${CRM_ACCESS_CRM_CUSTOMERS_TOKEN:?CRM_ACCESS_CRM_CUSTOMERS_TOKEN is required}
+  CRM_CUSTOMERS_CRM_INTAKE_TOKEN: ${CRM_CUSTOMERS_CRM_INTAKE_TOKEN:?CRM_CUSTOMERS_CRM_INTAKE_TOKEN is required}
+  CRM_CUSTOMERS_CRM_SALES_TOKEN: ${CRM_CUSTOMERS_CRM_SALES_TOKEN:?CRM_CUSTOMERS_CRM_SALES_TOKEN is required}
+
+x-crm-sales-env: &crm-sales-env
+  NODE_ENV: production
+  MODE: production
+  APP_REVISION: ${CRM_SALES_REVISION:?CRM_SALES_REVISION is required}
+  CRM_SALES_LISTEN_HOST: 127.0.0.1
+  CORS_ALLOWED_ORIGINS: https://crm.winwidget.ru
+  CRM_ACCESS_INTERNAL_BASE_URL: ${CRM_ACCESS_INTERNAL_BASE_URL:-http://127.0.0.1:5300}
+  CRM_CUSTOMERS_INTERNAL_BASE_URL: ${CRM_CUSTOMERS_INTERNAL_BASE_URL:-http://127.0.0.1:5320}
+  CRM_ACCESS_CRM_SALES_TOKEN: ${CRM_ACCESS_CRM_SALES_TOKEN:?CRM_ACCESS_CRM_SALES_TOKEN is required}
+  CRM_SALES_CRM_ACCESS_TOKEN: ${CRM_SALES_CRM_ACCESS_TOKEN:?CRM_SALES_CRM_ACCESS_TOKEN is required}
+  CRM_SALES_CRM_INTAKE_TOKEN: ${CRM_SALES_CRM_INTAKE_TOKEN:?CRM_SALES_CRM_INTAKE_TOKEN is required}
+  CRM_CUSTOMERS_CRM_SALES_TOKEN: ${CRM_CUSTOMERS_CRM_SALES_TOKEN:?CRM_CUSTOMERS_CRM_SALES_TOKEN is required}
+
+services:
+  crm-access-api:
+    <<: *runtime
+    image: ${CRM_ACCESS_IMAGE:?CRM_ACCESS_IMAGE is required}
+    labels:
+      com.winwidget.owner: crm-access
+      com.winwidget.purpose: api
+      com.winwidget.singleton: 'true'
+    environment:
+      <<: *crm-access-env
+      CRM_ACCESS_PROCESS_ROLE: api
+      CRM_ACCESS_PORT: '5300'
+      CRM_ACCESS_DATABASE_URL: ${CRM_ACCESS_API_DATABASE_URL:?CRM_ACCESS_API_DATABASE_URL is required}
+    mem_limit: ${CRM_API_MEMORY_LIMIT:?CRM_API_MEMORY_LIMIT is required}
+    memswap_limit: ${CRM_API_MEMORY_LIMIT:?CRM_API_MEMORY_LIMIT is required}
+    cpus: ${CRM_API_CPUS:?CRM_API_CPUS is required}
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:5300/health/ready',{signal:AbortSignal.timeout(2000)}).then(r=>process.exit(r.status===200?0:1)).catch(()=>process.exit(1))"
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 45s
+
+  crm-access-worker:
+    <<: *runtime
+    image: ${CRM_ACCESS_IMAGE:?CRM_ACCESS_IMAGE is required}
+    labels:
+      com.winwidget.owner: crm-access
+      com.winwidget.purpose: worker
+      com.winwidget.singleton: 'true'
+    environment:
+      <<: *crm-access-env
+      CRM_ACCESS_PROCESS_ROLE: worker
+      CRM_ACCESS_PORT: '5301'
+      CRM_ACCESS_DATABASE_URL: ${CRM_ACCESS_WORKER_DATABASE_URL:?CRM_ACCESS_WORKER_DATABASE_URL is required}
+      RABBITMQ_URL: ${CRM_ACCESS_WORKER_RABBITMQ_URL:?CRM_ACCESS_WORKER_RABBITMQ_URL is required}
+      RABBITMQ_CONNECTION_NAME: winwidget-crm-access-worker
+    mem_limit: ${CRM_WORKER_MEMORY_LIMIT:?CRM_WORKER_MEMORY_LIMIT is required}
+    memswap_limit: ${CRM_WORKER_MEMORY_LIMIT:?CRM_WORKER_MEMORY_LIMIT is required}
+    cpus: ${CRM_WORKER_CPUS:?CRM_WORKER_CPUS is required}
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:5301/health/ready',{signal:AbortSignal.timeout(2000)}).then(r=>process.exit(r.status===200?0:1)).catch(()=>process.exit(1))"
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 45s
+
+  crm-access-outbox-publisher:
+    <<: *runtime
+    image: ${CRM_ACCESS_IMAGE:?CRM_ACCESS_IMAGE is required}
+    labels:
+      com.winwidget.owner: crm-access
+      com.winwidget.purpose: outbox-publisher
+      com.winwidget.singleton: 'true'
+    environment:
+      <<: *crm-access-env
+      CRM_ACCESS_PROCESS_ROLE: outbox-publisher
+      CRM_ACCESS_PORT: '5302'
+      CRM_ACCESS_DATABASE_URL: ${CRM_ACCESS_OUTBOX_PUBLISHER_DATABASE_URL:?CRM_ACCESS_OUTBOX_PUBLISHER_DATABASE_URL is required}
+      RABBITMQ_URL: ${CRM_ACCESS_OUTBOX_PUBLISHER_RABBITMQ_URL:?CRM_ACCESS_OUTBOX_PUBLISHER_RABBITMQ_URL is required}
+      RABBITMQ_CONNECTION_NAME: winwidget-crm-access-outbox-publisher
+    mem_limit: ${CRM_PUBLISHER_MEMORY_LIMIT:?CRM_PUBLISHER_MEMORY_LIMIT is required}
+    memswap_limit: ${CRM_PUBLISHER_MEMORY_LIMIT:?CRM_PUBLISHER_MEMORY_LIMIT is required}
+    cpus: ${CRM_PUBLISHER_CPUS:?CRM_PUBLISHER_CPUS is required}
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:5302/health/ready',{signal:AbortSignal.timeout(2000)}).then(r=>process.exit(r.status===200?0:1)).catch(()=>process.exit(1))"
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 45s
+
+  crm-access-migrate:
+    <<: *migration
+    image: ${CRM_ACCESS_IMAGE:?CRM_ACCESS_IMAGE is required}
+    labels:
+      com.winwidget.owner: crm-access
+      com.winwidget.purpose: migration
+    environment:
+      NODE_ENV: production
+      MODE: production
+      APP_REVISION: ${CRM_ACCESS_REVISION:?CRM_ACCESS_REVISION is required}
+      CRM_ACCESS_DATABASE_URL: ${CRM_ACCESS_MIGRATION_DATABASE_URL:?CRM_ACCESS_MIGRATION_DATABASE_URL is required}
+
+  crm-access-postgres:
+    <<: *postgres
+    healthcheck:
+      <<: *postgres-healthcheck
+      test:
+        [
+          'CMD',
+          'pg_isready',
+          '-U',
+          'winwidget_crm_access_admin',
+          '-d',
+          'winwidget_crm_access'
+        ]
+    labels:
+      com.winwidget.owner: crm-access
+      com.winwidget.purpose: postgres
+    environment:
+      POSTGRES_DB: winwidget_crm_access
+      POSTGRES_USER: winwidget_crm_access_admin
+      POSTGRES_PASSWORD_FILE: /run/secrets/crm-access-postgres-admin-password
+      POSTGRES_INITDB_ARGS: --locale=C.UTF-8 --encoding=UTF8 --auth-host=scram-sha-256 --data-checksums
+      PGDATA: /var/lib/postgresql/18/docker
+    command: ['postgres', '-c', 'max_connections=32']
+    ports: ['127.0.0.1:55442:5432']
+    volumes: [crm-access-postgres-data:/var/lib/postgresql]
+    networks: [crm-access-postgres]
+    secrets: [crm-access-postgres-admin-password]
+
+  crm-intake-api:
+    <<: *runtime
+    image: ${CRM_INTAKE_IMAGE:?CRM_INTAKE_IMAGE is required}
+    labels:
+      com.winwidget.owner: crm-intake
+      com.winwidget.purpose: api
+      com.winwidget.singleton: 'true'
+    environment:
+      <<: *crm-intake-env
+      CRM_INTAKE_PROCESS_ROLE: api
+      CRM_INTAKE_PORT: '5310'
+      CRM_INTAKE_DATABASE_URL: ${CRM_INTAKE_API_DATABASE_URL:?CRM_INTAKE_API_DATABASE_URL is required}
+    mem_limit: ${CRM_API_MEMORY_LIMIT:?CRM_API_MEMORY_LIMIT is required}
+    memswap_limit: ${CRM_API_MEMORY_LIMIT:?CRM_API_MEMORY_LIMIT is required}
+    cpus: ${CRM_API_CPUS:?CRM_API_CPUS is required}
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:5310/health/ready',{signal:AbortSignal.timeout(2000)}).then(r=>process.exit(r.status===200?0:1)).catch(()=>process.exit(1))"
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 45s
+
+  crm-intake-worker:
+    <<: *runtime
+    image: ${CRM_INTAKE_IMAGE:?CRM_INTAKE_IMAGE is required}
+    labels:
+      com.winwidget.owner: crm-intake
+      com.winwidget.purpose: worker
+      com.winwidget.singleton: 'true'
+    environment:
+      <<: *crm-intake-env
+      CRM_INTAKE_PROCESS_ROLE: worker
+      CRM_INTAKE_PORT: '5311'
+      CRM_INTAKE_DATABASE_URL: ${CRM_INTAKE_WORKER_DATABASE_URL:?CRM_INTAKE_WORKER_DATABASE_URL is required}
+      CRM_INTAKE_RABBITMQ_URL: ${CRM_INTAKE_WORKER_RABBITMQ_URL:?CRM_INTAKE_WORKER_RABBITMQ_URL is required}
+    mem_limit: ${CRM_WORKER_MEMORY_LIMIT:?CRM_WORKER_MEMORY_LIMIT is required}
+    memswap_limit: ${CRM_WORKER_MEMORY_LIMIT:?CRM_WORKER_MEMORY_LIMIT is required}
+    cpus: ${CRM_WORKER_CPUS:?CRM_WORKER_CPUS is required}
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:5311/health/ready',{signal:AbortSignal.timeout(2000)}).then(r=>process.exit(r.status===200?0:1)).catch(()=>process.exit(1))"
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 45s
+
+  crm-intake-publisher:
+    <<: *runtime
+    image: ${CRM_INTAKE_IMAGE:?CRM_INTAKE_IMAGE is required}
+    labels:
+      com.winwidget.owner: crm-intake
+      com.winwidget.purpose: publisher
+      com.winwidget.singleton: 'true'
+    environment:
+      <<: *crm-intake-env
+      CRM_INTAKE_PROCESS_ROLE: publisher
+      CRM_INTAKE_PORT: '5312'
+      CRM_INTAKE_DATABASE_URL: ${CRM_INTAKE_PUBLISHER_DATABASE_URL:?CRM_INTAKE_PUBLISHER_DATABASE_URL is required}
+      CRM_INTAKE_RABBITMQ_URL: ${CRM_INTAKE_PUBLISHER_RABBITMQ_URL:?CRM_INTAKE_PUBLISHER_RABBITMQ_URL is required}
+    mem_limit: ${CRM_PUBLISHER_MEMORY_LIMIT:?CRM_PUBLISHER_MEMORY_LIMIT is required}
+    memswap_limit: ${CRM_PUBLISHER_MEMORY_LIMIT:?CRM_PUBLISHER_MEMORY_LIMIT is required}
+    cpus: ${CRM_PUBLISHER_CPUS:?CRM_PUBLISHER_CPUS is required}
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:5312/health/ready',{signal:AbortSignal.timeout(2000)}).then(r=>process.exit(r.status===200?0:1)).catch(()=>process.exit(1))"
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 45s
+
+  crm-intake-widget-control-worker:
+    <<: *runtime
+    image: ${CRM_INTAKE_IMAGE:?CRM_INTAKE_IMAGE is required}
+    labels:
+      com.winwidget.owner: crm-intake
+      com.winwidget.purpose: widget-control-worker
+      com.winwidget.singleton: 'true'
+    environment:
+      <<: *crm-intake-env
+      CRM_INTAKE_PROCESS_ROLE: widget-control-worker
+      CRM_INTAKE_PORT: '5313'
+      CRM_INTAKE_DATABASE_URL: ${CRM_INTAKE_WIDGET_CONTROL_WORKER_DATABASE_URL:?CRM_INTAKE_WIDGET_CONTROL_WORKER_DATABASE_URL is required}
+      CRM_INTAKE_RABBITMQ_URL: ${CRM_INTAKE_WIDGET_CONTROL_WORKER_RABBITMQ_URL:?CRM_INTAKE_WIDGET_CONTROL_WORKER_RABBITMQ_URL is required}
+    mem_limit: ${CRM_WORKER_MEMORY_LIMIT:?CRM_WORKER_MEMORY_LIMIT is required}
+    memswap_limit: ${CRM_WORKER_MEMORY_LIMIT:?CRM_WORKER_MEMORY_LIMIT is required}
+    cpus: ${CRM_WORKER_CPUS:?CRM_WORKER_CPUS is required}
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:5313/health/ready',{signal:AbortSignal.timeout(2000)}).then(r=>process.exit(r.status===200?0:1)).catch(()=>process.exit(1))"
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 45s
+
+  crm-intake-widget-control-publisher:
+    <<: *runtime
+    image: ${CRM_INTAKE_IMAGE:?CRM_INTAKE_IMAGE is required}
+    labels:
+      com.winwidget.owner: crm-intake
+      com.winwidget.purpose: widget-control-publisher
+      com.winwidget.singleton: 'true'
+    environment:
+      <<: *crm-intake-env
+      CRM_INTAKE_PROCESS_ROLE: widget-control-publisher
+      CRM_INTAKE_PORT: '5314'
+      CRM_INTAKE_DATABASE_URL: ${CRM_INTAKE_WIDGET_CONTROL_PUBLISHER_DATABASE_URL:?CRM_INTAKE_WIDGET_CONTROL_PUBLISHER_DATABASE_URL is required}
+      CRM_INTAKE_RABBITMQ_URL: ${CRM_INTAKE_WIDGET_CONTROL_PUBLISHER_RABBITMQ_URL:?CRM_INTAKE_WIDGET_CONTROL_PUBLISHER_RABBITMQ_URL is required}
+    mem_limit: ${CRM_PUBLISHER_MEMORY_LIMIT:?CRM_PUBLISHER_MEMORY_LIMIT is required}
+    memswap_limit: ${CRM_PUBLISHER_MEMORY_LIMIT:?CRM_PUBLISHER_MEMORY_LIMIT is required}
+    cpus: ${CRM_PUBLISHER_CPUS:?CRM_PUBLISHER_CPUS is required}
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:5314/health/ready',{signal:AbortSignal.timeout(2000)}).then(r=>process.exit(r.status===200?0:1)).catch(()=>process.exit(1))"
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 45s
+
+  crm-intake-widget-transfer-worker:
+    <<: *runtime
+    image: ${CRM_INTAKE_IMAGE:?CRM_INTAKE_IMAGE is required}
+    labels:
+      com.winwidget.owner: crm-intake
+      com.winwidget.purpose: widget-transfer-worker
+      com.winwidget.singleton: 'true'
+    environment:
+      <<: *crm-intake-env
+      CRM_INTAKE_PROCESS_ROLE: widget-transfer-worker
+      CRM_INTAKE_PORT: '5315'
+      CRM_INTAKE_DATABASE_URL: ${CRM_INTAKE_WIDGET_TRANSFER_WORKER_DATABASE_URL:?CRM_INTAKE_WIDGET_TRANSFER_WORKER_DATABASE_URL is required}
+      CRM_INTAKE_RABBITMQ_URL: ${CRM_INTAKE_WIDGET_TRANSFER_WORKER_RABBITMQ_URL:?CRM_INTAKE_WIDGET_TRANSFER_WORKER_RABBITMQ_URL is required}
+    mem_limit: ${CRM_WORKER_MEMORY_LIMIT:?CRM_WORKER_MEMORY_LIMIT is required}
+    memswap_limit: ${CRM_WORKER_MEMORY_LIMIT:?CRM_WORKER_MEMORY_LIMIT is required}
+    cpus: ${CRM_WORKER_CPUS:?CRM_WORKER_CPUS is required}
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:5315/health/ready',{signal:AbortSignal.timeout(2000)}).then(r=>process.exit(r.status===200?0:1)).catch(()=>process.exit(1))"
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 45s
+
+  crm-intake-widget-transfer-publisher:
+    <<: *runtime
+    image: ${CRM_INTAKE_IMAGE:?CRM_INTAKE_IMAGE is required}
+    labels:
+      com.winwidget.owner: crm-intake
+      com.winwidget.purpose: widget-transfer-publisher
+      com.winwidget.singleton: 'true'
+    environment:
+      <<: *crm-intake-env
+      CRM_INTAKE_PROCESS_ROLE: widget-transfer-publisher
+      CRM_INTAKE_PORT: '5316'
+      CRM_INTAKE_DATABASE_URL: ${CRM_INTAKE_WIDGET_TRANSFER_PUBLISHER_DATABASE_URL:?CRM_INTAKE_WIDGET_TRANSFER_PUBLISHER_DATABASE_URL is required}
+      CRM_INTAKE_RABBITMQ_URL: ${CRM_INTAKE_WIDGET_TRANSFER_PUBLISHER_RABBITMQ_URL:?CRM_INTAKE_WIDGET_TRANSFER_PUBLISHER_RABBITMQ_URL is required}
+    mem_limit: ${CRM_PUBLISHER_MEMORY_LIMIT:?CRM_PUBLISHER_MEMORY_LIMIT is required}
+    memswap_limit: ${CRM_PUBLISHER_MEMORY_LIMIT:?CRM_PUBLISHER_MEMORY_LIMIT is required}
+    cpus: ${CRM_PUBLISHER_CPUS:?CRM_PUBLISHER_CPUS is required}
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:5316/health/ready',{signal:AbortSignal.timeout(2000)}).then(r=>process.exit(r.status===200?0:1)).catch(()=>process.exit(1))"
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 45s
+
+  crm-intake-migrate:
+    <<: *migration
+    image: ${CRM_INTAKE_IMAGE:?CRM_INTAKE_IMAGE is required}
+    labels:
+      com.winwidget.owner: crm-intake
+      com.winwidget.purpose: migration
+    environment:
+      NODE_ENV: production
+      MODE: production
+      APP_REVISION: ${CRM_INTAKE_REVISION:?CRM_INTAKE_REVISION is required}
+      CRM_INTAKE_DATABASE_URL: ${CRM_INTAKE_MIGRATION_DATABASE_URL:?CRM_INTAKE_MIGRATION_DATABASE_URL is required}
+
+  crm-intake-postgres:
+    <<: *postgres
+    healthcheck:
+      <<: *postgres-healthcheck
+      test:
+        [
+          'CMD',
+          'pg_isready',
+          '-U',
+          'winwidget_crm_intake_admin',
+          '-d',
+          'winwidget_crm_intake'
+        ]
+    labels:
+      com.winwidget.owner: crm-intake
+      com.winwidget.purpose: postgres
+    environment:
+      POSTGRES_DB: winwidget_crm_intake
+      POSTGRES_USER: winwidget_crm_intake_admin
+      POSTGRES_PASSWORD_FILE: /run/secrets/crm-intake-postgres-admin-password
+      POSTGRES_INITDB_ARGS: --locale=C.UTF-8 --encoding=UTF8 --auth-host=scram-sha-256 --data-checksums
+      PGDATA: /var/lib/postgresql/18/docker
+    command: ['postgres', '-c', 'max_connections=48']
+    ports: ['127.0.0.1:55443:5432']
+    volumes: [crm-intake-postgres-data:/var/lib/postgresql]
+    networks: [crm-intake-postgres]
+    secrets: [crm-intake-postgres-admin-password]
+
+  crm-customers-api:
+    <<: *runtime
+    image: ${CRM_CUSTOMERS_IMAGE:?CRM_CUSTOMERS_IMAGE is required}
+    labels:
+      com.winwidget.owner: crm-customers
+      com.winwidget.purpose: api
+      com.winwidget.singleton: 'true'
+    environment:
+      <<: *crm-customers-env
+      CRM_CUSTOMERS_PROCESS_ROLE: api
+      CRM_CUSTOMERS_PORT: '5320'
+      CRM_CUSTOMERS_DATABASE_URL: ${CRM_CUSTOMERS_API_DATABASE_URL:?CRM_CUSTOMERS_API_DATABASE_URL is required}
+    mem_limit: ${CRM_API_MEMORY_LIMIT:?CRM_API_MEMORY_LIMIT is required}
+    memswap_limit: ${CRM_API_MEMORY_LIMIT:?CRM_API_MEMORY_LIMIT is required}
+    cpus: ${CRM_API_CPUS:?CRM_API_CPUS is required}
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:5320/health/ready',{signal:AbortSignal.timeout(2000)}).then(r=>process.exit(r.status===200?0:1)).catch(()=>process.exit(1))"
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 45s
+
+  crm-customers-migrate:
+    <<: *migration
+    image: ${CRM_CUSTOMERS_IMAGE:?CRM_CUSTOMERS_IMAGE is required}
+    labels:
+      com.winwidget.owner: crm-customers
+      com.winwidget.purpose: migration
+    environment:
+      NODE_ENV: production
+      MODE: production
+      APP_REVISION: ${CRM_CUSTOMERS_REVISION:?CRM_CUSTOMERS_REVISION is required}
+      CRM_CUSTOMERS_DATABASE_URL: ${CRM_CUSTOMERS_MIGRATION_DATABASE_URL:?CRM_CUSTOMERS_MIGRATION_DATABASE_URL is required}
+
+  crm-customers-postgres:
+    <<: *postgres
+    healthcheck:
+      <<: *postgres-healthcheck
+      test:
+        [
+          'CMD',
+          'pg_isready',
+          '-U',
+          'winwidget_crm_customers_admin',
+          '-d',
+          'winwidget_crm_customers'
+        ]
+    labels:
+      com.winwidget.owner: crm-customers
+      com.winwidget.purpose: postgres
+    environment:
+      POSTGRES_DB: winwidget_crm_customers
+      POSTGRES_USER: winwidget_crm_customers_admin
+      POSTGRES_PASSWORD_FILE: /run/secrets/crm-customers-postgres-admin-password
+      POSTGRES_INITDB_ARGS: --locale=C.UTF-8 --encoding=UTF8 --auth-host=scram-sha-256 --data-checksums
+      PGDATA: /var/lib/postgresql/18/docker
+    command: ['postgres', '-c', 'max_connections=16']
+    ports: ['127.0.0.1:55444:5432']
+    volumes: [crm-customers-postgres-data:/var/lib/postgresql]
+    networks: [crm-customers-postgres]
+    secrets: [crm-customers-postgres-admin-password]
+
+  crm-sales-api:
+    <<: *runtime
+    image: ${CRM_SALES_IMAGE:?CRM_SALES_IMAGE is required}
+    labels:
+      com.winwidget.owner: crm-sales
+      com.winwidget.purpose: api
+      com.winwidget.singleton: 'true'
+    environment:
+      <<: *crm-sales-env
+      CRM_SALES_PROCESS_ROLE: api
+      CRM_SALES_PORT: '5330'
+      CRM_SALES_DATABASE_URL: ${CRM_SALES_API_DATABASE_URL:?CRM_SALES_API_DATABASE_URL is required}
+    mem_limit: ${CRM_API_MEMORY_LIMIT:?CRM_API_MEMORY_LIMIT is required}
+    memswap_limit: ${CRM_API_MEMORY_LIMIT:?CRM_API_MEMORY_LIMIT is required}
+    cpus: ${CRM_API_CPUS:?CRM_API_CPUS is required}
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:5330/health/ready',{signal:AbortSignal.timeout(2000)}).then(r=>process.exit(r.status===200?0:1)).catch(()=>process.exit(1))"
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 45s
+
+  crm-sales-migrate:
+    <<: *migration
+    image: ${CRM_SALES_IMAGE:?CRM_SALES_IMAGE is required}
+    labels:
+      com.winwidget.owner: crm-sales
+      com.winwidget.purpose: migration
+    environment:
+      NODE_ENV: production
+      MODE: production
+      APP_REVISION: ${CRM_SALES_REVISION:?CRM_SALES_REVISION is required}
+      CRM_SALES_DATABASE_URL: ${CRM_SALES_MIGRATION_DATABASE_URL:?CRM_SALES_MIGRATION_DATABASE_URL is required}
+
+  crm-sales-postgres:
+    <<: *postgres
+    healthcheck:
+      <<: *postgres-healthcheck
+      test:
+        [
+          'CMD',
+          'pg_isready',
+          '-U',
+          'winwidget_crm_sales_admin',
+          '-d',
+          'winwidget_crm_sales'
+        ]
+    labels:
+      com.winwidget.owner: crm-sales
+      com.winwidget.purpose: postgres
+    environment:
+      POSTGRES_DB: winwidget_crm_sales
+      POSTGRES_USER: winwidget_crm_sales_admin
+      POSTGRES_PASSWORD_FILE: /run/secrets/crm-sales-postgres-admin-password
+      POSTGRES_INITDB_ARGS: --locale=C.UTF-8 --encoding=UTF8 --auth-host=scram-sha-256 --data-checksums
+      PGDATA: /var/lib/postgresql/18/docker
+    command: ['postgres', '-c', 'max_connections=16']
+    ports: ['127.0.0.1:55445:5432']
+    volumes: [crm-sales-postgres-data:/var/lib/postgresql]
+    networks: [crm-sales-postgres]
+    secrets: [crm-sales-postgres-admin-password]
+
+volumes:
+  crm-access-postgres-data:
+    labels:
+      com.winwidget.owner: crm-access
+  crm-intake-postgres-data:
+    labels:
+      com.winwidget.owner: crm-intake
+  crm-customers-postgres-data:
+    labels:
+      com.winwidget.owner: crm-customers
+  crm-sales-postgres-data:
+    labels:
+      com.winwidget.owner: crm-sales
+
+networks:
+  crm-access-postgres:
+    driver: bridge
+    internal: false
+    labels:
+      com.winwidget.owner: crm-access
+      com.winwidget.purpose: postgres-network
+  crm-intake-postgres:
+    driver: bridge
+    internal: false
+    labels:
+      com.winwidget.owner: crm-intake
+      com.winwidget.purpose: postgres-network
+  crm-customers-postgres:
+    driver: bridge
+    internal: false
+    labels:
+      com.winwidget.owner: crm-customers
+      com.winwidget.purpose: postgres-network
+  crm-sales-postgres:
+    driver: bridge
+    internal: false
+    labels:
+      com.winwidget.owner: crm-sales
+      com.winwidget.purpose: postgres-network
+
+secrets:
+  crm-access-postgres-admin-password:
+    file: ${CRM_ACCESS_POSTGRES_ADMIN_PASSWORD_FILE:?CRM_ACCESS_POSTGRES_ADMIN_PASSWORD_FILE is required}
+  crm-intake-postgres-admin-password:
+    file: ${CRM_INTAKE_POSTGRES_ADMIN_PASSWORD_FILE:?CRM_INTAKE_POSTGRES_ADMIN_PASSWORD_FILE is required}
+  crm-customers-postgres-admin-password:
+    file: ${CRM_CUSTOMERS_POSTGRES_ADMIN_PASSWORD_FILE:?CRM_CUSTOMERS_POSTGRES_ADMIN_PASSWORD_FILE is required}
+  crm-sales-postgres-admin-password:
+    file: ${CRM_SALES_POSTGRES_ADMIN_PASSWORD_FILE:?CRM_SALES_POSTGRES_ADMIN_PASSWORD_FILE is required}

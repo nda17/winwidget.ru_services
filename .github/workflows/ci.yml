@@ -35,6 +35,8 @@ jobs:
         run: node --test apps/crm-access/test/integration/local-frontends.test.mjs apps/crm-access/test/integration/local-browser-team.test.mjs
       - name: Verify isolated CRM image topology contract
         run: node --test apps/crm-access/test/integration/local-crm-image-topology.test.mjs
+      - name: Verify opt-in CRM Compose isolation without starting services
+        run: node --test .github/scripts/validate-crm-compose.test.mjs
 
   service:
     name: ${{ matrix.app }}
