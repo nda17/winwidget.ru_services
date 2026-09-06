@@ -1,4 +1,5 @@
 import { Logger, RequestMethod, ValidationPipe } from '@nestjs/common';
+import type { INestApplication } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { CrmAccessModule } from './crm-access.module';
 import { CrmAccessHttpExceptionFilter } from './common/crm-access-http-exception.filter';
@@ -9,11 +10,15 @@ import {
 	getCrmAccessTrustProxyConfig
 } from './runtime/crm-access-http.config';
 import { CrmAccessRuntimeService } from './runtime/crm-access-runtime.service';
+import { terminateFailedBootstrap } from './runtime/bootstrap-failure';
+
+let application: INestApplication | undefined;
 
 async function bootstrap(): Promise<void> {
 	const app = await NestFactory.create(CrmAccessModule, {
 		forceCloseConnections: true
 	});
+	application = app;
 	const instance = app.getHttpAdapter().getInstance();
 	if (typeof instance?.set === 'function') {
 		instance.set(
@@ -80,11 +85,7 @@ async function bootstrap(): Promise<void> {
 	);
 }
 
-void bootstrap().catch(error => {
-	Logger.error(
-		error instanceof Error ? error.message : 'CRM Access bootstrap failed',
-		undefined,
-		'Bootstrap'
-	);
-	process.exitCode = 1;
+void bootstrap().catch(() => {
+	Logger.error('CRM Access bootstrap failed', undefined, 'Bootstrap');
+	return terminateFailedBootstrap(application);
 });

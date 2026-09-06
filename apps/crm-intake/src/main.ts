@@ -6,10 +6,13 @@ import { parseCrmIntakeCorsAllowedOrigins } from './config/crm-intake-cors.confi
 import { CrmIntakeModule } from './crm-intake.module';
 import { intakeProcessRole } from './acceptance/acceptance.messaging';
 import { configureCrmIntakeBodyParser } from './config/crm-intake-body-parser';
+import { terminateFailedBootstrap } from './runtime/bootstrap-failure';
 import {
 	parseCrmIntakeListenHost,
 	parseCrmIntakePort
 } from './runtime/crm-intake-runtime.config';
+
+let application: NestExpressApplication | undefined;
 
 async function bootstrap(): Promise<void> {
 	const host = parseCrmIntakeListenHost(
@@ -27,6 +30,7 @@ async function bootstrap(): Promise<void> {
 		CrmIntakeModule,
 		{ forceCloseConnections: true }
 	);
+	application = app;
 	configureCrmIntakeBodyParser(app);
 	app.useGlobalPipes(
 		new ValidationPipe({
@@ -56,11 +60,7 @@ async function bootstrap(): Promise<void> {
 	Logger.log(`CRM Intake started host=${host} port=${port}`, 'Bootstrap');
 }
 
-void bootstrap().catch(error => {
-	Logger.error(
-		error instanceof Error ? error.message : 'CRM Intake bootstrap failed',
-		undefined,
-		'Bootstrap'
-	);
-	process.exitCode = 1;
+void bootstrap().catch(() => {
+	Logger.error('CRM Intake bootstrap failed', undefined, 'Bootstrap');
+	return terminateFailedBootstrap(application);
 });

@@ -4,10 +4,13 @@ import { EXPORT_EXPOSE_HEADERS } from './exports/export-format';
 import type { NestExpressApplication } from '@nestjs/platform-express';
 import { parseCrmCustomersCorsAllowedOrigins } from './config/crm-customers-cors.config';
 import { CrmCustomersModule } from './crm-customers.module';
+import { terminateFailedBootstrap } from './runtime/bootstrap-failure';
 import {
 	parseCrmCustomersListenHost,
 	parseCrmCustomersPort
 } from './runtime/crm-customers-runtime.config';
+
+let application: NestExpressApplication | undefined;
 
 async function bootstrap(): Promise<void> {
 	const host = parseCrmCustomersListenHost(
@@ -22,6 +25,7 @@ async function bootstrap(): Promise<void> {
 		CrmCustomersModule,
 		{ forceCloseConnections: true }
 	);
+	application = app;
 	app.useBodyParser('json', { limit: '32kb' });
 	app.useGlobalPipes(
 		new ValidationPipe({
@@ -70,13 +74,7 @@ async function bootstrap(): Promise<void> {
 	);
 }
 
-void bootstrap().catch(error => {
-	Logger.error(
-		error instanceof Error
-			? error.message
-			: 'CRM Customers bootstrap failed',
-		undefined,
-		'Bootstrap'
-	);
-	process.exitCode = 1;
+void bootstrap().catch(() => {
+	Logger.error('CRM Customers bootstrap failed', undefined, 'Bootstrap');
+	return terminateFailedBootstrap(application);
 });

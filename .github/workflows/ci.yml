@@ -96,6 +96,9 @@ jobs:
         run: pnpm --dir "apps/${{ matrix.app }}" run test
       - name: Build
         run: pnpm --dir "apps/${{ matrix.app }}" run build
+      - name: Verify bounded CRM bootstrap failure in a real process
+        if: startsWith(matrix.app, 'crm-')
+        run: node .github/scripts/test-crm-bootstrap-failure.mjs "${{ matrix.app }}"
 
   widgets-integration:
     name: Widgets security integration

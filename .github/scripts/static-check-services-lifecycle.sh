@@ -414,6 +414,7 @@ exactFiles('scripts', ['generate-jwt-keyset.mjs']);
 exactFiles('.github/workflows', ['ci.yml']);
 exactFiles('.github/scripts', [
 	'static-check-services-lifecycle.sh',
+	'test-crm-bootstrap-failure.mjs',
 	'validate-production-compose.cjs',
 	'validate-production-compose.sh',
 	'verify-production-audit.cjs'
@@ -421,6 +422,9 @@ exactFiles('.github/scripts', [
 exactFiles('deploy', ['docker-compose.prod.yml']);
 
 const servicesWorkflow = readFileSync('.github/workflows/ci.yml', 'utf8');
+if (!servicesWorkflow.includes('node .github/scripts/test-crm-bootstrap-failure.mjs "${{ matrix.app }}"')) {
+	throw new Error('CRM bounded bootstrap process gate is missing');
+}
 const pinnedInfraRevision =
 	'b602ae559223c5fc20de0c319d9d8250ab5aa5d3';
 for (const evidence of [

@@ -4,10 +4,13 @@ import { EXPORT_EXPOSE_HEADERS } from './exports/export-format';
 import type { NestExpressApplication } from '@nestjs/platform-express';
 import { parseCrmSalesCorsAllowedOrigins } from './config/crm-sales-cors.config';
 import { CrmSalesModule } from './crm-sales.module';
+import { terminateFailedBootstrap } from './runtime/bootstrap-failure';
 import {
 	parseCrmSalesListenHost,
 	parseCrmSalesPort
 } from './runtime/crm-sales-runtime.config';
+
+let application: NestExpressApplication | undefined;
 
 async function bootstrap(): Promise<void> {
 	const host = parseCrmSalesListenHost(
@@ -22,6 +25,7 @@ async function bootstrap(): Promise<void> {
 		CrmSalesModule,
 		{ forceCloseConnections: true }
 	);
+	application = app;
 
 	app.setGlobalPrefix('api/v1', {
 		exclude: [
@@ -62,11 +66,7 @@ async function bootstrap(): Promise<void> {
 	Logger.log(`CRM Sales started host=${host} port=${port}`, 'Bootstrap');
 }
 
-void bootstrap().catch(error => {
-	Logger.error(
-		error instanceof Error ? error.message : 'CRM Sales bootstrap failed',
-		undefined,
-		'Bootstrap'
-	);
-	process.exitCode = 1;
+void bootstrap().catch(() => {
+	Logger.error('CRM Sales bootstrap failed', undefined, 'Bootstrap');
+	return terminateFailedBootstrap(application);
 });
