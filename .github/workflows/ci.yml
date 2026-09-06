@@ -1276,12 +1276,42 @@ jobs:
         env:
           EXPECTED_SHA: ${{ github.sha }}
         run: test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+      - name: Reproduce private production checkout permissions for CRM
+        if: startsWith(matrix.app, 'crm-')
+        run: chmod -R go-rwx "apps/${{ matrix.app }}/prisma"
       - name: Build production image
         run: >-
           docker build
           --build-arg "APP_REVISION=${{ github.sha }}"
           --tag "winwidget-${{ matrix.app }}:ci-${{ github.sha }}"
           "apps/${{ matrix.app }}"
+      - name: Verify CRM image with production runtime and verifier identities
+        if: startsWith(matrix.app, 'crm-')
+        env:
+          CRM_IMAGE_OWNER: ${{ matrix.app }}
+          CRM_IMAGE_TAG: winwidget-${{ matrix.app }}:ci-${{ github.sha }}
+        run: |
+          for identity in 0:0 1001:1001; do
+            docker run --rm --network none --read-only --cap-drop ALL \
+              --security-opt no-new-privileges --user "$identity" \
+              --memory 384m --memory-swap 384m --pids-limit 32 \
+              --env CRM_IMAGE_OWNER \
+              --mount "type=bind,src=$PWD/deploy/crm/database-access.mjs,dst=/run/access.mjs,readonly" \
+              --entrypoint node "$CRM_IMAGE_TAG" --input-type=module -e '
+              import assert from "node:assert/strict";
+              import {createRequire} from "node:module";
+              import {readDatabaseAccess} from "/run/access.mjs";
+              const owner = process.env.CRM_IMAGE_OWNER;
+              const {migrations} = readDatabaseAccess("/app/prisma", owner);
+              if (process.getuid() === 1001) {
+                const require = createRequire("/app/package.json");
+                require("reflect-metadata");
+                assert.equal(typeof require("@prisma/" + owner + "-client").PrismaClient, "function");
+                require("/app/dist/src/" + owner + ".module.js");
+              }
+              console.log(owner + ": readable immutable migration code; uid=" + process.getuid() + "; migrations=" + migrations.length);
+              '
+          done
 
   deploy-production:
     name: Prepare isolated CRM images and configuration

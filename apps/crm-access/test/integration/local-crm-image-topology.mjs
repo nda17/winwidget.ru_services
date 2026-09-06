@@ -510,7 +510,9 @@ async function run() {
 				revision
 			);
 			assert.ok(
-				['node', 'crmaccess', '1000', '1001'].includes(image.Config.User)
+				['node', 'crmaccess', 'wincrm', '1000', '1001'].includes(
+					image.Config.User
+				)
 			);
 			images[service.app] = image.Id;
 			await record();

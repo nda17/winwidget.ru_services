@@ -41,6 +41,10 @@ COPY --from=build --chown=crmaccess:crmaccess /app/node_modules ./node_modules
 COPY --from=build --chown=crmaccess:crmaccess /app/package.json ./package.json
 COPY --from=build --chown=crmaccess:crmaccess /app/prisma ./prisma
 
+# Schema/access manifests are public release code, not credentials. Git
+# checkout may use umask 077; the root verifier drops DAC override capability.
+RUN chmod -R a+rX /app/prisma
+
 USER crmaccess
 EXPOSE 5300
 CMD ["node", "dist/src/main.js"]
