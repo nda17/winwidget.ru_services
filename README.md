@@ -10,18 +10,18 @@ listener `:4200` запрещены steady-state verifier-ом.
 
 ## Сервисы
 
-| Каталог                      | Ответственность                                                                 | Процессы и порты                                           |
-| ---------------------------- | ------------------------------------------------------------------------------- | ---------------------------------------------------------- |
-| `apps/api-gateway`           | Публичная точка входа `/api/v1/*`, JWT/JWKS, CORS и проксирование               | Gateway `4100`                                             |
-| `apps/identity`              | Пользователи, auth, OAuth, Telegram auth, профиль и S3-аватары                  | API `4900`, worker `4901`, outbox `4902`                   |
-| `apps/billing`               | Тарифы, подписки, платежи и партнёрская программа                               | API `4800`, scheduler `4801`, worker `4802`, outbox `4803` |
-| `apps/widgets`               | Все виджеты, заявки, настройки, интеграции и runtime-assets                     | API/worker/outbox `4700`                                   |
-| `apps/campaigns`             | Кампании, аудитории, email/Telegram-рассылки                                    | API/worker/outbox `4500`                                   |
-| `apps/reporting`             | Аналитические проекции, статистика и Daily Summary                              | API/worker/scheduler/outbox `4600`                         |
-| `apps/platform`              | Контент главной, юридические страницы и настройки сайта                         | API `5000`, outbox `5001`                                  |
-| `apps/support`               | Чат с оператором и Telegram support transport                                   | API `5100`, worker `5101`, outbox `5102`                   |
-| `apps/notification-delivery` | Фактическая доставка email и Telegram-сообщений                                 | worker `4401`                                              |
-| `apps/operations`            | Notes, Admin Event Log, очереди/DLQ, Telegram settings, backup/restore и alerts | API `5200`, worker `5201`, outbox `5202`, restore `5203`   |
+| Каталог                      | Ответственность                                                          | Процессы и порты                                           |
+| ---------------------------- | ------------------------------------------------------------------------ | ---------------------------------------------------------- |
+| `apps/api-gateway`           | Публичная точка входа `/api/v1/*`, JWT/JWKS, CORS и проксирование        | Gateway `4100`                                             |
+| `apps/identity`              | Пользователи, auth, OAuth, Telegram auth, профиль и S3-аватары           | API `4900`, worker `4901`, outbox `4902`                   |
+| `apps/billing`               | Тарифы, подписки, платежи и партнёрская программа                        | API `4800`, scheduler `4801`, worker `4802`, outbox `4803` |
+| `apps/widgets`               | Все виджеты, заявки, настройки, интеграции и runtime-assets              | API/worker/outbox `4700`                                   |
+| `apps/campaigns`             | Кампании, аудитории, email/Telegram-рассылки                             | API/worker/outbox `4500`                                   |
+| `apps/reporting`             | Аналитические проекции, статистика и Daily Summary                       | API/worker/scheduler/outbox `4600`                         |
+| `apps/platform`              | Контент главной, юридические страницы и настройки сайта                  | API `5000`, outbox `5001`                                  |
+| `apps/support`               | Чат с оператором и Telegram support transport                            | API `5100`, worker `5101`, outbox `5102`                   |
+| `apps/notification-delivery` | Фактическая доставка email и Telegram-сообщений                          | worker `4401`                                              |
+| `apps/operations`            | Admin Event Log, очереди/DLQ, Telegram settings, backup/restore и alerts | API `5200`, worker `5201`, outbox `5202`, restore `5203`   |
 
 Gateway использует манифест точных префиксов. Общего универсального маршрута
 `/api/v1` нет:
@@ -141,7 +141,55 @@ bash .github/scripts/static-check-services-lifecycle.sh
 ```
 
 CI выполняет матрицу `install → prisma:generate → lint → typecheck → test →
-build` для всех десяти приложений.
+build` для всех четырнадцати приложений.
+
+### Восстановление фоновых процессов после ошибки запуска
+
+Billing, Operations и Support при ошибке bootstrap выполняют best-effort
+`app.close()` с пределом 5 секунд и завершаются с кодом 1. Это позволяет
+существующей Docker restart policy повторить запуск, если RabbitMQ появился
+позже первоначального connect timeout. Успешный запуск, бизнес-транзакции,
+Outbox, правила ACK/retry и миграции не меняются. Сырые ошибки bootstrap и
+cleanup не выводятся: они могут содержать параметры подключения.
+
+Изолированная проверка семи ролей использует настоящие образы этих трёх
+сервисов, собственные PostgreSQL 18/RabbitMQ и внутреннюю Docker-сеть без
+внешних провайдеров. Сначала соберите приложения и образы:
+
+```bash
+docker build -t winwidget-bootstrap-proof-billing:local apps/billing
+docker build -t winwidget-bootstrap-proof-operations:local apps/operations
+docker build -t winwidget-bootstrap-proof-support:local apps/support
+WORKER_BOOTSTRAP_PROOF_ALLOW_LOCAL_DOCKER=true node scripts/test-workers-bootstrap-recovery.mjs
+```
+
+Перед запуском нужны локальные `dist` после `pnpm run build` во всех трёх
+приложениях. Проверка допускает только локальный context `colima`, сохраняет
+заранее опубликованное durable audit-сообщение, держит брокер недоступным
+дольше 30 секунд и проверяет автоматические перезапуски и фактический
+role/revision readiness. Собственные контейнеры, анонимные volumes и сеть
+удаляются в `finally`; образы/cache очищаются отдельно после остальных
+локальных проверок.
+
+Operations получает внутри тестовых контейнеров отдельную временную пару
+Ed25519 и тестовый trusted public keyring, а также пустые staging/sealed
+каталоги. Production-ключи и env не читаются; миграционный restore catalog и
+скомпилированный bootstrap не подменяются. Это не проверка privileged
+production entrypoint копирования ключа. Отрицательный контроль меняет
+только вызов termination на прежний `process.exitCode = 1` в памяти
+отдельного тестового Billing-процесса и подтверждает отсутствие readiness.
+
+Это проверка восстановления при ошибке старта, а не обещание безопасного
+прерывания любого уже выполняющегося внешнего действия. Известные lease/ACK
+ограничения Operations требуют отдельного решения. Worker recovery scope
+допускает семь согласованных worker/outbox/restore процессов и Billing API
+как обязательный companion: его отчёт готовности требует совпадения revision
+API и worker. Эта проверка сохраняется. Остальные API, scheduler Billing,
+CRM, env и схемы БД не входят в этот релиз. Перед заменой
+нужны проверенное окно без активных финансовых/backup/restore заданий,
+неподтверждённых сообщений/публикаций и безопасное завершение старых
+процессов; rollback возвращает прежние образы без отката данных. Остальные
+сервисы с аналогичными catch-обработчиками в этот фикс не включены.
 
 ## Данные и RabbitMQ
 
@@ -166,11 +214,21 @@ lifecycle gate и полной CI-матрицы release-job автоматич�
 workflow `winwidget.ru_infra`, закреплённый неизменяемым 40-символьным SHA;
 ручного ввода ревизии и прямого запуска controller нет. На production действует
 единый deploy lock. Обязательны побайтово идентичный hash env, метки OCI
-revision, миграции баз всех сервисов, точные
-permissions/topology RabbitMQ, прямые проверки readiness, smoke-проверки
-Gateway/публичного API и revision каждого контейнера.
+revision, точные owner env и неизменность соседних контейнеров. Текущий кандидат
+выполняет два последовательных scope для одного source SHA: `crm-prepare`
+собирает и запечатывает четыре CRM images и отдельный Compose, затем
+`crm-databases` создаёт только четыре service-owned PostgreSQL, проверяет роли
+и применяет CRM migrations. Оба этапа закреплены на infra
+`6ab9828d9e8fdc058780514a5b434855c9924b07`; actual Gateway baseline и hash
+синхронизированного CRM env зафиксированы в workflow.
 
-Notes, Admin Event Log и плоскость управления Telegram/Reporting принадлежат
+Существующие runtime, env, RabbitMQ и Gateway routes этими scopes не меняются.
+CRM application processes, Trial, native Widgets и продажи ещё не активируются.
+Новые backup-копии и Operations Notes DDL не выполняются. Их отложенные
+ограничения не подменяют этапы запуска CRM. Дальнейшие MVP gates находятся в
+`docs/backlog.md`, production-процедура — в infra runbook.
+
+Admin Event Log и плоскость управления Telegram/Reporting принадлежат
 Operations. Обычный deploy проверяет актуальные границы service-owned баз,
 миграции, readiness и краткие negative invariants: отсутствуют Core runtime,
 routes, queues, users и listener `:4200`. Исторические import/activate/bootstrap

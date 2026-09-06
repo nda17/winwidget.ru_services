@@ -6,6 +6,8 @@ bash -n .github/scripts/validate-production-compose.sh
 node --check .github/scripts/validate-production-compose.cjs
 node --check apps/operations/test/integration/database-restore-control-ledger-postgres18.integration.mjs
 node --check apps/operations/test/integration/database-restore-postgres18.rehearsal.mjs
+node --check apps/operations/test/integration/admin-backlog-removal-postgres18.integration.mjs
+node --check apps/identity/test/integration/login-otp-postgres18.integration.mjs
 
 env \
 	GITHUB_CLIENT_ID=ci_identity_github_client_id \
@@ -410,7 +412,7 @@ for (const path of [
 	}
 }
 
-exactFiles('scripts', ['generate-jwt-keyset.mjs']);
+exactFiles('scripts', ['generate-jwt-keyset.mjs', 'test-workers-bootstrap-recovery.mjs']);
 exactFiles('.github/workflows', ['ci.yml']);
 exactFiles('.github/scripts', [
 	'static-check-services-lifecycle.sh',
@@ -435,6 +437,8 @@ for (const evidence of [
 	'--label winwidget.operations-control-ledger=true',
 	'      - name: Run control-ledger negative SQL matrix\n        env:\n          OPERATIONS_CONTROL_LEDGER_POSTGRES_CONTAINER_ID: ${{ job.services.postgres.id }}',
 	'pnpm --dir apps/operations run test:integration:restore-control-ledger',
+	'--label winwidget.operations-backlog-test=true',
+	'      - name: Prove exact admin Backlog deletion and transactional rollback\n        env:\n          OPERATIONS_BACKLOG_TEST_CONTAINER_ID: ${{ job.services.postgres.id }}\n          OPERATIONS_BACKLOG_TEST_POSTGRES_USER: operations_control_ledger_superuser\n          OPERATIONS_BACKLOG_TEST_ALLOW_MUTATION: \'true\'\n        run: node apps/operations/test/integration/admin-backlog-removal-postgres18.integration.mjs',
 	'operations-restore-rehearsal:',
 	'--label winwidget.operations-restore-rehearsal=true',
 	'      - name: Run isolated restore rehearsal\n        env:\n          OPERATIONS_RESTORE_REHEARSAL_POSTGRES_CONTAINER_ID: ${{ job.services.postgres.id }}',
@@ -486,7 +490,7 @@ if (
 	infraReleaseReferences.length !== 2 ||
 	infraReleaseReferences.some(reference => reference[1] !== pinnedInfraRevision)
 ) {
-	throw new Error('production release workflow is not pinned to one exact infra SHA');
+	throw new Error('CRM production stages must use the same exact reviewed infra SHA');
 }
 // Both stages run for one immutable source SHA. No routine/all rollout is
 // allowed while this candidate initializes only the isolated CRM databases.

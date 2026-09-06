@@ -2,6 +2,8 @@ import { PATH_METADATA, MODULE_METADATA } from '@nestjs/common/constants';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { OperationsModule } from '../operations.module';
+import { parseAdminAuditEvent } from '../messaging/admin-audit-event.contract';
+import { OPERATIONS_AUDIT_SOURCES } from '../messaging/operations-messaging.constants';
 import {
 	ADMIN_EVENT_LOG_ACTIONS,
 	ADMIN_EVENT_LOG_SECTIONS
@@ -64,5 +66,28 @@ describe('removed administration Backlog', () => {
 		expect(statements).not.toMatch(
 			/outbox_events|audit_event_receipts|crm_customers|database_restore/
 		);
+	});
+
+	it('rejects retired actions from every external audit source', () => {
+		for (const source of OPERATIONS_AUDIT_SOURCES) {
+			for (const action of [
+				'BACKLOG_TASK_CREATE',
+				'BACKLOG_TASK_UPDATE',
+				'BACKLOG_TASK_DELETE'
+			]) {
+				expect(() =>
+					parseAdminAuditEvent(source, {
+						schemaVersion: 1,
+						eventType: 'admin.audit.event.v1',
+						eventId: '3ad36f14-550c-47bd-8f69-2c913cdb83ee',
+						occurredAt: '2026-09-05T00:00:00.000Z',
+						correlationId: 'backlog-retirement-test',
+						actorId: 'admin-1',
+						action,
+						metadata: {}
+					})
+				).toThrow('Admin audit action is unsupported');
+			}
+		}
 	});
 });
