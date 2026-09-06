@@ -193,13 +193,87 @@ try {
 		Array.from({ length: 6 }, () => service.create(context, parallel))
 	);
 	assert.ok(
-		outcomes.every(result => result.status === 'fulfilled'),
-		'Parallel CSV replay failed'
+		outcomes.some(result => result.status === 'fulfilled'),
+		'At least one concurrent CSV command must commit'
 	);
+	const replayResults = [];
+	for (const result of outcomes) {
+		if (result.status === 'fulfilled') replayResults.push(result.value);
+		else {
+			// Bounded lock contention may exhaust the service's six short attempts.
+			// Only its explicit same-command retry outcome is accepted, never a
+			// generic dependency error, conflict, changed UUID or changed payload.
+			assert.equal(result.reason?.getStatus?.(), 503);
+			assert.equal(
+				result.reason?.getResponse?.()?.code,
+				'crm_intake_retry_required'
+			);
+			replayResults.push(await service.create(context, parallel));
+		}
+	}
+	assert.equal(replayResults.length, 6);
+	assert.equal(replayResults[0].import.id, parallel.commandId);
 	assert.ok(
-		outcomes.every(result => result.value.import.id === parallel.commandId)
+		replayResults.every(
+			value => JSON.stringify(value) === JSON.stringify(replayResults[0])
+		)
 	);
 	assert.deepEqual(await counts(), [258, 2, 258, 2, 258]);
+
+	// Deterministic real PostgreSQL contention proves the retry branch even
+	// when all natural parallel calls happen to finish on their first request.
+	const busyCommand = command(2);
+	const beforeBusy = await counts();
+	let releaseLock;
+	let markLocked;
+	const locked = new Promise(resolve => {
+		markLocked = resolve;
+	});
+	const released = new Promise(resolve => {
+		releaseLock = resolve;
+	});
+	const holding = migrator.$transaction(
+		async tx => {
+			await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`crm-intake:command:${busyCommand.commandId}`},0))::text AS locked`;
+			markLocked();
+			await released;
+		},
+		{ maxWait: 2000, timeout: 15000 }
+	);
+	// Attach immediately so a failed holder rejects the barrier rather than
+	// leaving the test waiting forever or producing an unhandled rejection.
+	const observedHolder = holding.then(() => {
+		throw new Error('Lock holder released before barrier');
+	});
+	try {
+		await Promise.race([locked, observedHolder]);
+		await assert.rejects(
+			service.create(context, busyCommand),
+			error =>
+				error?.getStatus?.() === 503 &&
+				error?.getResponse?.()?.code === 'crm_intake_retry_required'
+		);
+		assert.deepEqual(
+			await counts(),
+			beforeBusy,
+			'Busy CSV command must not leave partial writes'
+		);
+	} finally {
+		releaseLock();
+		await holding;
+	}
+	const recoveredBusy = await service.create(context, busyCommand);
+	assert.equal(recoveredBusy.import.id, busyCommand.commandId);
+	assert.deepEqual(
+		await service.create(context, busyCommand),
+		recoveredBusy
+	);
+	assert.deepEqual(
+		await counts(),
+		beforeBusy.map(
+			(value, index) => value + ([0, 2, 4].includes(index) ? 2 : 1)
+		)
+	);
 	for (const changed of [
 		{ ...large, label: 'changed.csv' },
 		{ ...large, rows: [...large.rows].reverse() },
@@ -396,7 +470,7 @@ try {
 		sqlState('23503')
 	);
 	console.log(
-		'CSV PostgreSQL 18: atomic 250-row bulk, 6 concurrent replays, exact actor/workspace/input binding, read-only/team scope, namespace collision, reached-write rollback, deferred proof failure, FK and append-only grants passed'
+		'CSV PostgreSQL 18: atomic 250-row bulk, 6 concurrent replays, bounded busy outcome and exact-command recovery, exact actor/workspace/input binding, read-only/team scope, namespace collision, reached-write rollback, deferred proof failure, FK and append-only grants passed'
 	);
 } finally {
 	await migrator.$transaction(async tx => {

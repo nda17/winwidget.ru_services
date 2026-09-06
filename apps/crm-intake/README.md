@@ -147,6 +147,14 @@ UPDATE/DELETE/TRUNCATE/DDL. Composite workspace FKs и deferred integrity
 точный binding, scopes/READ_ONLY, namespace collision, rollback после реальных
 записей каждой стадии, deferred failure после receipt, FK и append-only ACL.
 Unit HTTP gate отдельно доказывает совместимость 32 KiB и CSV 1 MiB.
+PostgreSQL gate для шести конкурентных повторов требует одного и того же
+сохранённого результата и отсутствия дублей. Если ограниченные попытки
+захвата command lock исчерпаны, допустим только явный
+`503 crm_intake_retry_required` с последующим повтором **того же** UUID и
+payload после завершения конкурирующих запросов. Другие ошибки не скрываются.
+Отдельно удерживается настоящая PostgreSQL advisory transaction lock:
+проверяются предсказуемый busy-ответ, отсутствие частичных записей и
+успешное идемпотентное восстановление после освобождения блокировки.
 
 ### Credentials источников
 
