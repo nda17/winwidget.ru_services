@@ -433,6 +433,17 @@ application processes. Обычный SIGTERM проверяется отдел�
 их вместе с private ownership metadata для разбора. После окончания действует
 общая обязательная очистка локальных images/cache и остановка Colima.
 
+Локальная репетиция 06.09.2026, run `992e301405`, на точных образах
+`8ac43fbd1b989bf96f623b98bf90ab7eff52f3ef` прошла для всех 12 ролей и четырёх
+PostgreSQL. Access worker с `CRM_ACCESS_RABBITMQ_ASSERT_TOPOLOGY=false`
+и без configure/write восстановил три push consumers. При позднем старте
+RabbitMQ все восемь фоновых процессов завершились с ошибкой и перезапустились;
+четыре API не перезапускались. При повторном outage readiness фоновых ролей
+стала 503, затем все роли восстановились без новых process restarts.
+После graceful shutdown шесть consumer queues и шесть DLQ пусты,
+собственные контейнеры/volumes удалены. Это не проверка доставки приглашений,
+отложенных бизнес-повторов, браузера или целевой production capacity.
+
 Это доказательство холодного старта, **не capacity PASS** и не сквозная
 передача реальных заявок. Защитные лимиты стенда (384 MiB/process,
 256 MiB/PostgreSQL, 512 MiB/RabbitMQ) не являются production-рекомендацией.
