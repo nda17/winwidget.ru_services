@@ -44,6 +44,10 @@ export class IdentityRabbitMqService
 		ConfirmChannel
 	>();
 	private readonly returned = new Map<string, Error | null>();
+	private readonly topologies = new WeakMap<
+		ConfirmChannel,
+		Promise<void>
+	>();
 	private topologyReady = false;
 	private maxBytes = 256 * 1024;
 
@@ -102,7 +106,7 @@ export class IdentityRabbitMqService
 			publishTimeout: 15_000,
 			setup: async (channel: ConfirmChannel) => {
 				this.installReturnHandler(channel);
-				if (assertTopology) await this.assertTopology(channel);
+				if (assertTopology) await this.ensureTopology(channel);
 				this.topologyReady = true;
 			}
 		});
@@ -164,6 +168,7 @@ export class IdentityRabbitMqService
 	): Promise<void> {
 		if (!this.channel) throw new Error('RabbitMQ consumer is disabled');
 		await this.channel.addSetup(async (channel: ConfirmChannel) => {
+			if (this.runtime.workerEnabled) await this.ensureTopology(channel);
 			this.consumerChannel = channel;
 			await channel.prefetch(this.runtime.prefetch, false);
 			const consumer = await channel.consume(
@@ -213,6 +218,20 @@ export class IdentityRabbitMqService
 		this.channel = null;
 		this.connection = null;
 		this.topologyReady = false;
+	}
+
+	private ensureTopology(channel: ConfirmChannel): Promise<void> {
+		const existing = this.topologies.get(channel);
+		if (existing) return existing;
+		// ChannelWrapper runs registered setups concurrently, including on reconnect.
+		// Every consumer must await this channel's declarations before basic.consume.
+		const pending = this.assertTopology(channel).catch(error => {
+			if (this.topologies.get(channel) === pending)
+				this.topologies.delete(channel);
+			throw error;
+		});
+		this.topologies.set(channel, pending);
+		return pending;
 	}
 
 	private async assertTopology(channel: ConfirmChannel): Promise<void> {

@@ -75,6 +75,11 @@ export class AcceptanceRabbit
 	private consumerTag: string | null = null;
 	private stopping = false;
 	private channelReady = false;
+	private assertTopologyEnabled = false;
+	private readonly topologies = new WeakMap<
+		ConfirmChannel,
+		Promise<void>
+	>();
 	private readonly returns = new Map<string, boolean>();
 	private readonly requeueWaits = new Map<
 		ConsumeMessage,
@@ -113,6 +118,7 @@ export class AcceptanceRabbit
 			throw new Error(
 				'CRM_INTAKE_RABBITMQ_ASSERT_TOPOLOGY must be boolean'
 			);
+		this.assertTopologyEnabled = assertTopology;
 		this.connection = connect([value], {
 			heartbeatIntervalInSeconds: 10,
 			reconnectTimeInSeconds: 5
@@ -135,7 +141,7 @@ export class AcceptanceRabbit
 					if (typeof token === 'string' && this.returns.has(token))
 						this.returns.set(token, true);
 				});
-				if (assertTopology) await this.topology(channel);
+				if (assertTopology) await this.ensureTopology(channel);
 				this.channelReady = true;
 			}
 		});
@@ -161,6 +167,19 @@ export class AcceptanceRabbit
 		} finally {
 			if (timeout) clearTimeout(timeout);
 		}
+	}
+	private ensureTopology(channel: ConfirmChannel): Promise<void> {
+		const existing = this.topologies.get(channel);
+		if (existing) return existing;
+		// ChannelWrapper runs registered setups concurrently, including on reconnect.
+		// Every consumer must await this channel's declarations before basic.consume.
+		const pending = this.topology(channel).catch(error => {
+			if (this.topologies.get(channel) === pending)
+				this.topologies.delete(channel);
+			throw error;
+		});
+		this.topologies.set(channel, pending);
+		return pending;
 	}
 	private async topology(channel: ConfirmChannel) {
 		for (const exchange of [ACCEPTANCE_EXCHANGE, ACCEPTANCE_DEAD_EXCHANGE])
@@ -238,6 +257,7 @@ export class AcceptanceRabbit
 				if (this.consumerChannel === channel) this.consumerTag = null;
 				this.interruptRequeues(channel);
 			});
+			if (this.assertTopologyEnabled) await this.ensureTopology(channel);
 			await channel.prefetch(5, false);
 			const registration = await channel.consume(
 				ACCEPTANCE_QUEUE,
