@@ -8,11 +8,17 @@ FROM base AS build
 
 ENV PNPM_HOME=/pnpm
 ENV PATH=$PNPM_HOME:$PATH
-RUN corepack enable
+ARG PNPM_VERSION=9.15.9
+RUN corepack enable \
+	&& for attempt in 1 2 3; do \
+		if NODE_OPTIONS=--dns-result-order=ipv4first corepack prepare pnpm@${PNPM_VERSION} --activate; then break; fi; \
+		if [ "$attempt" = 3 ]; then exit 1; fi; \
+		sleep "$attempt"; \
+	done
 WORKDIR /app
 
 COPY package.json pnpm-lock.yaml ./
-RUN NODE_OPTIONS=--dns-result-order=ipv4first pnpm install --frozen-lockfile
+RUN pnpm install --frozen-lockfile
 
 COPY . .
 RUN pnpm prisma:generate \

@@ -107,10 +107,24 @@ test('CRM and dependency builds prefer IPv4 only for dependency download without
 		);
 		assert.match(
 			source,
-			['identity', 'billing', 'crm-access'].includes(app)
-				? /RUN NODE_OPTIONS=--dns-result-order=ipv4first pnpm install --frozen-lockfile/
-				: /&& NODE_OPTIONS=--dns-result-order=ipv4first corepack prepare pnpm@\$\{PNPM_VERSION\} --activate/
+			/NODE_OPTIONS=--dns-result-order=ipv4first corepack prepare pnpm@\$\{PNPM_VERSION\} --activate/
 		);
+		if (['identity', 'billing', 'crm-access'].includes(app)) {
+			assert.match(source, /ARG PNPM_VERSION=9\.15\.9/);
+			assert.match(source, /for attempt in 1 2 3; do/);
+			assert.match(source, /if \[ "\$attempt" = 3 \]; then exit 1; fi/);
+			assert.ok(
+				source.indexOf('corepack prepare') <
+					source.indexOf('COPY package.json pnpm-lock.yaml')
+			);
+			const manifest = JSON.parse(
+				await readFile(
+					new URL(`../../../${app}/package.json`, import.meta.url),
+					'utf8'
+				)
+			);
+			assert.equal(manifest.packageManager, 'pnpm@9.15.9');
+		}
 		assert.doesNotMatch(
 			source,
 			/ENV\s+NODE_OPTIONS|NODE_TLS_REJECT_UNAUTHORIZED|strict-ssl=false/
