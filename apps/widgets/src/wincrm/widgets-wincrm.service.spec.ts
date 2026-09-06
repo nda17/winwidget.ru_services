@@ -168,6 +168,54 @@ describe('Widgets native connector durable boundaries', () => {
 			test.service.configure(id, { ...input, enabled: false })
 		).rejects.toMatchObject({ status: 409 });
 	});
+	it.each([
+		['P2034', 503, 'widgets_wincrm_command_unavailable'],
+		['P2002', 409, 'widgets_wincrm_concurrent_command']
+	])(
+		'classifies exhausted %s without turning temporary serialization into a terminal control conflict',
+		async (code, status, responseCode) => {
+			const test = setup();
+			test.prisma.$transaction.mockRejectedValue(
+				new Prisma.PrismaClientKnownRequestError(
+					'synthetic transaction failure',
+					{
+						code: String(code),
+						clientVersion: '5.22.0'
+					}
+				)
+			);
+			await expect(
+				test.service.configure(randomUUID(), command())
+			).rejects.toMatchObject({
+				status,
+				response: { code: responseCode }
+			});
+			expect(test.prisma.$transaction).toHaveBeenCalledTimes(3);
+			expect(test.billing.eligibility).toHaveBeenCalledTimes(1);
+			expect(test.tx.wincrmConnector.create).not.toHaveBeenCalled();
+			expect(test.tx.wincrmConnectorCommand.create).not.toHaveBeenCalled();
+		}
+	);
+	it('bounded serialization retries preserve the original command and its exactly replayed receipt', async () => {
+		const test = setup();
+		const error = new Prisma.PrismaClientKnownRequestError(
+			'synthetic serialization failure',
+			{ code: 'P2034', clientVersion: '5.22.0' }
+		);
+		test.prisma.$transaction
+			.mockRejectedValueOnce(error)
+			.mockRejectedValueOnce(error);
+		const id = randomUUID();
+		const input = command();
+		const result = await test.service.configure(id, input);
+		expect(test.prisma.$transaction).toHaveBeenCalledTimes(3);
+		expect(await test.service.configure(id, input)).toEqual(result);
+		expect(test.tx.wincrmConnector.create).toHaveBeenCalledTimes(1);
+		expect(test.tx.wincrmConnectorCommand.create).toHaveBeenCalledTimes(1);
+		expect(
+			test.tx.wincrmConnectorCommand.create.mock.calls[0][0].data.commandId
+		).toBe(input.commandId);
+	});
 	it('old receipt returns original snapshot without re-enabling a newer disabled generation', async () => {
 		const test = setup();
 		const input = command();

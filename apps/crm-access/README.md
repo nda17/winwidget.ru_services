@@ -529,6 +529,18 @@ scoped principals, confirm/mandatory и собственные durable очер�
 Prisma на хосте используется для synthetic fixtures и наблюдения, не для
 подмены worker/processor/publisher. Тестовая EASY подписка не является оплатой.
 
+Перед передачей заявок все шесть команд подключения проходят отдельный
+outage Widgets API. Подтверждённые исходные события обрабатывает настоящий
+Intake worker; publisher остановлен, чтобы наблюдать шесть новых retry
+Outbox с неизменным event/command binding и реальной задержкой пять секунд.
+Остановка и запуск worker/publisher/RabbitMQ не должны менять payload,
+eventId или availableAt. После восстановления зависимости проверяются
+publication не раньше deadline и синхронизация источников.
+Повтор уже применённых событий под реальными scoped publisher credentials
+не изменяет полные snapshots jobs, receipts, Outbox, источников,
+Widgets connectors и command receipts. Наличие этого сценария не означает
+PASS до атомарного итогового результата всего прогона.
+
 Для проверки scope создаётся явная синтетическая membership владельца и
 одного сотрудника (2/2 места, квота проверяется через Access API). Это не
 доказательство приглашения/admission. Три источника подключает OWNER, три —
@@ -549,10 +561,13 @@ Outbox, replay и отказ устаревшей версии. Короткая
 не изменяя часы, первоначальный deadline или immutable snapshots.
 Проверяются явное отключение источника, expiry fence ожидающей заявки
 и чтение всех шести ранее принятых snapshots при остановленном Widgets API.
-Возможный
-`CONTROL_CONFLICT` восстанавливается один раз штатной versioned HTTP-командой
-retry; другая блокировка либо повторный конфликт прекращают тест. Это не
-автоматический retry production runtime. Reporting представлен отдельной
+Шесть независимых корректных команд подключения должны завершаться
+автоматически: тест не маскирует `CONTROL_CONFLICT` новой ручной командой.
+Истощение кратких повторов сериализации Widgets возвращает `503`, сохраняя
+исходную команду для database-delayed retry Intake; реальные конфликты
+версии/привязки и persistent unique conflict остаются `409`.
+Проверяются все фактические retry publications и immutable command binding.
+Reporting представлен отдельной
 наблюдательной очередью, а не запущенным сервисом Reporting.
 
 После завершения native delivery её пять фоновых процессов останавливаются.

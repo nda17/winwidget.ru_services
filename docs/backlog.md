@@ -227,10 +227,11 @@ backend/business gates MVP.
 
 Отдельный CRM backend VPS не является обязательным условием: допустим
 проверенный deployment на текущий backend VPS при выполнении gates выше.
-Read-only замеры 06.09.2026 03:40–03:41 МСК показали 5.117–5.146 GiB
-`MemAvailable` из 7.751 GiB, 4 vCPU, 15.58 GiB свободного диска (80% занято)
-и 31 healthy контейнер без restarts/OOM. CPU busy 15.23–18.02%, но CPU PSI
-`avg10` достигает 8.08%: короткий снимок не доказывает запас под нагрузкой.
+Read-only замер 06.09.2026 22:20:27 МСК показал 4.964 GiB
+`MemAvailable` из 7.751 GiB, 15.143 GiB свободного диска (81% занято)
+и 31 healthy контейнер без restarts/OOM. Четыре секундных интервала
+`vmstat` показали CPU busy 1–54% (без первой строки со средним с момента
+старта): короткий снимок не доказывает p95, CPU PSI или запас под нагрузкой.
 Порог 6 GiB относится к отдельному restore rehearsal (два временных
 контейнера по 2 GiB плюс резерв 2 GiB), а не автоматически запрещает CRM runtime.
 Его невыполнение не разрешает ослаблять restore gate.
@@ -305,7 +306,9 @@ production-топологии с её точными образами и scoped 
 ### P0 — безопасный rollout отложенных retry новых CRM workflows
 
 Для Intake widget-control доказать локальные outage, restart и повторную
-доставку после commit/ack на точных образах с database-delayed retry.
+доставку после commit/ack на точных образах с database-delayed retry,
+включая автоматическое восстановление шести независимых команд после
+конкуренции PostgreSQL, без ручной замены исходного commandId.
 Для team, widget-control и acceptance закрепить проверку целевой
 production-топологии и recovery.
 Если в целевой среде работала старая ревизия с classic TTL -> DLX, сначала

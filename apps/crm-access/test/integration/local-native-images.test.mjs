@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
+import { spawnSync } from 'node:child_process';
 import { test } from 'node:test';
 import {
 	NATIVE_IMAGE_APPS,
@@ -145,6 +146,47 @@ test('native failure diagnostics retain driver codes but never raw log or secret
 		),
 		[]
 	);
+});
+
+test('shared Corepack build step retries at most three times and fails closed on exhausted downloads', async () => {
+	const commands = [];
+	for (const app of ['identity', 'billing', 'crm-access']) {
+		const source = await readFile(
+			new URL(`../../../${app}/Dockerfile`, import.meta.url),
+			'utf8'
+		);
+		const match = source.match(/RUN (corepack enable[\s\S]*?)\nWORKDIR/);
+		assert.ok(match);
+		commands.push(match[1].replace(/\\\n/g, ' '));
+	}
+	assert.equal(
+		new Set(commands).size,
+		1,
+		'The bootstrap layer must be shared between Debian service builds'
+	);
+	for (const failures of [0, 2, 3]) {
+		const script = `set -e
+calls=0
+corepack() {
+  if [ "$1" = enable ]; then return 0; fi
+  calls=$((calls + 1))
+  printf 'prepare\\n'
+  [ "$calls" -gt ${failures} ]
+}
+sleep() { :; }
+${commands[0]}
+`;
+		const result = spawnSync('/bin/sh', ['-c', script], {
+			encoding: 'utf8',
+			timeout: 3000
+		});
+		assert.equal(result.status, failures === 3 ? 1 : 0);
+		assert.equal(
+			result.stdout.trim().split('\n').length,
+			failures === 0 ? 1 : 3
+		);
+		assert.equal(result.stderr, '');
+	}
 });
 
 test('acceptance driver respects the actual unpaginated pipeline query contract', async () => {
@@ -379,6 +421,11 @@ test('image workflow never composes or monkeypatches business workers in the hos
 	assert.match(workflow, /assertPendingWidgetControlRetry\(/);
 	assert.match(workflow, /controlDurableRetryRestartVerified: true/);
 	assert.match(workflow, /controlCommittedReplayVerified: true/);
+	assert.doesNotMatch(workflow, /controlConflictRecoveries/);
+	assert.match(
+		workflow,
+		/All six delayed controls must be applied without manual conflict recovery/
+	);
 	assert.match(
 		workflow,
 		/assert\.deepEqual\(await controlSnapshot\(\), beforeControlReplay\)/

@@ -100,7 +100,6 @@ export async function verifyNativeImages({
 	const submissions = [];
 	const evidence = [];
 	const sourceTokens = new Map();
-	const controlConflictRecoveries = [];
 	const stage = value => {
 		phase = value;
 		runtime.stage = value;
@@ -536,35 +535,10 @@ export async function verifyNativeImages({
 				rows
 			);
 		}, 'Initial control commands did not reach an observable outcome');
-		for (const source of settledSources.filter(
-			row => row.syncState !== 'SYNCED'
-		)) {
-			assert.equal(source.syncState, 'BLOCKED');
-			assert.equal(source.lastErrorCode, 'CONTROL_CONFLICT');
-			const command = {
-				schemaVersion: 1,
-				workspaceId: account.workspaceId,
-				commandId: randomUUID(),
-				expectedVersion: source.version
-			};
-			const path = '/crm/intake/widget-sources/' + source.id + '/retry';
-			const reply = await request(path, { body: command, expected: 202 });
-			assert.equal(reply.command.state, 'QUEUED');
-			await runtime.wait(
-				async () =>
-					(
-						await intakeDb.managedWidgetSource.findUniqueOrThrow({
-							where: { id: source.id }
-						})
-					).syncState === 'SYNCED',
-				'One explicit versioned control retry did not recover'
-			);
-			assert.deepEqual(
-				await request(path, { body: command, expected: 202 }),
-				reply
-			);
-			controlConflictRecoveries.push(source.currentCommandId);
-		}
+		assert.ok(
+			settledSources.every(source => source.syncState === 'SYNCED'),
+			'Independent control commands must recover automatically, without manual conflict workarounds'
+		);
 		await runtime.wait(
 			async () =>
 				(await intakeDb.managedWidgetSource.count({
@@ -579,11 +553,33 @@ export async function verifyNativeImages({
 		await runtime.wait(
 			async () =>
 				(await intakeDb.widgetControlOutbox.count({
-					where: { status: 'PUBLISHED', route: 'MAIN' }
-				})) ===
-				6 + controlRetries.length + controlConflictRecoveries.length,
+					where: { status: { not: 'PUBLISHED' } }
+				})) === 0,
 			'Control publisher did not confirm six commands'
 		);
+		const allControlPublications =
+			await intakeDb.widgetControlOutbox.findMany({
+				orderBy: [{ eventId: 'asc' }, { retryAttempt: 'asc' }]
+			});
+		for (const original of initialControlOutbox) {
+			const publications = allControlPublications.filter(
+				row => row.eventId === original.eventId
+			);
+			assert.ok(publications.length >= 2 && publications.length <= 4);
+			for (const [index, row] of publications.entries()) {
+				assert.equal(row.route, 'MAIN');
+				assert.equal(row.retryAttempt, index);
+				assert.deepEqual(row.payload, original.payload);
+				assert.ok(row.publishedAt.getTime() >= row.availableAt.getTime());
+				if (index) {
+					const delay =
+						row.availableAt.getTime() - row.createdAt.getTime();
+					assert.ok(
+						Math.abs(delay - [5000, 30000, 120000][index - 1]) <= 1000
+					);
+				}
+			}
+		}
 		for (const original of controlRetries) {
 			const published =
 				await intakeDb.widgetControlOutbox.findUniqueOrThrow({
@@ -652,12 +648,14 @@ export async function verifyNativeImages({
 				row =>
 					row.eventId === outbox.eventId &&
 					row.status === 'DELIVERED' &&
-					row.retryAttempt === 1
+					row.retryAttempt >= 1 &&
+					row.retryAttempt <= 3
 			)
 		);
-		assert.ok(
-			appliedControlRetries.length > 0,
-			'At least one delayed control must be applied without manual conflict recovery'
+		assert.equal(
+			appliedControlRetries.length,
+			6,
+			'All six delayed controls must be applied without manual conflict recovery'
 		);
 		const replayConnection = await runtime.amqp.connect(
 			runtime.brokerUrls.get(controlPublisher[0])
@@ -670,7 +668,12 @@ export async function verifyNativeImages({
 				returned = true;
 			});
 			for (const outbox of appliedControlRetries)
-				for (const retryAttempt of [0, 1])
+				for (const retryAttempt of [
+					0,
+					beforeControlReplay.receipts.find(
+						row => row.eventId === outbox.eventId
+					).retryAttempt
+				])
 					channel.publish(
 						'winwidget.crm-intake.widget-control.events',
 						NATIVE_CONTROL_EVENT,
@@ -1119,43 +1122,6 @@ export async function verifyNativeImages({
 				})) === 0,
 			'Widgets Outbox did not drain'
 		);
-		if (controlConflictRecoveries.length) {
-			const dead = await runtime.wait(async () => {
-				const items = await intakeDb.widgetControlOutbox.findMany({
-					where: { route: 'DLQ' }
-				});
-				return (
-					items.length === controlConflictRecoveries.length &&
-					items.every(row => row.status === 'PUBLISHED') &&
-					items
-				);
-			}, 'Recovered control conflict DLQ evidence missing');
-			assert.ok(
-				dead.every(row =>
-					controlConflictRecoveries.includes(row.payload.commandId)
-				)
-			);
-			await broker(async channel => {
-				const observed = new Set();
-				await channel.consume(
-					NATIVE_CONTROL_QUEUE + '.dead-letter',
-					message => {
-						if (!message) return;
-						const id = message.properties.messageId;
-						if (dead.some(row => row.eventId === id)) {
-							observed.add(id);
-							channel.ack(message);
-						}
-					},
-					{ noAck: false }
-				);
-				await runtime.wait(
-					async () => observed.size === dead.length,
-					'Control DLQ observation failed'
-				);
-				await channel.close();
-			});
-		}
 		const rows = await queueRows();
 		assert.ok(
 			rows
@@ -1255,13 +1221,14 @@ export async function verifyNativeImages({
 			apiImages: 8,
 			backgroundProcesses: 7,
 			widgetTypes: evidence,
-			controlConflictRecoveries: controlConflictRecoveries.length,
 			submittedLeads: submissions.length,
 			reportedLeads: reported.size,
 			managedControlImagesVerified: true,
 			controlDurableRetryRestartVerified: true,
 			controlCommittedReplayVerified: true,
 			controlDurableRetryCount: controlRetries.length,
+			controlRetryPublications:
+				allControlPublications.length - initialControlOutbox.length,
 			controlAppliedReplayCount: appliedControlRetries.length,
 			outboxToInboxImagesVerified: true,
 			atLeastOnceReplayVerified: true,

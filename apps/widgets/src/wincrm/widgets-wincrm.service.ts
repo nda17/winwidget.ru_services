@@ -721,6 +721,12 @@ export class WidgetsWincrmService {
 					['P2034', 'P2002'].includes(error.code)
 				) {
 					if (attempt < 2) continue;
+					// Serialization exhaustion is temporary, not a conflicting command.
+					// Intake must retain its original command and schedule durable retry.
+					if (error.code === 'P2034')
+						throw new ServiceUnavailableException({
+							code: 'widgets_wincrm_command_unavailable'
+						});
 					conflict('widgets_wincrm_concurrent_command');
 				}
 				throw error;
