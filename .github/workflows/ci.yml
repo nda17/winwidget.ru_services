@@ -459,7 +459,7 @@ jobs:
       - service-integration
       - widgets-integration
     if: github.event_name == 'push' && github.ref == 'refs/heads/prod'
-    uses: nda17/winwidget.ru_infra/.github/workflows/deploy-production.yml@2e83c5bb7b9bdf7bcbfb1039a5c645547cdf2272
+    uses: nda17/winwidget.ru_infra/.github/workflows/deploy-production.yml@166ff870e128b9ae4cdc07b604b0c59636c9c217
     with:
       services_revision: ${{ github.sha }}
       release_scope: operations-backlog-backup

@@ -422,7 +422,7 @@ exactFiles('deploy', ['docker-compose.prod.yml']);
 
 const servicesWorkflow = readFileSync('.github/workflows/ci.yml', 'utf8');
 const pinnedInfraRevision =
-	'2e83c5bb7b9bdf7bcbfb1039a5c645547cdf2272';
+	'166ff870e128b9ae4cdc07b604b0c59636c9c217';
 const operationsEnvSha256 = '06f1affe7b715a3c2d96d2a00975fab168e2060623a8af72d33c62bb4055799e';
 if (!/^[a-f0-9]{64}$/.test(operationsEnvSha256)) {
 	throw new Error('Operations owner env must be synchronized and its exact hash reviewed before release');
