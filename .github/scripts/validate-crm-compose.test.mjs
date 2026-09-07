@@ -340,6 +340,28 @@ test('real Compose normalization validates twenty isolated CRM definitions witho
 	assert.equal(report.releaseApproved, false);
 });
 
+test('CRM permits only the working app and shared admin origins', () => {
+	for (const [name, service] of Object.entries(config.services)) {
+		if (!service.environment?.CORS_ALLOWED_ORIGINS) continue;
+		assert.equal(
+			service.environment.CORS_ALLOWED_ORIGINS,
+			'https://crm.winwidget.ru,https://winwidget.ru'
+		);
+		for (const origin of [
+			'*',
+			'https://crm.winwidget.ru',
+			'https://crm.winwidget.ru,https://unexpected.example'
+		]) {
+			const changed = structuredClone(config);
+			changed.services[name].environment.CORS_ALLOWED_ORIGINS = origin;
+			assert.throws(
+				() => validateCrmCompose(changed),
+				/Unexpected CRM origin/
+			);
+		}
+	}
+});
+
 test('all CRM database health checks wait for the final TCP server, not the initdb socket', () => {
 	for (const [app] of CRM_SERVICES) {
 		const changed = structuredClone(config);

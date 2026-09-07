@@ -578,7 +578,7 @@ export function validateCrmCompose(config) {
 			);
 			same(
 				env.CORS_ALLOWED_ORIGINS,
-				'https://crm.winwidget.ru',
+				'https://crm.winwidget.ru,https://winwidget.ru',
 				'Unexpected CRM origin'
 			);
 			for (const [key, dependencyPort] of Object.entries(origins[app])) {
