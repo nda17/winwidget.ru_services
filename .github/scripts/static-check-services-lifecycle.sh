@@ -463,7 +463,7 @@ if (!servicesWorkflow.includes('node .github/scripts/test-crm-bootstrap-failure.
 	throw new Error('CRM bounded bootstrap process gate is missing');
 }
 const pinnedInfraRevision =
-	'53074ad09c63c8710d0d0dfc0f13ed2b77da70a9';
+	'96200bea96e89122018fd46d2e1df909f6afb30c';
 for (const evidence of [
 	"cancel-in-progress: ${{ github.ref != 'refs/heads/prod' }}",
 	'operations-control-ledger:',
@@ -533,7 +533,7 @@ for (const [job, scope] of [['deploy-production', 'crm-upgrade']]) {
 		!block.includes('services_revision: ${{ github.sha }}') ||
 		!block.includes("expected_live_revision: '837113b9f9f303bd6c043c2a2e37b0791369d7a3'") ||
 		!block.includes("expected_service_env_sha256: '667977d5260de85dcfbc17ccac618446168773f67af5735ab7003bdbe36b4be1'") ||
-		!block.includes("expected_crm_upgrade_baseline_sha256: 'd17fb6d18b56cc4f2f032838db21a1a989d99ad921e4db469c71b02431be948e'")) {
+		!block.includes("expected_crm_upgrade_baseline_sha256: '89a718fdbbea50962a5e1235b9aee816c6f16cc07d5f63b3c07edebe6ca8fb52'")) {
 		throw new Error('CRM upgrade must pin its live Gateway revision, CRM env and exact baseline');
 	}
 }
