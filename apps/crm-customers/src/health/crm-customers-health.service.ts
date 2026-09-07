@@ -35,7 +35,7 @@ export class CrmCustomersHealthService {
 			await this.prisma
 				.$queryRaw`SELECT c.id, c.workspace_id, c.name, c.phone, c.email, c.company_id, c.notes, c.created_by_subject, c.team_id, c.version, c.archived_at, c.created_at, c.updated_at FROM crm_customers.contacts c LIMIT 0`;
 			await this.prisma
-				.$queryRaw`SELECT c.id, c.workspace_id, c.name, c.inn, c.website, c.notes, c.created_by_subject, c.team_id, c.version, c.archived_at, c.created_at, c.updated_at FROM crm_customers.companies c LIMIT 0`;
+				.$queryRaw`SELECT c.id, c.workspace_id, c.name, c.inn, c.website, c.legal_name, c.kpp, c.ogrn, c.legal_address, c.entity_type, c.notes, c.created_by_subject, c.team_id, c.version, c.archived_at, c.created_at, c.updated_at FROM crm_customers.companies c LIMIT 0`;
 			await this.prisma
 				.$queryRaw`SELECT command_id, workspace_id, entity_id, entity_kind, actor_subject, request_hash, response, created_at FROM crm_customers.customer_commands LIMIT 0`;
 			await this.prisma

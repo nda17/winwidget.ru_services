@@ -43,6 +43,26 @@ describe('CrmCustomersHealthService', () => {
 		);
 	});
 
+	it('checks every company requisite before declaring the runtime ready', async () => {
+		const prisma = createPrisma();
+		await new CrmCustomersHealthService(prisma).readiness();
+		const queries = (prisma.$queryRaw as jest.Mock).mock.calls.map(
+			([parts]) => parts.join('') as string
+		);
+		const company = queries.find(query =>
+			query.includes('FROM crm_customers.companies')
+		);
+		for (const column of [
+			'legal_name',
+			'kpp',
+			'ogrn',
+			'legal_address',
+			'entity_type'
+		]) {
+			expect(company).toContain(`c.${column}`);
+		}
+	});
+
 	it('fails readiness when the owned customer migration is missing', async () => {
 		const prisma = createPrisma();
 		(prisma.$queryRaw as jest.Mock)

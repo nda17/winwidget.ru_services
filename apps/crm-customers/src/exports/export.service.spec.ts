@@ -1,5 +1,10 @@
 import { ForbiddenException } from '@nestjs/common';
-import { CustomersExportService } from './export.service';
+import {
+	COMPANY_EXPORT_V2_COLUMNS,
+	CustomersExportService,
+	EXPORT_COLUMNS
+} from './export.service';
+import { exportHeaders } from './export-format';
 import { CrmCustomersPrismaService } from '../prisma/crm-customers-prisma.service';
 import { CustomersAuthorizationClient } from '../access/customers-authorization.client';
 const workspaceId = '11111111-1111-4111-8111-111111111111';
@@ -39,7 +44,8 @@ function setup() {
 			.mockResolvedValue([
 				{ snapshotAt: new Date('2026-09-05T00:00:00.000Z') }
 			]),
-		contact: { findMany }
+		contact: { findMany },
+		company: { findMany: jest.fn().mockResolvedValue([]) }
 	};
 	const audit = jest.fn().mockResolvedValue({});
 	const prisma = {
@@ -62,6 +68,86 @@ function setup() {
 	};
 }
 describe('Customers export snapshot authorization', () => {
+	test.each(['json', 'csv'] as const)(
+		'v2 companies include all requisites in the same bounded %s snapshot',
+		async format => {
+			const { service, tx, authorize, audit } = setup();
+			const row = Object.fromEntries(
+				COMPANY_EXPORT_V2_COLUMNS.map(key => [key, null])
+			);
+			Object.assign(row, {
+				id: '22222222-2222-4222-8222-222222222222',
+				workspaceId,
+				name: 'Тестовая компания',
+				version: 1,
+				createdBySubject: 'owner',
+				inn: '7707083893',
+				legalName: 'Полное название',
+				kpp: '773601001',
+				ogrn: '1027700132195',
+				legalAddress: '=Тестовый адрес',
+				entityType: 'LEGAL'
+			});
+			tx.company.findMany.mockResolvedValue([row]);
+			const file = await service.prepare(
+				'Bearer user',
+				workspaceId,
+				'companies',
+				format,
+				undefined,
+				2
+			);
+			expect(file.schemaVersion).toBe(2);
+			expect(exportHeaders(file)['X-WinCRM-Export-Schema']).toBe('2');
+			expect(authorize).toHaveBeenCalledTimes(2);
+			expect(audit).toHaveBeenCalledTimes(1);
+			expect(
+				Object.keys(tx.company.findMany.mock.calls[0][0].select)
+			).toEqual(COMPANY_EXPORT_V2_COLUMNS);
+			if (format === 'json')
+				expect(JSON.parse(file.body.toString())).toMatchObject({
+					schemaVersion: 2,
+					rowCount: 1,
+					items: [row]
+				});
+			else {
+				expect(file.body.toString()).toContain(
+					'"legalName","kpp","ogrn","legalAddress","entityType"'
+				);
+				expect(file.body.toString()).toContain('"\'=Тестовый адрес"');
+			}
+		}
+	);
+	test('legacy company export keeps v1 fields and headers after schema expansion', async () => {
+		const { service, tx } = setup();
+		const file = await service.prepare(
+			'Bearer user',
+			workspaceId,
+			'companies',
+			'json'
+		);
+		expect(file.schemaVersion).toBeUndefined();
+		expect(exportHeaders(file)['X-WinCRM-Export-Schema']).toBe('1');
+		expect(JSON.parse(file.body.toString()).schemaVersion).toBe(1);
+		expect(
+			Object.keys(tx.company.findMany.mock.calls[0][0].select)
+		).toEqual(EXPORT_COLUMNS.companies);
+	});
+	test('does not invent a v2 contacts export', async () => {
+		const { service, authorize, prisma } = setup();
+		await expect(
+			service.prepare(
+				'Bearer user',
+				workspaceId,
+				'contacts',
+				'json',
+				undefined,
+				2
+			)
+		).rejects.toMatchObject({ status: 400 });
+		expect(authorize).not.toHaveBeenCalled();
+		expect(prisma.$transaction).not.toHaveBeenCalled();
+	});
 	test('READ_ONLY owner uses bounded read-only repeatable snapshot then fresh permission then audit', async () => {
 		const { service, tx, prisma, authorize, audit, findMany } = setup();
 		const file = await service.prepare(

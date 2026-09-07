@@ -402,8 +402,15 @@ try {
 	assert.ok(
 		activity.items.every(item => !('phone' in item) && !('email' in item))
 	);
+	await companyV2Proof(
+		runtime,
+		service,
+		failure,
+		context,
+		workspaceIds[2]
+	);
 	console.log(
-		'CRM Customers PostgreSQL 18 CRUD, replay, CAS, tenant/team scope, FK, rollback and append-only grants passed'
+		'CRM Customers PostgreSQL 18 CRUD v1/v2, nullable requisites, replay, CAS, tenant/team scope, FK, rollback and append-only grants passed'
 	);
 } finally {
 	try {
@@ -417,6 +424,373 @@ try {
 	} finally {
 		await Promise.all([runtime.$disconnect(), migrator.$disconnect()]);
 	}
+}
+
+async function companyV2Proof(
+	runtime,
+	service,
+	failure,
+	context,
+	rollbackWorkspace
+) {
+	const fields = {
+		legalName: 'Полное наименование',
+		kpp: '123456789',
+		ogrn: '1234567890123',
+		legalAddress: 'г. Москва, тестовый адрес',
+		entityType: 'LEGAL'
+	};
+	const create = command(context.workspaceId, {
+		schemaVersion: 2,
+		name: 'Requisites proof',
+		inn: '1234567890',
+		...fields
+	});
+	const first = await service.create('company', context, create);
+	assert.equal(first.schemaVersion, 2);
+	for (const [key, value] of Object.entries(fields))
+		assert.equal(first.company[key], value);
+	assert.deepEqual(
+		await service.create('company', context, create),
+		first
+	);
+	const stored = await runtime.company.findUnique({
+		where: { id: first.company.id }
+	});
+	for (const [key, value] of Object.entries(fields))
+		assert.equal(stored[key], value);
+	assert.deepEqual(
+		(
+			await runtime.customerCommand.findUnique({
+				where: { commandId: create.commandId }
+			})
+		).response,
+		first
+	);
+	assert.equal(
+		await runtime.customerActivity.count({
+			where: { commandId: create.commandId }
+		}),
+		1
+	);
+	await assert.rejects(
+		service.create('company', context, { ...create, schemaVersion: 1 }),
+		http(409)
+	);
+	const oldView = await service.get(
+		'company',
+		context,
+		first.company.id,
+		context.workspaceId
+	);
+	assert.equal(oldView.schemaVersion, 1);
+	for (const key of Object.keys(fields))
+		assert.equal(Object.hasOwn(oldView.company, key), false);
+	assert.equal(
+		(
+			await service.get(
+				'company',
+				{ ...context, state: 'READ_ONLY' },
+				first.company.id,
+				context.workspaceId,
+				2
+			)
+		).company.legalName,
+		fields.legalName
+	);
+	await assert.rejects(
+		service.get(
+			'company',
+			{ ...context, subject: 'other', dataScope: 'OWN' },
+			first.company.id,
+			context.workspaceId,
+			2
+		),
+		http(404)
+	);
+	await assert.rejects(
+		service.update(
+			'company',
+			{ ...context, state: 'READ_ONLY' },
+			first.company.id,
+			{ ...create, commandId: randomUUID(), expectedVersion: 1 }
+		),
+		http(403)
+	);
+
+	// Duplicate INN remains an explicit operator choice: no merge or deletion.
+	const duplicate = await service.create('company', context, {
+		...create,
+		commandId: randomUUID()
+	});
+	assert.notEqual(duplicate.company.id, first.company.id);
+	assert.equal(
+		await runtime.company.count({
+			where: { workspaceId: context.workspaceId, inn: create.inn }
+		}),
+		2
+	);
+	const page = await service.list(
+		'company',
+		context,
+		{
+			workspaceId: context.workspaceId,
+			page: 2,
+			pageSize: 1,
+			search: 'Requisites proof'
+		},
+		2
+	);
+	assert.equal(page.schemaVersion, 2);
+	assert.equal(page.total, 2);
+	assert.equal(page.items.length, 1);
+	for (const [key, value] of Object.entries(fields))
+		assert.equal(page.items[0][key], value);
+
+	const base = { name: 'Requisites proof edited', inn: create.inn };
+	let legacyEdit;
+	for (const schemaVersion of [2, 1]) {
+		const edit = {
+			...command(context.workspaceId, base),
+			schemaVersion,
+			expectedVersion: schemaVersion === 2 ? 1 : 2
+		};
+		const updated = await service.update(
+			'company',
+			context,
+			first.company.id,
+			edit
+		);
+		if (schemaVersion === 1)
+			legacyEdit = { command: edit, response: updated };
+		assert.equal(updated.schemaVersion, schemaVersion);
+		const current = await runtime.company.findUnique({
+			where: { id: first.company.id }
+		});
+		for (const [key, value] of Object.entries(fields))
+			assert.equal(current[key], value);
+		if (schemaVersion === 1)
+			for (const key of Object.keys(fields))
+				assert.equal(Object.hasOwn(updated.company, key), false);
+	}
+	const beforeFailure = await runtime.company.findUnique({
+		where: { id: first.company.id }
+	});
+	const failing = {
+		...command(context.workspaceId, base),
+		schemaVersion: 2,
+		expectedVersion: 3,
+		legalName: 'Must roll back',
+		kpp: null
+	};
+	const activityCount = await runtime.customerActivity.count({
+		where: { workspaceId: context.workspaceId, entityId: first.company.id }
+	});
+	await assert.rejects(
+		failure.update('company', context, first.company.id, failing),
+		/forced receipt failure/
+	);
+	assert.deepEqual(
+		await runtime.company.findUnique({ where: { id: first.company.id } }),
+		beforeFailure
+	);
+	assert.equal(
+		await runtime.customerCommand.count({
+			where: { commandId: failing.commandId }
+		}),
+		0
+	);
+	assert.equal(
+		await runtime.customerActivity.count({
+			where: {
+				workspaceId: context.workspaceId,
+				entityId: first.company.id
+			}
+		}),
+		activityCount
+	);
+	const failingCreate = {
+		...command(rollbackWorkspace, base),
+		schemaVersion: 2,
+		...fields
+	};
+	await assert.rejects(
+		failure.create('company', access(rollbackWorkspace), failingCreate),
+		/forced receipt failure/
+	);
+	for (const delegate of [
+		'company',
+		'customerCommand',
+		'customerActivity'
+	])
+		assert.equal(
+			await runtime[delegate].count({
+				where: { workspaceId: rollbackWorkspace }
+			}),
+			0
+		);
+
+	const clear = {
+		...command(context.workspaceId, base),
+		schemaVersion: 2,
+		expectedVersion: 3,
+		legalName: null,
+		legalAddress: null,
+		kpp: null,
+		entityType: null
+	};
+	const cleared = await service.update(
+		'company',
+		context,
+		first.company.id,
+		clear
+	);
+	assert.equal(cleared.company.version, 4);
+	for (const key of ['legalName', 'legalAddress', 'kpp', 'entityType'])
+		assert.equal(cleared.company[key], null);
+	assert.equal(cleared.company.ogrn, fields.ogrn);
+	const competing = await Promise.allSettled(
+		['987654321', '111111111'].map(kpp =>
+			service.update('company', context, first.company.id, {
+				...command(context.workspaceId, base),
+				schemaVersion: 2,
+				expectedVersion: 4,
+				kpp
+			})
+		)
+	);
+	assert.equal(
+		competing.filter(result => result.status === 'fulfilled').length,
+		1
+	);
+	assert.equal(
+		competing.filter(
+			result => result.status === 'rejected' && http(409)(result.reason)
+		).length,
+		1
+	);
+	assert.equal(
+		(await runtime.company.findUnique({ where: { id: first.company.id } }))
+			.version,
+		5
+	);
+	assert.deepEqual(
+		await service.update(
+			'company',
+			context,
+			first.company.id,
+			legacyEdit.command
+		),
+		legacyEdit.response
+	);
+	assert.deepEqual(
+		await service.update('company', context, first.company.id, clear),
+		cleared
+	);
+	const omitted = { ...clear };
+	delete omitted.legalName;
+	await assert.rejects(
+		service.update('company', context, first.company.id, omitted),
+		http(409)
+	);
+
+	// Existing table grants cover new nullable columns; invalid values are denied
+	// by database constraints, without granting new tables/types/functions.
+	for (const invalid of [
+		{ kpp: '12345678' },
+		{ ogrn: '12345678901234' },
+		{ entityType: 'UNKNOWN' },
+		{ legalName: 'a'.repeat(2001) },
+		{ legalAddress: 'a'.repeat(2001) }
+	])
+		await assert.rejects(
+			runtime.company.update({
+				where: { id: first.company.id },
+				data: invalid
+			})
+		);
+	const empty = await service.create(
+		'company',
+		context,
+		command(context.workspaceId, {
+			schemaVersion: 2,
+			name: 'Manual company without requisites'
+		})
+	);
+	for (const key of Object.keys(fields))
+		assert.equal(empty.company[key], null);
+	const individual = await service.create(
+		'company',
+		context,
+		command(context.workspaceId, {
+			schemaVersion: 2,
+			name: 'Manual individual',
+			entityType: 'INDIVIDUAL',
+			inn: '123456789012',
+			ogrn: '123456789012345'
+		})
+	);
+	assert.equal(individual.company.ogrn, '123456789012345');
+	assert.equal(individual.company.kpp, null);
+
+	const archivedLegacy = await service.archive(
+		'company',
+		context,
+		first.company.id,
+		{
+			schemaVersion: 1,
+			workspaceId: context.workspaceId,
+			commandId: randomUUID(),
+			expectedVersion: 5
+		}
+	);
+	assert.equal(archivedLegacy.schemaVersion, 1);
+	for (const key of Object.keys(fields))
+		assert.equal(Object.hasOwn(archivedLegacy.company, key), false);
+	assert.equal(
+		(await runtime.company.findUnique({ where: { id: first.company.id } }))
+			.ogrn,
+		fields.ogrn
+	);
+	const archiveV2 = {
+		schemaVersion: 2,
+		workspaceId: context.workspaceId,
+		commandId: randomUUID(),
+		expectedVersion: 1
+	};
+	const archivedV2 = await service.archive(
+		'company',
+		context,
+		duplicate.company.id,
+		archiveV2
+	);
+	assert.equal(archivedV2.schemaVersion, 2);
+	assert.equal(archivedV2.company.legalName, fields.legalName);
+	assert.deepEqual(
+		await service.archive(
+			'company',
+			context,
+			duplicate.company.id,
+			archiveV2
+		),
+		archivedV2
+	);
+	const activity = await service.activities(
+		'company',
+		context,
+		first.company.id,
+		{ workspaceId: context.workspaceId, page: 1, pageSize: 100 },
+		2
+	);
+	assert.equal(activity.schemaVersion, 2);
+	assert.ok(
+		activity.items.some(item => item.changedFields.includes('legalName'))
+	);
+	assert.ok(
+		activity.items.every(
+			item => !('legalName' in item) && !('legalAddress' in item)
+		)
+	);
 }
 
 function access(workspaceId) {

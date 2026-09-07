@@ -2,6 +2,7 @@ import { Type } from 'class-transformer';
 import {
 	Equals,
 	IsEmail,
+	IsIn,
 	IsInt,
 	IsOptional,
 	IsString,
@@ -70,5 +71,45 @@ export class UpdateCompanyDto extends CreateCompanyDto {
 }
 
 export class ArchiveCustomerDto extends CustomerCommandDto {
+	@IsInt() @Min(1) @Max(2_147_483_646) expectedVersion!: number;
+}
+
+// Separate command ancestry is intentional: class-validator must not inherit
+// the v1 @Equals(1) constraint or widen any existing contact/company endpoint.
+export class CompanyCommandV2Dto {
+	@Equals(2) schemaVersion!: 2;
+	@IsUUID('4') workspaceId!: string;
+	@IsUUID('4') commandId!: string;
+}
+
+export class CreateCompanyV2Dto extends CompanyCommandV2Dto {
+	@IsString() @MaxLength(200) @Matches(/\S/) name!: string;
+	@IsOptional() @IsString() @MaxLength(5000) notes?: string | null;
+	@IsOptional() @IsUUID('4') teamId?: string | null;
+	@IsOptional() @Matches(/^(?:[0-9]{10}|[0-9]{12})$/) inn?: string | null;
+	@IsOptional()
+	@MaxLength(2048)
+	@IsUrl({
+		protocols: ['http', 'https'],
+		require_protocol: true,
+		require_valid_protocol: true,
+		disallow_auth: true
+	})
+	website?: string | null;
+	@IsOptional() @IsString() @MaxLength(2000) legalName?: string | null;
+	@IsOptional() @Matches(/^[0-9]{9}$/) kpp?: string | null;
+	@IsOptional() @Matches(/^(?:[0-9]{13}|[0-9]{15})$/) ogrn?: string | null;
+	@IsOptional() @IsString() @MaxLength(2000) legalAddress?: string | null;
+	@IsOptional() @IsIn(['LEGAL', 'INDIVIDUAL']) entityType?:
+		| 'LEGAL'
+		| 'INDIVIDUAL'
+		| null;
+}
+
+export class UpdateCompanyV2Dto extends CreateCompanyV2Dto {
+	@IsInt() @Min(1) @Max(2_147_483_646) expectedVersion!: number;
+}
+
+export class ArchiveCompanyV2Dto extends CompanyCommandV2Dto {
 	@IsInt() @Min(1) @Max(2_147_483_646) expectedVersion!: number;
 }

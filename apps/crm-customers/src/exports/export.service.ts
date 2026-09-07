@@ -53,6 +53,14 @@ export const EXPORT_COLUMNS = {
 		'website'
 	]
 } as const;
+export const COMPANY_EXPORT_V2_COLUMNS = [
+	...EXPORT_COLUMNS.companies,
+	'legalName',
+	'kpp',
+	'ogrn',
+	'legalAddress',
+	'entityType'
+] as const;
 type Entity = 'contacts' | 'companies';
 
 @Injectable()
@@ -67,11 +75,14 @@ export class CustomersExportService {
 		workspaceId: string,
 		entity: Entity,
 		format: ExportFormat,
-		signal?: AbortSignal
+		signal?: AbortSignal,
+		schemaVersion: 1 | 2 = 1
 	): Promise<ExportFile> {
 		if (
 			!Object.prototype.hasOwnProperty.call(EXPORT_COLUMNS, entity) ||
-			!['json', 'csv'].includes(format)
+			!['json', 'csv'].includes(format) ||
+			![1, 2].includes(schemaVersion) ||
+			(schemaVersion === 2 && entity !== 'companies')
 		)
 			throw new BadRequestException('Invalid export request');
 		const context = await this.authorization.authorize(
@@ -82,7 +93,10 @@ export class CustomersExportService {
 		const release = this.concurrency.claim(context);
 		try {
 			const started = performance.now();
-			const columns = EXPORT_COLUMNS[entity];
+			const columns =
+				schemaVersion === 2
+					? COMPANY_EXPORT_V2_COLUMNS
+					: EXPORT_COLUMNS[entity];
 			const scope = exportScope(context, 'createdBySubject');
 			const snapshot = await this.prisma.$transaction(
 				async tx => {
@@ -95,6 +109,7 @@ export class CustomersExportService {
 					>`SELECT (clock_timestamp() AT TIME ZONE 'UTC') AS "snapshotAt"`;
 					const snapshotAt = clock.snapshotAt.toISOString();
 					const file = await materializeExport({
+						schemaVersion,
 						workspaceId,
 						entity,
 						format,
@@ -147,7 +162,16 @@ export class CustomersExportService {
 										createdAt: true,
 										updatedAt: true,
 										inn: true,
-										website: true
+										website: true,
+										...(schemaVersion === 2
+											? {
+													legalName: true,
+													kpp: true,
+													ogrn: true,
+													legalAddress: true,
+													entityType: true
+												}
+											: {})
 									}
 								})
 							).map(row => exportItem(row, columns));
@@ -198,6 +222,7 @@ export class CustomersExportService {
 					message: 'Export was cancelled'
 				});
 			return {
+				...(schemaVersion === 2 ? { schemaVersion } : {}),
 				workspaceId,
 				entity,
 				format,

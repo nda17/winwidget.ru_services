@@ -31,8 +31,12 @@ assert.equal(
 );
 const { PrismaClient } = require('@prisma/crm-customers-client');
 const {
-	CustomersExportService
+	CustomersExportService,
+	COMPANY_EXPORT_V2_COLUMNS
 } = require('../../dist/src/exports/export.service.js');
+const {
+	exportHeaders
+} = require('../../dist/src/exports/export-format.js');
 const runtime = new PrismaClient({
 	datasources: { db: { url: runtimeUrl } }
 });
@@ -157,25 +161,132 @@ try {
 		'after'
 	);
 	assert.ok(items.every(row => row.archivedAt !== null));
-	await runtime.company.create({
+	const archivedCompany = await runtime.company.create({
 		data: {
 			workspaceId: workspaces[0],
 			name: 'Компания',
+			inn: '7707083893',
+			legalName: '=Полное название',
+			kpp: '773601001',
+			ogrn: '1027700132195',
+			legalAddress: 'Москва, "Тестовый адрес", 1',
+			entityType: 'LEGAL',
+			teamId,
 			createdBySubject: context.subject,
 			archivedAt: new Date()
 		}
 	});
-	assert.equal(
-		(
-			await service.prepare(
-				'Bearer test',
-				workspaces[0],
-				'companies',
-				'json'
-			)
-		).rowCount,
-		1
+	const manualCompany = await runtime.company.create({
+		data: {
+			workspaceId: workspaces[0],
+			name: 'Ручная компания',
+			createdBySubject: 'another-member'
+		}
+	});
+	await runtime.company.create({
+		data: {
+			workspaceId: workspaces[1],
+			name: 'Другой workspace',
+			legalName: 'Не должно попасть в экспорт',
+			createdBySubject: context.subject,
+			teamId
+		}
+	});
+	const v1Companies = await service.prepare(
+		'Bearer test',
+		workspaces[0],
+		'companies',
+		'json'
 	);
+	assert.equal(v1Companies.rowCount, 2);
+	assert.equal(exportHeaders(v1Companies)['x-wincrm-export-schema'], '1');
+	assert.equal(JSON.parse(v1Companies.body).schemaVersion, 1);
+	assert.ok(
+		JSON.parse(v1Companies.body).items.every(row => !('legalName' in row))
+	);
+	const v2Companies = await service.prepare(
+		'Bearer test',
+		workspaces[0],
+		'companies',
+		'json',
+		undefined,
+		2
+	);
+	assert.equal(v2Companies.rowCount, 2);
+	assert.equal(exportHeaders(v2Companies)['x-wincrm-export-schema'], '2');
+	const v2Document = JSON.parse(v2Companies.body);
+	assert.equal(v2Document.schemaVersion, 2);
+	assert.deepEqual(
+		v2Document.items.map(row => row.id).sort(),
+		[archivedCompany.id, manualCompany.id].sort()
+	);
+	assert.ok(
+		v2Document.items.every(row => row.workspaceId === workspaces[0])
+	);
+	const exportedArchived = v2Document.items.find(
+		row => row.id === archivedCompany.id
+	);
+	assert.ok(exportedArchived.archivedAt);
+	for (const field of [
+		'legalName',
+		'kpp',
+		'ogrn',
+		'legalAddress',
+		'entityType'
+	]) {
+		assert.equal(exportedArchived[field], archivedCompany[field]);
+		assert.equal(
+			v2Document.items.find(row => row.id === manualCompany.id)[field],
+			null
+		);
+	}
+	const v2Csv = await service.prepare(
+		'Bearer test',
+		workspaces[0],
+		'companies',
+		'csv',
+		undefined,
+		2
+	);
+	assert.equal(exportHeaders(v2Csv)['x-wincrm-export-schema'], '2');
+	assert.ok(
+		v2Csv.body
+			.toString()
+			.startsWith(
+				'\uFEFF' +
+					COMPANY_EXPORT_V2_COLUMNS.map(column => '"' + column + '"').join(
+						','
+					) +
+					'\r\n'
+			)
+	);
+	assert.ok(v2Csv.body.toString().includes('"\'=Полное название"'));
+	assert.ok(
+		v2Csv.body.toString().includes('"Москва, ""Тестовый адрес"", 1"')
+	);
+	assert.ok(
+		!v2Csv.body.toString().includes('Не должно попасть в экспорт')
+	);
+	for (const dataScope of ['OWN', 'TEAM']) {
+		context = {
+			...context,
+			dataScope,
+			subject: dataScope === 'TEAM' ? 'stranger' : 'a'.repeat(256)
+		};
+		const scoped = await service.prepare(
+			'Bearer test',
+			workspaces[0],
+			'companies',
+			'json',
+			undefined,
+			2
+		);
+		assert.deepEqual(
+			JSON.parse(scoped.body).items.map(row => row.id),
+			[archivedCompany.id]
+		);
+	}
+	context = { ...context, dataScope: 'ALL', subject: 'a'.repeat(256) };
 	const csv = await service.prepare(
 		'Bearer test',
 		workspaces[0],
@@ -293,7 +404,7 @@ try {
 		0
 	);
 	console.log(
-		'Customers export PG18: repeatable snapshot, fresh revoke, scope, archives, row/UTF8 caps, SQL deadline, audit and restricted ACL passed'
+		'Customers export PG18: v1/v2 requisites and CSV, repeatable snapshot, fresh revoke, scope, archives, row/UTF8 caps, SQL deadline, audit and restricted ACL passed'
 	);
 } catch (error) {
 	console.error(

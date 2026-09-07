@@ -43,6 +43,11 @@ model Company {
   name             String    @db.VarChar(200)
   inn              String?   @db.VarChar(12)
   website          String?   @db.VarChar(2048)
+  legalName        String?   @map("legal_name") @db.VarChar(2000)
+  kpp              String?   @db.VarChar(9)
+  ogrn             String?   @db.VarChar(15)
+  legalAddress     String?   @map("legal_address") @db.VarChar(2000)
+  entityType       String?   @map("entity_type") @db.VarChar(16)
   notes            String?   @db.VarChar(5000)
   createdBySubject String    @map("created_by_subject") @db.VarChar(256)
   teamId           String?   @map("team_id") @db.Uuid

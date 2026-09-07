@@ -15,22 +15,31 @@ import {
 import { CrmCustomersPrismaService } from '../prisma/crm-customers-prisma.service';
 import {
 	ArchiveCustomerDto,
+	ArchiveCompanyV2Dto,
 	CreateCompanyDto,
+	CreateCompanyV2Dto,
 	CreateContactDto,
 	CustomerDuplicateQuery,
 	CustomerListQuery,
 	UpdateCompanyDto,
+	UpdateCompanyV2Dto,
 	UpdateContactDto
 } from './customers.dto';
 
 export type CustomerKind = 'contact' | 'company';
+export type CustomerViewVersion = 1 | 2;
 type CustomerRow = Contact | Company;
-type CustomerData = CreateContactDto | CreateCompanyDto;
+type CustomerData =
+	| CreateContactDto
+	| CreateCompanyDto
+	| CreateCompanyV2Dto;
 type CustomerWrite =
 	| CustomerData
 	| UpdateContactDto
 	| UpdateCompanyDto
-	| ArchiveCustomerDto;
+	| UpdateCompanyV2Dto
+	| ArchiveCustomerDto
+	| ArchiveCompanyV2Dto;
 type CustomerOperation = 'create' | 'update' | 'archive';
 
 export function customerScope(
@@ -53,7 +62,11 @@ export function customerScope(
 	};
 }
 
-export function customerView(kind: CustomerKind, row: CustomerRow) {
+export function customerView(
+	kind: CustomerKind,
+	row: CustomerRow,
+	viewVersion: CustomerViewVersion = 1
+) {
 	const common = {
 		id: row.id,
 		workspaceId: row.workspaceId,
@@ -76,7 +89,16 @@ export function customerView(kind: CustomerKind, row: CustomerRow) {
 		: {
 				...common,
 				inn: (row as Company).inn,
-				website: (row as Company).website
+				website: (row as Company).website,
+				...(viewVersion === 2
+					? {
+							legalName: (row as Company).legalName,
+							kpp: (row as Company).kpp,
+							ogrn: (row as Company).ogrn,
+							legalAddress: (row as Company).legalAddress,
+							entityType: (row as Company).entityType
+						}
+					: {})
 			};
 }
 
@@ -87,9 +109,11 @@ export class CustomersService {
 	async list(
 		kind: CustomerKind,
 		context: CustomersAuthorization,
-		query: CustomerListQuery
+		query: CustomerListQuery,
+		viewVersion: CustomerViewVersion = 1
 	) {
 		this.assertContext(context, query.workspaceId, 'customers:read');
+		this.assertViewVersion(kind, viewVersion);
 		const search = query.search?.trim();
 		const where = {
 			AND: [
@@ -119,21 +143,28 @@ export class CustomersService {
 					: [])
 			]
 		};
-		return this.page(kind, where as Prisma.ContactWhereInput, query);
+		return this.page(
+			kind,
+			where as Prisma.ContactWhereInput,
+			query,
+			viewVersion
+		);
 	}
 
 	async get(
 		kind: CustomerKind,
 		context: CustomersAuthorization,
 		id: string,
-		workspaceId: string
+		workspaceId: string,
+		viewVersion: CustomerViewVersion = 1
 	) {
 		this.assertContext(context, workspaceId, 'customers:read');
+		this.assertViewVersion(kind, viewVersion);
 		const row = await this.find(this.prisma, kind, {
 			AND: [customerScope(context), { id }]
 		});
 		if (!row) throw this.notFound();
-		return this.response(kind, row);
+		return this.response(kind, row, viewVersion);
 	}
 
 	async duplicates(
@@ -158,9 +189,11 @@ export class CustomersService {
 		kind: CustomerKind,
 		context: CustomersAuthorization,
 		id: string,
-		query: CustomerListQuery
+		query: CustomerListQuery,
+		viewVersion: CustomerViewVersion = 1
 	) {
 		this.assertContext(context, query.workspaceId, 'customers:read');
+		this.assertViewVersion(kind, viewVersion);
 		const row = await this.find(this.prisma, kind, {
 			AND: [customerScope(context, true), { id }]
 		});
@@ -183,7 +216,7 @@ export class CustomersService {
 			{ isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead }
 		);
 		return {
-			schemaVersion: 1,
+			schemaVersion: viewVersion,
 			items: items.map(item => ({
 				...item,
 				createdAt: item.createdAt.toISOString()
@@ -206,7 +239,7 @@ export class CustomersService {
 		kind: CustomerKind,
 		context: CustomersAuthorization,
 		id: string,
-		command: UpdateContactDto | UpdateCompanyDto
+		command: UpdateContactDto | UpdateCompanyDto | UpdateCompanyV2Dto
 	) {
 		return this.mutate(kind, 'update', context, command, id);
 	}
@@ -215,7 +248,7 @@ export class CustomersService {
 		kind: CustomerKind,
 		context: CustomersAuthorization,
 		id: string,
-		command: ArchiveCustomerDto
+		command: ArchiveCustomerDto | ArchiveCompanyV2Dto
 	) {
 		return this.mutate(kind, 'archive', context, command, id);
 	}
@@ -223,7 +256,8 @@ export class CustomersService {
 	private async page(
 		kind: CustomerKind,
 		where: Prisma.ContactWhereInput,
-		query: { page: number; pageSize: number }
+		query: { page: number; pageSize: number },
+		viewVersion: CustomerViewVersion = 1
 	) {
 		const args = {
 			where,
@@ -258,8 +292,8 @@ export class CustomersService {
 						}
 					);
 		return {
-			schemaVersion: 1,
-			items: items.map(row => customerView(kind, row)),
+			schemaVersion: viewVersion,
+			items: items.map(row => customerView(kind, row, viewVersion)),
 			page: query.page,
 			pageSize: query.pageSize,
 			total
@@ -279,10 +313,11 @@ export class CustomersService {
 			'customers:write',
 			true
 		);
+		this.assertViewVersion(kind, command.schemaVersion);
 		const data =
 			operation === 'archive'
 				? null
-				: this.normalize(kind, command as CustomerData);
+				: this.normalize(kind, command as CustomerData, operation);
 		if (data?.teamId && !context.teamIds.includes(data.teamId))
 			throw new ForbiddenException(
 				'Customer team must belong to the authorized context'
@@ -292,7 +327,7 @@ export class CustomersService {
 		const requestHash = createHash('sha256')
 			.update(
 				JSON.stringify({
-					schemaVersion: 1,
+					schemaVersion: command.schemaVersion,
 					kind,
 					operation,
 					workspaceId: command.workspaceId,
@@ -423,7 +458,7 @@ export class CustomersService {
 							if (!stored) throw this.notFound();
 							row = stored;
 						}
-						const result = this.response(kind, row);
+						const result = this.response(kind, row, command.schemaVersion);
 						const changedFields =
 							operation === 'archive'
 								? ['archivedAt']
@@ -484,7 +519,11 @@ export class CustomersService {
 		);
 	}
 
-	private normalize(kind: CustomerKind, dto: CustomerData) {
+	private normalize(
+		kind: CustomerKind,
+		dto: CustomerData,
+		operation: 'create' | 'update'
+	) {
 		const common = {
 			name: dto.name.trim(),
 			notes: dto.notes?.trim() || null,
@@ -503,8 +542,40 @@ export class CustomersService {
 			: {
 					...common,
 					inn: (dto as CreateCompanyDto).inn ?? null,
-					website: (dto as CreateCompanyDto).website ?? null
+					website: (dto as CreateCompanyDto).website ?? null,
+					...(dto.schemaVersion === 2
+						? this.normalizeCompanyRequisites(dto, operation)
+						: {})
 				};
+	}
+
+	private normalizeCompanyRequisites(
+		dto: CreateCompanyV2Dto,
+		operation: 'create' | 'update'
+	) {
+		const data: Partial<
+			Pick<
+				Company,
+				'legalName' | 'kpp' | 'ogrn' | 'legalAddress' | 'entityType'
+			>
+		> = {};
+		for (const field of ['legalName', 'legalAddress'] as const) {
+			if (operation === 'create' || dto[field] !== undefined)
+				data[field] = dto[field]?.trim() || null;
+		}
+		for (const field of ['kpp', 'ogrn', 'entityType'] as const) {
+			if (operation === 'create' || dto[field] !== undefined)
+				data[field] = dto[field] ?? null;
+		}
+		return data;
+	}
+
+	private assertViewVersion(
+		kind: CustomerKind,
+		viewVersion: CustomerViewVersion
+	) {
+		if (viewVersion !== 1 && !(kind === 'company' && viewVersion === 2))
+			throw new BadRequestException('Unsupported customer schema version');
 	}
 
 	private assertContext(
@@ -528,8 +599,15 @@ export class CustomersService {
 			: tx.company.findFirst({ where: where as Prisma.CompanyWhereInput });
 	}
 
-	private response(kind: CustomerKind, row: CustomerRow) {
-		return { schemaVersion: 1, [kind]: customerView(kind, row) };
+	private response(
+		kind: CustomerKind,
+		row: CustomerRow,
+		viewVersion: CustomerViewVersion = 1
+	) {
+		return {
+			schemaVersion: viewVersion,
+			[kind]: customerView(kind, row, viewVersion)
+		};
 	}
 
 	private notFound() {

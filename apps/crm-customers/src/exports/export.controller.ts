@@ -22,6 +22,16 @@ export class ExportEntity {
 @Controller('crm/customers/exports')
 export class CustomersExportController {
 	constructor(private readonly exports: CustomersExportService) {}
+	@Get('v2/companies')
+	async downloadCompaniesV2(
+		@Headers('authorization') bearer: string | undefined,
+		@Query() query: ExportQuery,
+		@Req() request: Request,
+		@Res() response: Response
+	) {
+		return this.send(bearer, 'companies', query, request, response, 2);
+	}
+
 	@Get(':entity')
 	async download(
 		@Headers('authorization') bearer: string | undefined,
@@ -29,6 +39,17 @@ export class CustomersExportController {
 		@Query() query: ExportQuery,
 		@Req() request: Request,
 		@Res() response: Response
+	) {
+		return this.send(bearer, params.entity, query, request, response);
+	}
+
+	private async send(
+		bearer: string | undefined,
+		entity: 'contacts' | 'companies',
+		query: ExportQuery,
+		request: Request,
+		response: Response,
+		schemaVersion: 1 | 2 = 1
 	) {
 		if (!bearer || !/^Bearer [^\s]{1,16384}$/i.test(bearer))
 			throw new UnauthorizedException('A user session is required');
@@ -43,9 +64,10 @@ export class CustomersExportController {
 			const file = await this.exports.prepare(
 				bearer,
 				query.workspaceId,
-				params.entity,
+				entity,
 				query.format,
-				abort.signal
+				abort.signal,
+				schemaVersion
 			);
 			if (abort.signal.aborted || response.destroyed) return;
 			response.status(200).set(exportHeaders(file)).end(file.body);

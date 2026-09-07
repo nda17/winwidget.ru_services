@@ -113,4 +113,48 @@ describe('Customers export actual HTTP contract', () => {
 		expect(anonymous.status).toBe(401);
 		await anonymous.body?.cancel();
 	});
+	test('v2 company download binds the explicit schema without enabling other v2 entities', async () => {
+		const companyBody = Buffer.from(
+			JSON.stringify({
+				schemaVersion: 2,
+				workspaceId,
+				entity: 'companies',
+				snapshotAt: '2026-09-05T00:00:00.000Z',
+				rowCount: 0,
+				items: []
+			})
+		);
+		prepare.mockResolvedValueOnce({
+			schemaVersion: 2,
+			workspaceId,
+			entity: 'companies',
+			format: 'json',
+			snapshotAt: '2026-09-05T00:00:00.000Z',
+			rowCount: 0,
+			actorHash: exportActorHash('owner'),
+			body: companyBody
+		});
+		const result = await fetch(url('v2/companies'), {
+			headers: { authorization: 'Bearer user' }
+		});
+		expect(result.status).toBe(200);
+		expect(result.headers.get('x-wincrm-export-schema')).toBe('2');
+		expect(await result.json()).toMatchObject({
+			schemaVersion: 2,
+			entity: 'companies'
+		});
+		expect(prepare).toHaveBeenLastCalledWith(
+			'Bearer user',
+			workspaceId,
+			'companies',
+			'json',
+			expect.any(AbortSignal),
+			2
+		);
+		const invalid = await fetch(url('v2/contacts'), {
+			headers: { authorization: 'Bearer user' }
+		});
+		expect(invalid.status).toBe(404);
+		await invalid.body?.cancel();
+	});
 });

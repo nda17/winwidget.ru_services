@@ -1,9 +1,12 @@
-import { BadRequestException, ValidationPipe } from '@nestjs/common';
+import { BadRequestException, Type, ValidationPipe } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import {
+	ArchiveCompanyV2Dto,
 	CreateCompanyDto,
+	CreateCompanyV2Dto,
 	CreateContactDto,
 	CustomerListQuery,
+	UpdateCompanyV2Dto,
 	UpdateContactDto
 } from './customers.dto';
 
@@ -12,6 +15,120 @@ const pipe = new ValidationPipe({
 	whitelist: true,
 	forbidNonWhitelisted: true,
 	validationError: { target: false, value: false }
+});
+
+describe('Company v2 validation is isolated from legacy commands', () => {
+	const company = {
+		schemaVersion: 2,
+		workspaceId: randomUUID(),
+		commandId: randomUUID(),
+		name: 'Компания',
+		inn: '1234567890',
+		legalName: 'Общество с ограниченной ответственностью Компания',
+		kpp: '123456789',
+		ogrn: '1234567890123',
+		legalAddress: 'г. Москва',
+		entityType: 'LEGAL'
+	};
+	const body = (
+		value: unknown,
+		metatype: Type<unknown> = CreateCompanyV2Dto
+	) => pipe.transform(value, { type: 'body', metatype });
+
+	it('accepts requisites without adding an INN checksum requirement to manual entry', async () => {
+		await expect(body(company)).resolves.toMatchObject(company);
+		await expect(
+			body({
+				...company,
+				inn: '123456789012',
+				ogrn: '123456789012345',
+				entityType: 'INDIVIDUAL'
+			})
+		).resolves.toMatchObject({ entityType: 'INDIVIDUAL' });
+	});
+	it('allows omitted fields and explicit nulls without inherited Equals(1)', async () => {
+		const basic = {
+			schemaVersion: 2,
+			workspaceId: company.workspaceId,
+			commandId: company.commandId,
+			name: company.name
+		};
+		await expect(body(basic)).resolves.toMatchObject(basic);
+		await expect(
+			body({
+				...basic,
+				legalName: null,
+				kpp: null,
+				ogrn: null,
+				legalAddress: null,
+				entityType: null
+			})
+		).resolves.toMatchObject({ entityType: null });
+	});
+	it.each([
+		{ schemaVersion: 1 },
+		{ schemaVersion: '2' },
+		{ entityType: 'UNKNOWN' },
+		{ kpp: '12345678' },
+		{ kpp: '1234567890' },
+		{ kpp: 123456789 },
+		{ ogrn: '123456789012' },
+		{ ogrn: '12345678901234' },
+		{ ogrn: '1234567890123456' },
+		{ ogrn: '123456789012x' },
+		{ legalName: 'a'.repeat(2001) },
+		{ legalAddress: 'a'.repeat(2001) },
+		{ legalName: {} },
+		{ legalAddress: [] },
+		{ entityType: ['LEGAL'] },
+		{ website: 'https://user:password@example.test' },
+		{ phone: '+79000000001' },
+		{ createdBySubject: 'injected' }
+	])('rejects invalid v2 payload %j', override => {
+		return expect(
+			body({ ...company, ...override })
+		).rejects.toBeInstanceOf(BadRequestException);
+	});
+	it('bounds text at 2000 and rejects missing/invalid CAS versions', async () => {
+		await expect(
+			body({
+				...company,
+				legalName: 'a'.repeat(2000),
+				legalAddress: 'я'.repeat(2000)
+			})
+		).resolves.toBeDefined();
+		for (const expectedVersion of [undefined, 0, 2_147_483_647, '1']) {
+			await expect(
+				body({ ...company, expectedVersion }, UpdateCompanyV2Dto)
+			).rejects.toBeInstanceOf(BadRequestException);
+		}
+		await expect(
+			body({ ...company, expectedVersion: 1 }, UpdateCompanyV2Dto)
+		).resolves.toMatchObject({ expectedVersion: 1 });
+	});
+	it('retains strict v1 body shape and isolates archive schema', async () => {
+		await expect(
+			body({ ...company, schemaVersion: 1 }, CreateCompanyDto)
+		).rejects.toBeInstanceOf(BadRequestException);
+		const archive = {
+			schemaVersion: 2,
+			workspaceId: company.workspaceId,
+			commandId: company.commandId,
+			expectedVersion: 1
+		};
+		await expect(
+			pipe.transform(archive, {
+				type: 'body',
+				metatype: ArchiveCompanyV2Dto
+			})
+		).resolves.toMatchObject(archive);
+		await expect(
+			pipe.transform(
+				{ ...archive, schemaVersion: 1 },
+				{ type: 'body', metatype: ArchiveCompanyV2Dto }
+			)
+		).rejects.toBeInstanceOf(BadRequestException);
+	});
 });
 const command = {
 	schemaVersion: 1,
