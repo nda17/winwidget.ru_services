@@ -10,6 +10,7 @@ COPY package.json pnpm-lock.yaml ./
 RUN pnpm install --frozen-lockfile
 COPY prisma ./prisma
 COPY restore-manifests ./restore-manifests
+COPY backup-manifests ./backup-manifests
 RUN pnpm prisma:generate
 COPY tsconfig.json tsconfig.build.json ./
 COPY src ./src
@@ -47,6 +48,7 @@ COPY --from=build --chown=operations:nodejs /app/node_modules ./node_modules
 COPY --from=build --chown=operations:nodejs /app/package.json ./package.json
 COPY --from=build --chown=operations:nodejs /app/prisma ./prisma
 COPY --from=build --chown=operations:nodejs /app/restore-manifests ./restore-manifests
+COPY --from=build --chown=operations:nodejs /app/backup-manifests ./backup-manifests
 COPY --chown=root:root --chmod=0755 docker-entrypoint.sh /usr/local/bin/operations-entrypoint.sh
 USER operations
 EXPOSE 5200 5201 5202 5203

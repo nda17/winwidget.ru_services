@@ -1,6 +1,8 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
 import {
+	OperationalAlertSeverity,
 	Prisma,
+	type ScheduledJobRun,
 	ScheduledJobRunStatus,
 	ScheduledJobRunTrigger
 } from '@prisma/operations-client';
@@ -11,7 +13,10 @@ import {
 	OPERATIONS_SCHEDULED_JOB_ROUTING_KEY
 } from '../messaging/operations-messaging.constants';
 import { OperationsPrismaService } from '../prisma/operations-prisma.service';
+import { OperationalAlertService } from '../monitoring/operational-alert.service';
 import {
+	DATABASE_BACKUP_TARGETS,
+	databaseBackupJobType,
 	EnqueueScheduledJobInput,
 	ScheduledJobView,
 	serializeScheduledJob
@@ -19,11 +24,17 @@ import {
 
 const UUID_PATTERN =
 	/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+export type BackupJobClaim =
+	| { status: 'CLAIMED'; job: ScheduledJobView; leaseToken: string }
+	| { status: 'DEFERRED' | 'TERMINAL' | 'REQUEUE' | 'REJECT' };
+
 @Injectable()
 export class ScheduledJobsService {
 	constructor(
 		private readonly prisma: OperationsPrismaService,
-		private readonly outbox: OperationsOutboxService
+		private readonly outbox: OperationsOutboxService,
+		private readonly alerts: OperationalAlertService
 	) {}
 
 	enqueueUnique(input: EnqueueScheduledJobInput) {
@@ -274,14 +285,15 @@ export class ScheduledJobsService {
 		) {
 			throw new Error('Lease duration is invalid');
 		}
+		const now = new Date();
 		const candidate = await this.prisma.scheduledJobRun.findFirst({
 			where: {
-				availableAt: { lte: new Date() },
+				availableAt: { lte: now },
 				OR: [
 					{ status: ScheduledJobRunStatus.QUEUED },
 					{
 						status: ScheduledJobRunStatus.PROCESSING,
-						leaseExpiresAt: { lt: new Date() }
+						leaseExpiresAt: { lte: now }
 					}
 				]
 			},
@@ -291,12 +303,7 @@ export class ScheduledJobsService {
 			return null;
 		const leaseToken = randomUUID();
 		const claimed = await this.prisma.scheduledJobRun.updateMany({
-			where: {
-				id: candidate.id,
-				attempts: candidate.attempts,
-				status: candidate.status,
-				leaseToken: candidate.leaseToken
-			},
+			where: this.claimableSnapshot(candidate, now),
 			data: {
 				status: ScheduledJobRunStatus.PROCESSING,
 				attempts: { increment: 1 },
@@ -329,27 +336,23 @@ export class ScheduledJobsService {
 		const job = await this.prisma.scheduledJobRun.findUnique({
 			where: { id }
 		});
+		const now = new Date();
 		if (
 			!job ||
 			job.attempts >= job.maxAttempts ||
-			job.availableAt.getTime() > Date.now() ||
+			job.availableAt.getTime() > now.getTime() ||
 			(job.status !== ScheduledJobRunStatus.QUEUED &&
 				!(
 					job.status === ScheduledJobRunStatus.PROCESSING &&
 					job.leaseExpiresAt &&
-					job.leaseExpiresAt.getTime() < Date.now()
+					job.leaseExpiresAt.getTime() <= now.getTime()
 				))
 		) {
 			return null;
 		}
 		const leaseToken = randomUUID();
 		const claimed = await this.prisma.scheduledJobRun.updateMany({
-			where: {
-				id,
-				attempts: job.attempts,
-				status: job.status,
-				leaseToken: job.leaseToken
-			},
+			where: this.claimableSnapshot(job, now),
 			data: {
 				status: ScheduledJobRunStatus.PROCESSING,
 				attempts: { increment: 1 },
@@ -367,6 +370,162 @@ export class ScheduledJobsService {
 			}
 		);
 		return { job: serializeScheduledJob(claimedJob), leaseToken };
+	}
+
+	/** The push consumer must distinguish a durable deferral from a terminal no-op. */
+	async claimBackup(
+		event: { eventId: string; jobId: string; jobType: string },
+		workerId: string,
+		leaseMs: number
+	): Promise<BackupJobClaim> {
+		this.assertUuid(event.eventId, 'event id');
+		this.assertUuid(event.jobId, 'job id');
+		if (!workerId.trim() || workerId.length > 255)
+			throw new Error('Worker id is invalid');
+		if (
+			!Number.isInteger(leaseMs) ||
+			leaseMs < 1_000 ||
+			leaseMs > 3_600_000
+		)
+			throw new Error('Lease duration is invalid');
+		if (!this.backupTarget(event.jobType)) return { status: 'REJECT' };
+		return this.prisma.$transaction(async transaction => {
+			const job = await transaction.scheduledJobRun.findUnique({
+				where: { id: event.jobId }
+			});
+			if (!job || job.jobType !== event.jobType)
+				return { status: 'REJECT' };
+			if (
+				job.status !== ScheduledJobRunStatus.QUEUED &&
+				job.status !== ScheduledJobRunStatus.PROCESSING
+			)
+				return { status: 'TERMINAL' };
+			if (
+				job.status === ScheduledJobRunStatus.PROCESSING &&
+				(!job.leaseToken || !job.leaseExpiresAt)
+			)
+				throw new Error('Operations backup lease is invalid');
+			const now = new Date();
+			const notBefore = Math.max(
+				job.availableAt.getTime(),
+				job.status === ScheduledJobRunStatus.PROCESSING
+					? job.leaseExpiresAt!.getTime()
+					: 0
+			);
+			if (notBefore > now.getTime()) {
+				// Every deferral needs a fresh durable trigger. Reusing a key based
+				// on the incoming event/lease can match an already PUBLISHED event,
+				// including this very delivery, and lose recovery after its ACK.
+				const eventId = randomUUID();
+				await this.outbox.enqueue(transaction, {
+					eventId,
+					deduplicationKey: `scheduled-job:${job.id}:recovery:${eventId}`,
+					eventType: OPERATIONS_SCHEDULED_JOB_EVENT_TYPE,
+					aggregateType: 'scheduled-job',
+					aggregateId: job.id,
+					correlationId: event.eventId,
+					routingKey: OPERATIONS_SCHEDULED_JOB_ROUTING_KEY,
+					payload: {
+						schemaVersion: 1,
+						eventId,
+						jobId: job.id,
+						jobType: job.jobType
+					}
+				});
+				const delayed = await transaction.outboxEvent.updateMany({
+					where: { eventId },
+					data: {
+						availableAt: new Date(
+							Math.max(notBefore, now.getTime() + 1_000)
+						)
+					}
+				});
+				if (delayed.count !== 1)
+					throw new Error('Operations backup recovery was not scheduled');
+				return { status: 'DEFERRED' };
+			}
+			if (job.attempts >= job.maxAttempts) {
+				const failed = await transaction.scheduledJobRun.updateMany({
+					where: this.claimableSnapshot(job, now),
+					data: {
+						status: ScheduledJobRunStatus.FAILED,
+						finishedAt: now,
+						leaseOwner: null,
+						leaseToken: null,
+						leaseExpiresAt: null,
+						lastError:
+							'Database backup attempts exhausted during lease recovery'
+					}
+				});
+				if (failed.count !== 1) return { status: 'REQUEUE' };
+				await this.recordBackupFailure(transaction, job);
+				return { status: 'TERMINAL' };
+			}
+			const leaseToken = randomUUID();
+			const claimed = await transaction.scheduledJobRun.updateMany({
+				where: this.claimableSnapshot(job, now),
+				data: {
+					status: ScheduledJobRunStatus.PROCESSING,
+					attempts: { increment: 1 },
+					leaseOwner: workerId,
+					leaseToken,
+					leaseExpiresAt: new Date(now.getTime() + leaseMs),
+					startedAt: job.startedAt ?? now,
+					lastError: null
+				}
+			});
+			if (claimed.count !== 1) return { status: 'REQUEUE' };
+			const claimedJob =
+				await transaction.scheduledJobRun.findUniqueOrThrow({
+					where: { id: job.id }
+				});
+			return {
+				status: 'CLAIMED',
+				job: serializeScheduledJob(claimedJob),
+				leaseToken
+			};
+		});
+	}
+
+	private claimableSnapshot(
+		job: ScheduledJobRun,
+		now: Date
+	): Prisma.ScheduledJobRunWhereInput {
+		return {
+			id: job.id,
+			jobType: job.jobType,
+			attempts: job.attempts,
+			maxAttempts: job.maxAttempts,
+			status: job.status,
+			leaseToken: job.leaseToken,
+			availableAt: { lte: now },
+			...(job.status === ScheduledJobRunStatus.PROCESSING
+				? { leaseExpiresAt: { lte: now } }
+				: {})
+		};
+	}
+
+	private backupTarget(jobType: string) {
+		return DATABASE_BACKUP_TARGETS.find(
+			target => databaseBackupJobType(target) === jobType
+		);
+	}
+
+	private async recordBackupFailure(
+		transaction: Prisma.TransactionClient,
+		job: ScheduledJobRun
+	) {
+		const target = this.backupTarget(job.jobType);
+		if (!target) return;
+		await this.alerts.recordInTransaction(transaction, {
+			deduplicationKey: `database-backup:${target}`,
+			type: 'INTEGRATION_PROBLEM',
+			severity: OperationalAlertSeverity.HIGH,
+			source: 'operations',
+			referenceId: job.id,
+			title: `Не выполнен backup базы ${target}`,
+			message: 'Исчерпан лимит автоматических попыток database backup'
+		});
 	}
 
 	async complete(
@@ -427,7 +586,15 @@ export class ScheduledJobsService {
 			const job = await transaction.scheduledJobRun.findUnique({
 				where: { id }
 			});
-			if (!job || job.leaseToken !== leaseToken) return false;
+			const now = new Date();
+			if (
+				!job ||
+				job.leaseToken !== leaseToken ||
+				job.status !== ScheduledJobRunStatus.PROCESSING ||
+				!job.leaseExpiresAt ||
+				job.leaseExpiresAt.getTime() <= now.getTime()
+			)
+				return false;
 			const retry = job.attempts < job.maxAttempts;
 			const availableAt = retry
 				? new Date(Date.now() + Math.max(1_000, retryDelayMs))
@@ -436,7 +603,10 @@ export class ScheduledJobsService {
 				where: {
 					id,
 					status: ScheduledJobRunStatus.PROCESSING,
-					leaseToken
+					leaseToken,
+					attempts: job.attempts,
+					maxAttempts: job.maxAttempts,
+					leaseExpiresAt: { gt: now }
 				},
 				data: {
 					status: retry
@@ -467,10 +637,14 @@ export class ScheduledJobsService {
 						jobType: job.jobType
 					}
 				});
-				await transaction.outboxEvent.updateMany({
+				const delayed = await transaction.outboxEvent.updateMany({
 					where: { eventId },
 					data: { availableAt }
 				});
+				if (delayed.count !== 1)
+					throw new Error('Operations backup retry was not scheduled');
+			} else {
+				await this.recordBackupFailure(transaction, job);
 			}
 			return true;
 		});

@@ -12,10 +12,10 @@ import { constants } from 'node:fs';
 import { open, type FileHandle } from 'node:fs/promises';
 import { isAbsolute, join } from 'node:path';
 import {
-	DATABASE_RESTORE_MAX_FILE_SIZE_BYTES,
-	DATABASE_RESTORE_TARGETS,
-	type DatabaseRestoreTarget
-} from '../restore/database-restore.contract';
+	DATABASE_BACKUP_MAX_FILE_SIZE_BYTES,
+	isDatabaseBackupProvenanceTarget,
+	type DatabaseBackupProvenanceTarget
+} from './database-backup.contract';
 
 export const DATABASE_BACKUP_PROVENANCE_DOMAIN =
 	'winwidget.operations.database-backup-provenance.v1';
@@ -46,7 +46,10 @@ const ISO_TIMESTAMP_PATTERN =
 	/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 
 const TARGET_DATABASES: Readonly<
-	Record<DatabaseRestoreTarget, { databaseName: string; schema: string }>
+	Record<
+		DatabaseBackupProvenanceTarget,
+		{ databaseName: string; schema: string }
+	>
 > = Object.freeze({
 	'notification-delivery': Object.freeze({
 		databaseName: 'winwidget_notification_delivery',
@@ -75,12 +78,28 @@ const TARGET_DATABASES: Readonly<
 	support: Object.freeze({
 		databaseName: 'winwidget_support',
 		schema: 'support'
+	}),
+	'crm-access': Object.freeze({
+		databaseName: 'winwidget_crm_access',
+		schema: 'crm_access'
+	}),
+	'crm-intake': Object.freeze({
+		databaseName: 'winwidget_crm_intake',
+		schema: 'crm_intake'
+	}),
+	'crm-customers': Object.freeze({
+		databaseName: 'winwidget_crm_customers',
+		schema: 'crm_customers'
+	}),
+	'crm-sales': Object.freeze({
+		databaseName: 'winwidget_crm_sales',
+		schema: 'crm_sales'
 	})
 });
 
 export interface DatabaseBackupProvenanceEvidence {
 	backupJobId: string;
-	target: DatabaseRestoreTarget;
+	target: DatabaseBackupProvenanceTarget;
 	databaseName: string;
 	schema: string;
 	fileName: string;
@@ -153,7 +172,7 @@ export const parseDatabaseBackupProvenanceEvidence = (
 		EVIDENCE_KEYS,
 		'backup provenance evidence'
 	);
-	const target = restoreTarget(record.target);
+	const target = provenanceTarget(record.target);
 	const expected = TARGET_DATABASES[target];
 	const databaseName = boundedString(
 		record.databaseName,
@@ -178,7 +197,7 @@ export const parseDatabaseBackupProvenanceEvidence = (
 	if (
 		!Number.isSafeInteger(record.fileSize) ||
 		Number(record.fileSize) < 5 ||
-		Number(record.fileSize) > DATABASE_RESTORE_MAX_FILE_SIZE_BYTES
+		Number(record.fileSize) > DATABASE_BACKUP_MAX_FILE_SIZE_BYTES
 	) {
 		throw new Error('Backup provenance fileSize is invalid');
 	}
@@ -532,14 +551,13 @@ const exactRecord = <T extends readonly string[]>(
 	return value as Record<T[number], unknown>;
 };
 
-const restoreTarget = (value: unknown): DatabaseRestoreTarget => {
-	if (
-		typeof value !== 'string' ||
-		!DATABASE_RESTORE_TARGETS.includes(value as DatabaseRestoreTarget)
-	) {
+const provenanceTarget = (
+	value: unknown
+): DatabaseBackupProvenanceTarget => {
+	if (!isDatabaseBackupProvenanceTarget(value)) {
 		throw new Error('Backup provenance target is invalid');
 	}
-	return value as DatabaseRestoreTarget;
+	return value;
 };
 
 const boundedString = (

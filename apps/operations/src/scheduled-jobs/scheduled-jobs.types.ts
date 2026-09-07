@@ -14,7 +14,11 @@ export const DATABASE_BACKUP_TARGETS = [
 	'identity',
 	'platform',
 	'support',
-	'operations'
+	'operations',
+	'crm-access',
+	'crm-intake',
+	'crm-customers',
+	'crm-sales'
 ] as const;
 
 export type DatabaseBackupTarget =
@@ -32,7 +36,11 @@ export const DATABASE_BACKUP_DELAY_MINUTES: Record<
 	identity: 90,
 	platform: 105,
 	support: 120,
-	operations: 135
+	operations: 135,
+	'crm-access': 150,
+	'crm-intake': 165,
+	'crm-customers': 180,
+	'crm-sales': 195
 };
 
 export const databaseBackupJobType = (target: DatabaseBackupTarget) =>

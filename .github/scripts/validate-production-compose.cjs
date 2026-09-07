@@ -1,5 +1,6 @@
 const { readFileSync } = require('node:fs');
 const { isAbsolute, relative, resolve, sep } = require('node:path');
+const { validateCrmBackupBoundary } = require('./crm-backup-boundary.cjs');
 
 const fail = message => {
 	throw new Error(message);
@@ -997,7 +998,9 @@ assert(
 	'Identity login OTP must be disabled in both examples'
 );
 assert(
-	['true', 'false'].includes(identityEnvironment.IDENTITY_LOGIN_OTP_ENABLED) &&
+	['true', 'false'].includes(
+		identityEnvironment.IDENTITY_LOGIN_OTP_ENABLED
+	) &&
 		identityEnvironment.IDENTITY_LOGIN_OTP_ENABLED ===
 			expected('IDENTITY_LOGIN_OTP_ENABLED'),
 	'Identity API login OTP flag is missing or drifted'
@@ -1331,6 +1334,17 @@ for (const [
 	assert(environment[portKey] === port, name + ' port drifted');
 }
 
+validateCrmBackupBoundary(services, expected);
+validateCrmBackupBoundary(
+	{
+		'operations-worker': {
+			environment: Object.fromEntries(
+				parseExample('apps/operations/.env.example')
+			)
+		}
+	},
+	key => parseExample('apps/operations/.env.example').get(key)
+);
 const backupKeys = databaseTargets.map(target => target.backupKey);
 for (const [name, service] of Object.entries(services)) {
 	for (const key of backupKeys) {
@@ -1421,8 +1435,9 @@ assert(
 	'operations-worker backup provenance tmpfs drifted'
 );
 assert(
-	JSON.stringify((operationsWorker.healthcheck?.test ?? []).slice(0, 4)) ===
-		JSON.stringify(['CMD', 'gosu', 'operations:nodejs', 'node']),
+	JSON.stringify(
+		(operationsWorker.healthcheck?.test ?? []).slice(0, 4)
+	) === JSON.stringify(['CMD', 'gosu', 'operations:nodejs', 'node']),
 	'operations-worker healthcheck must drop root before probing readiness'
 );
 for (const name of [
@@ -1857,12 +1872,8 @@ assert(
 		operationsEntrypoint.includes(
 			'install -d -o 0 -g "$operations_gid" -m 0710 "$runtime_key_directory"'
 		) &&
-		operationsEntrypoint.includes(
-			'install -o 0 -g 0 -m 0600 \\'
-		) &&
-		operationsEntrypoint.includes(
-			'chmod 0400 "$runtime_key_temporary"'
-		) &&
+		operationsEntrypoint.includes('install -o 0 -g 0 -m 0600 \\') &&
+		operationsEntrypoint.includes('chmod 0400 "$runtime_key_temporary"') &&
 		operationsEntrypoint.includes(
 			'chown "$operations_uid:$operations_gid" "$runtime_key_temporary"'
 		) &&

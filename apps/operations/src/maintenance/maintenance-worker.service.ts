@@ -1,8 +1,5 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
-import {
-	OperationalAlertSeverity,
-	Prisma
-} from '@prisma/operations-client';
+import { Prisma } from '@prisma/operations-client';
 import type { ConsumeMessage } from 'amqplib';
 import { randomUUID } from 'node:crypto';
 import { OPERATIONS_SCHEDULED_JOB_EVENT_TYPE } from '../messaging/operations-messaging.constants';
@@ -18,7 +15,10 @@ import {
 	DatabaseBackupTarget,
 	databaseBackupJobType
 } from '../scheduled-jobs/scheduled-jobs.types';
-import { ScheduledJobsService } from '../scheduled-jobs/scheduled-jobs.service';
+import {
+	BackupJobClaim,
+	ScheduledJobsService
+} from '../scheduled-jobs/scheduled-jobs.service';
 import { DatabaseBackupService } from './database-backup.service';
 
 const UUID_PATTERN =
@@ -61,24 +61,35 @@ export class MaintenanceWorkerService implements OnModuleInit {
 		} catch {
 			return 'reject';
 		}
-		const claim = await this.jobs.claim(
-			event.jobId,
-			this.instanceId,
-			LEASE_MS
-		);
-		if (!claim) return 'ack';
+		let claim: BackupJobClaim;
+		try {
+			claim = await this.jobs.claimBackup(
+				event,
+				this.instanceId,
+				LEASE_MS
+			);
+		} catch {
+			return 'requeue';
+		}
+		if (claim.status === 'REJECT') return 'reject';
+		if (claim.status === 'REQUEUE') return 'requeue';
+		if (claim.status !== 'CLAIMED') return 'ack';
 		const input = this.parseBackupInput(
 			claim.job.input,
 			claim.job.jobType
 		);
 		if (!input) {
-			await this.jobs.fail(
-				claim.job.id,
-				claim.leaseToken,
-				new Error('Unsupported Operations scheduled job'),
-				60_000
-			);
-			return 'ack';
+			try {
+				const failed = await this.jobs.fail(
+					claim.job.id,
+					claim.leaseToken,
+					new Error('Unsupported Operations scheduled job'),
+					60_000
+				);
+				return failed ? 'ack' : 'requeue';
+			} catch {
+				return 'requeue';
+			}
 		}
 		const controller = new AbortController();
 		const renew = setInterval(() => {
@@ -136,29 +147,16 @@ export class MaintenanceWorkerService implements OnModuleInit {
 			}
 			return 'ack';
 		} catch (error) {
-			const failed = await this.jobs.fail(
-				claim.job.id,
-				claim.leaseToken,
-				error,
-				30_000 * 2 ** Math.min(claim.job.attempts, 6)
-			);
-			if (failed && claim.job.attempts >= claim.job.maxAttempts) {
-				await this.alerts
-					.record({
-						deduplicationKey: `database-backup:${input.target}`,
-						type: 'INTEGRATION_PROBLEM',
-						severity: OperationalAlertSeverity.HIGH,
-						source: 'operations',
-						referenceId: claim.job.id,
-						title: `Не выполнен backup базы ${input.target}`,
-						message:
-							'Исчерпан лимит автоматических попыток database backup'
-					})
-					.catch(() =>
-						this.logger.warn(
-							`Could not record backup alert target=${input.target}`
-						)
-					);
+			try {
+				const failed = await this.jobs.fail(
+					claim.job.id,
+					claim.leaseToken,
+					error,
+					30_000 * 2 ** Math.min(claim.job.attempts, 6)
+				);
+				if (!failed) return 'requeue';
+			} catch {
+				return 'requeue';
 			}
 			this.logger.warn(`Database backup failed jobId=${claim.job.id}`);
 			return 'ack';

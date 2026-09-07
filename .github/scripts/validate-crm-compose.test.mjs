@@ -212,6 +212,39 @@ test('existing services keep CRM default-off with exact process-scoped variables
 	assert.equal(value.source.CRM_RABBITMQ_CONTRACT, 'disabled');
 });
 
+test('backup-only CRM settings remain confined to Operations maintenance', () => {
+	const value = companion();
+	const keys = [
+		'CRM_ACCESS_BACKUP_URL',
+		'CRM_INTAKE_BACKUP_URL',
+		'CRM_CUSTOMERS_BACKUP_URL',
+		'CRM_SALES_BACKUP_URL'
+	];
+	// Exact endpoint values are checked separately by crm-backup-boundary.
+	for (const key of keys) {
+		value.config.services['operations-worker'].environment[key] =
+			'backup-fixture';
+		value.source[key] = 'backup-fixture';
+	}
+	assert.doesNotThrow(() =>
+		validateCrmCompanionCompose(value.config, value.source)
+	);
+	for (const key of keys) {
+		for (const name of [
+			'identity-api',
+			'billing-worker',
+			'operations-api',
+			'operations-restore-worker'
+		]) {
+			const changed = structuredClone(value.config);
+			changed.services[name].environment[key] = 'backup-fixture';
+			assert.throws(() =>
+				validateCrmCompanionCompose(changed, value.source)
+			);
+		}
+	}
+});
+
 test('complete opt-in passes, and scheduler never receives the provider or reverse authority credentials', () => {
 	const value = companion(activeCompanion);
 	assert.equal(
@@ -526,9 +559,15 @@ test('consistent enabled feature settings still cannot assert release approval',
 		CRM_INTAKE_WIDGETS_ENABLED: 'true',
 		CRM_INTAKE_WIDGET_TRANSFERS_ENABLED: 'true'
 	});
-	assert.equal(rendered.status, 0, 'Enabled synthetic Compose must render');
+	assert.equal(
+		rendered.status,
+		0,
+		'Enabled synthetic Compose must render'
+	);
 	const candidate = JSON.parse(rendered.stdout);
-	for (const [role] of CRM_SERVICES.find(([app]) => app === 'crm-intake')[4]) {
+	for (const [role] of CRM_SERVICES.find(
+		([app]) => app === 'crm-intake'
+	)[4]) {
 		const env = candidate.services['crm-intake-' + role].environment;
 		assert.equal(env.CRM_INTAKE_WIDGETS_ENABLED, 'true');
 		assert.equal(
@@ -543,10 +582,14 @@ test('consistent enabled feature settings still cannot assert release approval',
 		);
 	}
 	assert.equal(validateCrmCompose(candidate).releaseApproved, false);
-	for (const role of ['widget-control-worker', 'widget-control-publisher']) {
+	for (const role of [
+		'widget-control-worker',
+		'widget-control-publisher'
+	]) {
 		const changed = structuredClone(candidate);
-		changed.services['crm-intake-' + role].environment
-			.CRM_INTAKE_WIDGET_TRANSFERS_ENABLED = 'true';
+		changed.services[
+			'crm-intake-' + role
+		].environment.CRM_INTAKE_WIDGET_TRANSFERS_ENABLED = 'true';
 		assert.throws(() => validateCrmCompose(changed), /role contract/);
 	}
 });
@@ -707,13 +750,15 @@ for (const role of [
 	);
 for (const role of ['widget-transfer-worker', 'widget-transfer-publisher'])
 	reject('specialized ' + role + ' cannot disable transfers', value => {
-		value.services['crm-intake-' + role].environment
-			.CRM_INTAKE_WIDGET_TRANSFERS_ENABLED = 'false';
+		value.services[
+			'crm-intake-' + role
+		].environment.CRM_INTAKE_WIDGET_TRANSFERS_ENABLED = 'false';
 	});
 for (const role of ['widget-control-worker', 'widget-control-publisher'])
 	reject('specialized ' + role + ' cannot enable transfers', value => {
-		value.services['crm-intake-' + role].environment
-			.CRM_INTAKE_WIDGET_TRANSFERS_ENABLED = 'true';
+		value.services[
+			'crm-intake-' + role
+		].environment.CRM_INTAKE_WIDGET_TRANSFERS_ENABLED = 'true';
 	});
 reject('no cross-role feature gate mismatch', value => {
 	value.services[

@@ -1,5 +1,8 @@
 import { ConfigService } from '@nestjs/config';
-import { TelegramSettingsService } from './telegram-settings.service';
+import {
+	ensureSchedulesSeparated,
+	TelegramSettingsService
+} from './telegram-settings.service';
 
 describe('TelegramSettingsService', () => {
 	it('publishes the initial Operations routing event transactionally', async () => {
@@ -30,7 +33,7 @@ describe('TelegramSettingsService', () => {
 			},
 			reportingSchedulePolicy: {
 				upsert: jest.fn().mockResolvedValue({
-					reservationTime: '05:00',
+					reservationTime: '05:10',
 					pendingTime: null
 				})
 			},
@@ -133,7 +136,20 @@ describe('TelegramSettingsService', () => {
 		expect(audit).not.toHaveBeenCalled();
 	});
 
-	it('keeps the frontend backup schedule fields while adding Operations', () => {
+	it.each(['04:15', '04:30', '04:45', '05:00'])(
+		'rejects a summary overlapping the CRM backup at %s',
+		time => {
+			expect(() => ensureSchedulesSeparated(time, '01:45')).toThrow(
+				'Разнесите отправку сводки'
+			);
+		}
+	);
+
+	it('accepts the exact five-minute separation after the last CRM backup', () => {
+		expect(() => ensureSchedulesSeparated('05:05', '01:45')).not.toThrow();
+	});
+
+	it('keeps the existing frontend schedule fields while adding four CRM databases', () => {
 		const service = new TelegramSettingsService(
 			{} as never,
 			new ConfigService(),
@@ -159,7 +175,19 @@ describe('TelegramSettingsService', () => {
 				supportDatabaseBackupDelayMinutes: 120,
 				supportDatabaseBackupTime: '03:45',
 				operationsDatabaseBackupDelayMinutes: 135,
-				operationsDatabaseBackupTime: '04:00'
+				operationsDatabaseBackupTime: '04:00',
+				crmAccessDatabaseBackupDelayMinutes: 150,
+				crmAccessDatabaseBackupTime: '04:15',
+				crmAccessDatabaseBackupTimeLabel: '04:15 МСК',
+				crmIntakeDatabaseBackupDelayMinutes: 165,
+				crmIntakeDatabaseBackupTime: '04:30',
+				crmIntakeDatabaseBackupTimeLabel: '04:30 МСК',
+				crmCustomersDatabaseBackupDelayMinutes: 180,
+				crmCustomersDatabaseBackupTime: '04:45',
+				crmCustomersDatabaseBackupTimeLabel: '04:45 МСК',
+				crmSalesDatabaseBackupDelayMinutes: 195,
+				crmSalesDatabaseBackupTime: '05:00',
+				crmSalesDatabaseBackupTimeLabel: '05:00 МСК'
 			})
 		);
 	});

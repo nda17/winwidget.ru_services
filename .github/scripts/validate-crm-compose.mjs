@@ -236,6 +236,14 @@ function checkDatabaseUrl(value, schema, port, pool, migration) {
 // Validate only the existing services' CRM environment wiring. This does not
 // validate private file provenance, deployed revisions or approve a rollout.
 export function validateCrmCompanionCompose(config, source) {
+	// Operations backup URLs have a separate exact endpoint validator. They do
+	// not give this companion check ownership of CRM databases or restore roles.
+	const backupOnlyKeys = [
+		'CRM_ACCESS_BACKUP_URL',
+		'CRM_INTAKE_BACKUP_URL',
+		'CRM_CUSTOMERS_BACKUP_URL',
+		'CRM_SALES_BACKUP_URL'
+	];
 	const targets = {
 		IDENTITY_CRM_ACCESS_TOKEN: ['identity-api'],
 		IDENTITY_NOTIFICATION_DELIVERY_TOKEN: [
@@ -269,6 +277,9 @@ export function validateCrmCompanionCompose(config, source) {
 		config?.name === 'winwidget' && config.services && source,
 		'Invalid CRM companion inputs'
 	);
+	if (backupOnlyKeys.some(key => Object.hasOwn(source, key))) {
+		for (const key of backupOnlyKeys) targets[key] = ['operations-worker'];
+	}
 	for (const [key, names] of Object.entries(targets)) {
 		check(
 			typeof source[key] === 'string',

@@ -16,11 +16,11 @@ import { join } from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { Transform } from 'node:stream';
 import { DatabaseBackupTarget } from '../scheduled-jobs/scheduled-jobs.types';
+import { DatabaseBackupMigrationManifestService } from './database-backup-migration-manifest.service';
 import {
-	DATABASE_RESTORE_TARGETS,
-	DatabaseRestoreTarget
-} from '../restore/database-restore.contract';
-import { DatabaseRestoreMigrationManifestService } from '../restore/database-restore-migration-manifest.service';
+	DATABASE_BACKUP_MAX_FILE_SIZE_BYTES,
+	isDatabaseBackupProvenanceTarget
+} from './database-backup.contract';
 import {
 	TelegramDocumentReceipt,
 	TelegramTransportService
@@ -30,7 +30,7 @@ import {
 	SignedDatabaseBackupProvenance
 } from './database-backup-provenance.service';
 
-const MAX_FILE_SIZE = 49 * 1024 * 1024;
+const MAX_FILE_SIZE = DATABASE_BACKUP_MAX_FILE_SIZE_BYTES;
 const URL_KEYS: Record<DatabaseBackupTarget, string> = {
 	'notification-delivery': 'NOTIFICATION_DELIVERY_BACKUP_URL',
 	campaigns: 'CAMPAIGNS_BACKUP_URL',
@@ -40,7 +40,11 @@ const URL_KEYS: Record<DatabaseBackupTarget, string> = {
 	identity: 'IDENTITY_BACKUP_URL',
 	platform: 'PLATFORM_BACKUP_URL',
 	support: 'SUPPORT_BACKUP_URL',
-	operations: 'OPERATIONS_BACKUP_URL'
+	operations: 'OPERATIONS_BACKUP_URL',
+	'crm-access': 'CRM_ACCESS_BACKUP_URL',
+	'crm-intake': 'CRM_INTAKE_BACKUP_URL',
+	'crm-customers': 'CRM_CUSTOMERS_BACKUP_URL',
+	'crm-sales': 'CRM_SALES_BACKUP_URL'
 };
 const DATABASE_TARGETS: Record<
 	DatabaseBackupTarget,
@@ -57,7 +61,14 @@ const DATABASE_TARGETS: Record<
 	identity: { database: 'winwidget_identity', schema: 'identity' },
 	platform: { database: 'winwidget_platform', schema: 'platform' },
 	support: { database: 'winwidget_support', schema: 'support' },
-	operations: { database: 'winwidget_operations', schema: 'operations' }
+	operations: { database: 'winwidget_operations', schema: 'operations' },
+	'crm-access': { database: 'winwidget_crm_access', schema: 'crm_access' },
+	'crm-intake': { database: 'winwidget_crm_intake', schema: 'crm_intake' },
+	'crm-customers': {
+		database: 'winwidget_crm_customers',
+		schema: 'crm_customers'
+	},
+	'crm-sales': { database: 'winwidget_crm_sales', schema: 'crm_sales' }
 };
 
 export interface DatabaseBackupResult {
@@ -82,7 +93,7 @@ export class DatabaseBackupService implements OnModuleInit {
 		private readonly config: ConfigService,
 		private readonly telegram: TelegramTransportService,
 		private readonly provenance: DatabaseBackupProvenanceService,
-		private readonly manifests: DatabaseRestoreMigrationManifestService
+		private readonly manifests: DatabaseBackupMigrationManifestService
 	) {}
 
 	async onModuleInit(): Promise<void> {
@@ -142,14 +153,9 @@ export class DatabaseBackupService implements OnModuleInit {
 			await this.run('pg_restore', ['--list', filePath], null, signal);
 			const file = await stat(filePath);
 			const fileSha256 = await this.sha256(filePath);
-			const restoreTarget = DATABASE_RESTORE_TARGETS.includes(
-				target as DatabaseRestoreTarget
-			)
-				? (target as DatabaseRestoreTarget)
-				: null;
 			let backupProvenance: SignedDatabaseBackupProvenance | null = null;
 			let provenancePath: string | null = null;
-			if (restoreTarget) {
+			if (isDatabaseBackupProvenanceTarget(target)) {
 				const keyId = this.requiredConfig(
 					'DATABASE_BACKUP_PROVENANCE_KEY_ID'
 				);
@@ -164,7 +170,7 @@ export class DatabaseBackupService implements OnModuleInit {
 				backupProvenance = await this.provenance.sign(
 					{
 						backupJobId: jobId,
-						target: restoreTarget,
+						target,
 						databaseName: database.name,
 						schema: database.schema,
 						fileName,
@@ -173,7 +179,7 @@ export class DatabaseBackupService implements OnModuleInit {
 						artifactCreatedAt: new Date().toISOString(),
 						backupJobCreatedAt: input.backupJobCreatedAt,
 						servicesSha: revision,
-						migrationManifestSha: this.manifests.sha256(restoreTarget),
+						migrationManifestSha: this.manifests.sha256(target),
 						imageRevision: revision,
 						pgDumpVersion,
 						pgRestoreVersion
@@ -282,6 +288,29 @@ export class DatabaseBackupService implements OnModuleInit {
 		const password = url.password
 			? decodeURIComponent(url.password)
 			: null;
+		if (target.startsWith('crm-')) {
+			const allowedParameters = new Set([
+				'schema',
+				'sslmode',
+				'connect_timeout',
+				'application_name',
+				'connection_limit',
+				'pool_timeout',
+				'pgbouncer',
+				'statement_cache_size'
+			]);
+			const parameters = [...url.searchParams.keys()];
+			if (
+				decodeURIComponent(url.username) !==
+					`${expected.database}_backup` ||
+				new Set(parameters).size !== parameters.length ||
+				parameters.some(parameter => !allowedParameters.has(parameter))
+			) {
+				throw new Error(
+					`${key} has an unexpected backup principal or parameter`
+				);
+			}
+		}
 		if (!password || ['change_me', 'XYZXYZXYZ'].includes(password)) {
 			throw new Error(`${key} is not configured securely`);
 		}

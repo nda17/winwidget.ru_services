@@ -92,6 +92,39 @@ describe('OperationsRabbitMqService consumer readiness', () => {
 		expect(bindQueue).not.toHaveBeenCalled();
 	});
 
+	it('runs one maintenance job at a time without consuming restore queues', async () => {
+		const service = new OperationsRabbitMqService(
+			{} as ConfigService,
+			{
+				rabbitEnabled: true,
+				workerEnabled: true,
+				restoreWorkerEnabled: false
+			} as OperationsRuntimeService
+		);
+		const checkQueue = jest.fn().mockResolvedValue(undefined);
+		const prefetch = jest.fn().mockResolvedValue(undefined);
+		const channel = {
+			checkQueue,
+			prefetch,
+			consume: jest.fn().mockResolvedValue({ consumerTag: 'maintenance' })
+		} as unknown as ConfirmChannel;
+		const internal = service as unknown as RabbitInternals;
+		internal.topologyReady = true;
+		internal.channel = {
+			addSetup: jest.fn(async setup => setup(channel))
+		} as unknown as ChannelWrapper;
+
+		await service.consumeScheduledJobs(async () => 'ack');
+
+		expect(prefetch).toHaveBeenCalledTimes(1);
+		expect(prefetch).toHaveBeenCalledWith(1);
+		expect(checkQueue.mock.calls.map(([queue]) => queue)).toEqual([
+			OPERATIONS_SCHEDULED_JOB_QUEUE,
+			OPERATIONS_SCHEDULED_JOB_RETRY_QUEUE,
+			OPERATIONS_SCHEDULED_JOB_DLQ
+		]);
+	});
+
 	it('gives the restore-worker only the database restore queue family', async () => {
 		const service = new OperationsRabbitMqService(
 			{} as ConfigService,

@@ -64,7 +64,7 @@ export class MaintenanceSchedulerService
 				await this.alerts.resolve('database-backup-scheduler');
 				return;
 			}
-			const period = this.moscowPeriod(now);
+			const today = this.moscowPeriod(now);
 			const [hour, minute] = settings.databaseBackupTime
 				.split(':')
 				.map(Number);
@@ -79,10 +79,16 @@ export class MaintenanceSchedulerService
 				throw new Error('Database backup schedule is invalid');
 			}
 			for (const target of DATABASE_BACKUP_TARGETS) {
+				const delayMinutes =
+					hour * 60 + minute + DATABASE_BACKUP_DELAY_MINUTES[target];
+				// A late base time can move a target into the next Moscow day.
+				// Keep the original period key instead of losing that run at midnight.
+				const period =
+					delayMinutes >= 24 * 60
+						? this.moscowPeriod(new Date(today.start.getTime() - 1))
+						: today;
 				const scheduledFor = new Date(
-					period.start.getTime() +
-						(hour * 60 + minute + DATABASE_BACKUP_DELAY_MINUTES[target]) *
-							60_000
+					period.start.getTime() + delayMinutes * 60_000
 				);
 				if (scheduledFor.getTime() > now.getTime()) continue;
 				await this.jobs.enqueueUnique({

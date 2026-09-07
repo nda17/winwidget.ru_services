@@ -45,6 +45,10 @@ jobs:
         run: node --test .github/scripts/validate-crm-compose.test.mjs
       - name: Verify service-owned CRM database access contracts
         run: node --test deploy/crm/database-access.test.mjs
+      - name: Verify CRM backup-only endpoints and immutable manifests
+        run: |
+          node --test .github/scripts/crm-backup-boundary.test.cjs
+          node apps/operations/scripts/database-backup-migration-manifests.mjs --check
 
   service:
     name: ${{ matrix.app }}
@@ -312,6 +316,17 @@ jobs:
           OPERATIONS_BACKLOG_TEST_POSTGRES_USER: operations_control_ledger_superuser
           OPERATIONS_BACKLOG_TEST_ALLOW_MUTATION: 'true'
         run: node apps/operations/test/integration/admin-backlog-removal-postgres18.integration.mjs
+      - name: Build real Operations services for backup recovery checks
+        run: |
+          pnpm --dir apps/operations run prisma:generate
+          pnpm --dir apps/operations run build
+      - name: Prove backup claim recovery with isolated PostgreSQL roles
+        env:
+          OPERATIONS_BACKUP_CLAIM_TEST_ALLOW_MUTATION: 'true'
+          OPERATIONS_BACKUP_CLAIM_TEST_CONTAINER_ID: ${{ job.services.postgres.id }}
+          OPERATIONS_BACKUP_CLAIM_TEST_POSTGRES_USER: operations_control_ledger_superuser
+          OPERATIONS_BACKUP_CLAIM_TEST_POSTGRES_PORT: '5432'
+        run: pnpm --dir apps/operations run test:integration:backup-claim
 
   service-integration:
     name: Service integration / ${{ matrix.app }}

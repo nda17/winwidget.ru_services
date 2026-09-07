@@ -404,7 +404,17 @@ export const loadArtifactPairs = async (
 		}
 		const envelope = await provenance.verify(signed);
 		const evidence = envelope.evidence;
-		if (pairs.has(evidence.target)) {
+		if (
+			!DATABASE_RESTORE_TARGETS.includes(
+				evidence.target as DatabaseRestoreTarget
+			)
+		) {
+			throw new Error(
+				'Backup provenance target is not permitted for restore rehearsal'
+			);
+		}
+		const target = evidence.target as DatabaseRestoreTarget;
+		if (pairs.has(target)) {
 			throw new Error('Artifact directory contains a duplicate target');
 		}
 		if (backupJobIds.has(evidence.backupJobId)) {
@@ -421,7 +431,7 @@ export const loadArtifactPairs = async (
 		) {
 			throw new Error('Backup provenance revision binding is invalid');
 		}
-		const manifestSha = manifests.sha256(evidence.target);
+		const manifestSha = manifests.sha256(target);
 		if (evidence.migrationManifestSha !== manifestSha) {
 			throw new Error('Backup provenance migration binding is invalid');
 		}
@@ -463,8 +473,8 @@ export const loadArtifactPairs = async (
 		) {
 			throw new Error('Backup provenance envelope SHA-256 is invalid');
 		}
-		pairs.set(evidence.target, {
-			target: evidence.target,
+		pairs.set(target, {
+			target,
 			dumpPath,
 			sidecarPath,
 			sourceSha256,

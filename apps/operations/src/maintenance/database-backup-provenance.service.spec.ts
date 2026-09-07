@@ -15,6 +15,12 @@ import {
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import fileSystem from 'node:fs/promises';
+import { DATABASE_RESTORE_TARGETS } from '../restore/database-restore.contract';
+import { loadArtifactPairs } from '../restore/database-restore-artifact-rehearsal';
+import { DatabaseRestoreArtifactValidatorService } from '../restore/database-restore-artifact-validator.service';
+import { DatabaseRestoreMigrationManifestService } from '../restore/database-restore-migration-manifest.service';
+import { DATABASE_BACKUP_PROVENANCE_TARGETS } from './database-backup.contract';
 import {
 	canonicalizeDatabaseBackupProvenanceEnvelope,
 	DATABASE_BACKUP_PROVENANCE_DOMAIN,
@@ -83,6 +89,7 @@ describe('DatabaseBackupProvenanceService', () => {
 	});
 
 	afterEach(async () => {
+		jest.restoreAllMocks();
 		await rm(directory, { recursive: true, force: true });
 	});
 
@@ -132,6 +139,148 @@ describe('DatabaseBackupProvenanceService', () => {
 		expect(second).toEqual(first);
 	});
 
+	it.each(DATABASE_RESTORE_TARGETS)(
+		'preserves legacy canonical bytes and signature for %s',
+		async target => {
+			const schema = target.replace(/-/g, '_');
+			const input = {
+				...evidence(),
+				target,
+				databaseName: `winwidget_${schema}`,
+				schema,
+				fileName: `winwidget-${target}-db-2026-08-31T10-01-00-000Z.dump`
+			};
+			const legacyCanonical = JSON.stringify({
+				domain: 'winwidget.operations.database-backup-provenance.v1',
+				evidence: Object.fromEntries(
+					Object.keys(input)
+						.sort()
+						.map(key => [key, input[key as keyof typeof input]])
+				),
+				keyId: KEY_ID,
+				schemaVersion: 1,
+				signatureAlgorithm: 'Ed25519'
+			});
+			const signed = await service.sign(input, KEY_ID, privateKeyPath);
+			expect(
+				canonicalizeDatabaseBackupProvenanceEnvelope(signed.envelope)
+			).toBe(legacyCanonical);
+			expect(signed.envelopeSha256).toBe(
+				createHash('sha256').update(legacyCanonical).digest('hex')
+			);
+			expect(signed.signatureEd25519Base64).toBe(
+				signEd25519(
+					null,
+					Buffer.concat([
+						Buffer.from(
+							'winwidget.operations.database-backup-provenance.v1'
+						),
+						Buffer.from([0]),
+						Buffer.from(legacyCanonical)
+					]),
+					privateKey
+				).toString('base64')
+			);
+		}
+	);
+
+	it.each([
+		'crm-access',
+		'crm-intake',
+		'crm-customers',
+		'crm-sales'
+	] as const)(
+		'signs and verifies %s without authorizing restore',
+		async target => {
+			const schema = target.replace(/-/g, '_');
+			const signed = await service.sign(
+				{
+					...evidence(),
+					target,
+					databaseName: `winwidget_${schema}`,
+					schema,
+					fileName: `winwidget-${target}-db-2026-08-31T10-01-00-000Z.dump`
+				},
+				KEY_ID,
+				privateKeyPath
+			);
+			await expect(service.verify(signed)).resolves.toEqual(
+				signed.envelope
+			);
+			expect(DATABASE_BACKUP_PROVENANCE_TARGETS).toContain(target);
+			expect(DATABASE_RESTORE_TARGETS).not.toContain(target);
+		}
+	);
+
+	it('rejects a genuinely signed CRM sidecar before rehearsal manifest access or dump processing', async () => {
+		const signed = await service.sign(
+			{
+				...evidence(),
+				target: 'crm-access',
+				databaseName: 'winwidget_crm_access',
+				schema: 'crm_access',
+				fileName: 'winwidget-crm-access-db-2026-08-31T10-01-00-000Z.dump'
+			},
+			KEY_ID,
+			privateKeyPath
+		);
+		const inputDirectory = join(directory, 'artifacts');
+		await fileSystem.mkdir(inputDirectory);
+		const names = [
+			signed.envelope.evidence.fileName,
+			...Array.from({ length: 6 }, (_, index) => `z-legacy-${index}.dump`)
+		];
+		for (const name of names) {
+			await writeFile(join(inputDirectory, name), 'PGDMP');
+			await writeFile(
+				join(inputDirectory, `${name}.provenance.json`),
+				JSON.stringify(signed)
+			);
+		}
+		// Only emulate the container-owned readonly mount metadata; signatures,
+		// directory enumeration and sidecar parsing use the real temporary files.
+		const realLstat = fileSystem.lstat;
+		jest.spyOn(fileSystem, 'lstat').mockImplementation((async (
+			path: Parameters<typeof realLstat>[0]
+		) => {
+			const metadata = await realLstat(path);
+			return Object.assign(metadata, {
+				uid: 1001,
+				gid: 1001,
+				mode: 0o100400
+			});
+		}) as typeof fileSystem.lstat);
+		const manifests = { sha256: jest.fn() };
+		const artifacts = { sha256: jest.fn(), assertChecksum: jest.fn() };
+		const verify = jest.spyOn(service, 'verify');
+		await expect(
+			loadArtifactPairs(
+				{
+					servicesSha: evidence().servicesSha,
+					inputDirectory,
+					workDirectory: join(directory, 'never-created'),
+					postgresUser: 'unused',
+					postgresDatabase: 'unused',
+					postgresPasswordFile: 'unused',
+					postgresPassword: 'unused'
+				},
+				service,
+				artifacts as unknown as DatabaseRestoreArtifactValidatorService,
+				manifests as unknown as DatabaseRestoreMigrationManifestService,
+				{
+					pgDump: evidence().pgDumpVersion,
+					pgRestore: evidence().pgRestoreVersion
+				}
+			)
+		).rejects.toThrow('not permitted for restore rehearsal');
+		expect(verify).toHaveBeenCalledTimes(1);
+		expect(manifests.sha256).not.toHaveBeenCalled();
+		expect(artifacts.sha256).not.toHaveBeenCalled();
+		await expect(
+			fileSystem.stat(join(directory, 'never-created'))
+		).rejects.toMatchObject({ code: 'ENOENT' });
+	});
+
 	it('rejects payload tampering even when an attacker recomputes the envelope SHA', async () => {
 		const signed = JSON.parse(
 			JSON.stringify(
@@ -171,6 +320,23 @@ describe('DatabaseBackupProvenanceService', () => {
 	});
 
 	it.each([
+		['an unsigned Billing target', { ...evidence(), target: 'billing' }],
+		[
+			'an unsigned Operations target',
+			{ ...evidence(), target: 'operations' }
+		],
+		[
+			'CRM database mismatch',
+			{ ...evidence(), target: 'crm-access', schema: 'crm_access' }
+		],
+		[
+			'CRM schema mismatch',
+			{
+				...evidence(),
+				target: 'crm-access',
+				databaseName: 'winwidget_crm_access'
+			}
+		],
 		['an extra evidence key', { ...evidence(), extra: true }],
 		[
 			'a database/target mismatch',

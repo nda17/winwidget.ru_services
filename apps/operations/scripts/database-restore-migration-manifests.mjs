@@ -6,8 +6,8 @@ import {
 	readdir,
 	writeFile
 } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const TARGETS = [
 	'notification-delivery',
@@ -37,7 +37,10 @@ const exactKeys = (value, expected, label) => {
 	}
 };
 
-const collectTarget = async target => {
+export const collectTarget = async target => {
+	if (!/^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/.test(target)) {
+		throw new Error('Migration manifest target is invalid');
+	}
 	const migrationsDirectory = join(
 		APPS_DIRECTORY,
 		target,
@@ -104,7 +107,7 @@ const collectTarget = async target => {
 	};
 };
 
-const generate = async () => {
+export const generate = async () => {
 	const targets = {};
 	for (const target of TARGETS)
 		targets[target] = await collectTarget(target);
@@ -151,4 +154,9 @@ const run = async () => {
 	);
 };
 
-await run();
+if (
+	process.argv[1] &&
+	pathToFileURL(resolve(process.argv[1])).href === import.meta.url
+) {
+	await run();
+}

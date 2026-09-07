@@ -298,7 +298,9 @@ export class OperationsRabbitMqService
 		if (!this.channel) throw new Error('RabbitMQ channel is unavailable');
 		await this.channel.addSetup(async (channel: ConfirmChannel) => {
 			this.jobConsumerReady = false;
-			await channel.prefetch(this.runtime.restoreWorkerEnabled ? 1 : 10);
+			// A dump may use almost all of the worker's bounded /tmp volume.
+			// Serialize maintenance jobs; audit consumers keep their own prefetch.
+			await channel.prefetch(1);
 			await channel.checkQueue(queue);
 			await channel.checkQueue(retryQueue);
 			await channel.checkQueue(deadLetterQueue);

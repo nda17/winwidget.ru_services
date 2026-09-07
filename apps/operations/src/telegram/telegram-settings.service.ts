@@ -231,6 +231,22 @@ export class TelegramSettingsService {
 				DATABASE_BACKUP_DELAY_MINUTES.operations,
 			operationsDatabaseBackupTime: schedule.operations,
 			operationsDatabaseBackupTimeLabel: `${schedule.operations} МСК`,
+			crmAccessDatabaseBackupDelayMinutes:
+				DATABASE_BACKUP_DELAY_MINUTES['crm-access'],
+			crmAccessDatabaseBackupTime: schedule['crm-access'],
+			crmAccessDatabaseBackupTimeLabel: `${schedule['crm-access']} МСК`,
+			crmIntakeDatabaseBackupDelayMinutes:
+				DATABASE_BACKUP_DELAY_MINUTES['crm-intake'],
+			crmIntakeDatabaseBackupTime: schedule['crm-intake'],
+			crmIntakeDatabaseBackupTimeLabel: `${schedule['crm-intake']} МСК`,
+			crmCustomersDatabaseBackupDelayMinutes:
+				DATABASE_BACKUP_DELAY_MINUTES['crm-customers'],
+			crmCustomersDatabaseBackupTime: schedule['crm-customers'],
+			crmCustomersDatabaseBackupTimeLabel: `${schedule['crm-customers']} МСК`,
+			crmSalesDatabaseBackupDelayMinutes:
+				DATABASE_BACKUP_DELAY_MINUTES['crm-sales'],
+			crmSalesDatabaseBackupTime: schedule['crm-sales'],
+			crmSalesDatabaseBackupTimeLabel: `${schedule['crm-sales']} МСК`,
 			databaseBackupSchedule: schedule,
 			databaseBackupLastSentPeriodStart:
 				settings.databaseBackupLastSentPeriodStart?.toISOString() ?? null,

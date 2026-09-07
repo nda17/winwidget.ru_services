@@ -420,6 +420,8 @@ for (const path of [
 exactFiles('scripts', ['generate-jwt-keyset.mjs', 'test-workers-bootstrap-recovery.mjs']);
 exactFiles('.github/workflows', ['ci.yml']);
 exactFiles('.github/scripts', [
+	'crm-backup-boundary.cjs',
+	'crm-backup-boundary.test.cjs',
 	'static-check-services-lifecycle.sh',
 	'test-crm-bootstrap-failure.mjs',
 	'validate-crm-compose.mjs',

@@ -36,7 +36,7 @@ describe('ReportingPolicyService', () => {
 		await expect(
 			service.reserve({
 				changeId: CHANGE_ID,
-				scheduleTime: '04:30',
+				scheduleTime: '05:30',
 				expectedScheduleGeneration: '7',
 				actorId: 'reporting-scheduler'
 			})
@@ -52,7 +52,7 @@ describe('ReportingPolicyService', () => {
 			where: { id: 'singleton' },
 			data: {
 				pendingChangeId: CHANGE_ID,
-				pendingTime: '04:30',
+				pendingTime: '05:30',
 				pendingGeneration: 8n
 			}
 		});
@@ -61,7 +61,7 @@ describe('ReportingPolicyService', () => {
 			{
 				...policy,
 				pendingChangeId: CHANGE_ID,
-				pendingTime: '04:30',
+				pendingTime: '05:30',
 				pendingGeneration: 8n
 			}
 		);
@@ -77,7 +77,7 @@ describe('ReportingPolicyService', () => {
 		).toHaveBeenLastCalledWith({
 			where: { id: 'singleton' },
 			data: {
-				reservationTime: '04:30',
+				reservationTime: '05:30',
 				reservationGeneration: 8n,
 				confirmedChangeId: CHANGE_ID,
 				pendingChangeId: null,
