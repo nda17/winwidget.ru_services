@@ -426,11 +426,18 @@ exactFiles('.github/scripts', [
 	'test-crm-bootstrap-failure.mjs',
 	'validate-crm-compose.mjs',
 	'validate-crm-compose.test.mjs',
+	'validate-crm-reminders-compose.mjs',
+	'validate-crm-reminders-compose.test.mjs',
 	'validate-production-compose.cjs',
 	'validate-production-compose.sh',
 	'verify-production-audit.cjs'
 ]);
-exactFiles('deploy', ['docker-compose.prod.yml', 'docker-compose.crm.yml']);
+exactFiles('deploy', [
+	'docker-compose.prod.yml',
+	'docker-compose.crm.yml',
+	'docker-compose.crm-reminders.yml',
+	'docker-compose.notification-reminders.yml'
+]);
 
 const servicesWorkflow = readFileSync('.github/workflows/ci.yml', 'utf8');
 for (const otpGateName of [
