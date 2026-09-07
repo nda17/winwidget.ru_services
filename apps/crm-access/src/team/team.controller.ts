@@ -16,6 +16,7 @@ import {
 	CreateInvitationDto,
 	CreateTeamDto,
 	SetMemberTeamsDto,
+	TeamOptionsQueryDto,
 	TeamQueryDto,
 	UpdateTeamDto,
 	VersionedTeamCommandDto
@@ -74,6 +75,14 @@ export class CrmTeamController {
 		@Query() query: TeamQueryDto
 	) {
 		return this.team.invitations(token, query);
+	}
+	@Get('options')
+	@Header('Cache-Control', 'no-store')
+	options(
+		@Headers('authorization') token: string | undefined,
+		@Query() query: TeamOptionsQueryDto
+	) {
+		return this.team.options(token, query);
 	}
 
 	@Post('teams')

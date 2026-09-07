@@ -658,8 +658,86 @@ try {
 		),
 		error => error?.meta?.code === '42501'
 	);
+	// The Intake lookup uses real owner SQL, not a mock directory or client IDs.
+	const lookupTeams = Array.from({ length: 21 }, (_, index) => ({
+		id: randomUUID(),
+		workspaceId,
+		name: `Lookup ${String(index).padStart(2, '0')}`
+	}));
+	const archived = {
+		id: randomUUID(),
+		workspaceId,
+		name: 'Archived lookup',
+		archivedAt: new Date()
+	};
+	const foreign = {
+		id: randomUUID(),
+		workspaceId: randomUUID(),
+		name: 'Foreign lookup'
+	};
+	const unassigned = {
+		id: randomUUID(),
+		workspaceId,
+		name: 'Other department'
+	};
+	await prisma.crmTeam.createMany({
+		data: [...lookupTeams, archived, foreign, unassigned]
+	});
+	actor = {
+		...actor,
+		role: 'MANAGER',
+		state: 'READ_ONLY',
+		permissions: ['intake:read'],
+		teamIds: [...lookupTeams, archived, foreign].map(item => item.id)
+	};
+	const lookupQuery = {
+		workspaceId,
+		page: 2,
+		pageSize: 20,
+		selectedId: lookupTeams[0].id
+	};
+	const lookup = await teams.options('Bearer local-test', lookupQuery);
+	assert.equal(lookup.total, 21);
+	assert.deepEqual(lookup.items, [
+		{ id: lookupTeams[20].id, name: lookupTeams[20].name }
+	]);
+	assert.deepEqual(lookup.selected, {
+		id: lookupTeams[0].id,
+		name: lookupTeams[0].name
+	});
+	for (const selectedId of [
+		archived.id,
+		foreign.id,
+		unassigned.id,
+		randomUUID()
+	]) {
+		assert.equal(
+			(
+				await teams.options('Bearer local-test', {
+					...lookupQuery,
+					selectedId
+				})
+			).selected,
+			null
+		);
+	}
+	await assert.rejects(
+		teams.teams('Bearer local-test', lookupQuery),
+		error => error.status === 403
+	);
+	actor = { ...actor, teamIds: [] };
+	assert.deepEqual(await teams.options('Bearer local-test', lookupQuery), {
+		schemaVersion: 1,
+		workspaceId,
+		subject: ownerSubject,
+		page: 2,
+		pageSize: 20,
+		total: 0,
+		items: [],
+		selected: null
+	});
 	console.log(
-		'PASS WinCRM team PostgreSQL18: least privilege, page directory binding, parallel command/acceptance replay, FIFO Trial quota including owner, disabled/pending no seat, tenant joins, read-only deny, revoke race, receipt-before-effect, real 30s durable retry across publisher recreation, replay, unpublished legacy conversion (transport double)'
+		'PASS WinCRM team PostgreSQL18: least privilege, page directory binding, scoped department names and selected pagination, archive/foreign/revoked exclusion, parallel command/acceptance replay, FIFO Trial quota including owner, disabled/pending no seat, tenant joins, read-only deny, revoke race, receipt-before-effect, real 30s durable retry across publisher recreation, replay, unpublished legacy conversion (transport double)'
 	);
 } catch (error) {
 	console.error(

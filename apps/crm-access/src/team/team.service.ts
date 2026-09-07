@@ -24,6 +24,7 @@ import type {
 	CreateInvitationDto,
 	CreateTeamDto,
 	SetMemberTeamsDto,
+	TeamOptionsQueryDto,
 	TeamQueryDto,
 	UpdateTeamDto,
 	VersionedTeamCommandDto
@@ -158,6 +159,56 @@ export class CrmTeamService {
 			items: items.map(teamDto)
 		};
 	}
+	async options(
+		authorization: string | undefined,
+		query: TeamOptionsQueryDto
+	) {
+		const actor = await this.auth.authorize(
+			authorization,
+			query.workspaceId,
+			'crm-intake'
+		);
+		if (!actor.permissions.includes('intake:read'))
+			throw new ForbiddenException('Intake read access is required');
+		// This is not the administrative directory: only current assignable IDs
+		// from server authorization may disclose their names, even for ALL scope.
+		const where = {
+			workspaceId: actor.workspaceId,
+			archivedAt: null,
+			id: { in: actor.teamIds }
+		};
+		const select = { id: true, name: true } as const;
+		return this.prisma.$transaction(
+			async tx => {
+				const items = await tx.crmTeam.findMany({
+					where,
+					select,
+					skip: (query.page - 1) * query.pageSize,
+					take: query.pageSize,
+					orderBy: [{ name: 'asc' }, { id: 'asc' }]
+				});
+				const total = await tx.crmTeam.count({ where });
+				const selected = query.selectedId
+					? await tx.crmTeam.findFirst({
+							where: { ...where, AND: { id: query.selectedId } },
+							select
+						})
+					: null;
+				return {
+					schemaVersion: 1,
+					workspaceId: actor.workspaceId,
+					subject: actor.subject,
+					page: query.page,
+					pageSize: query.pageSize,
+					total,
+					items,
+					selected
+				};
+			},
+			{ isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead }
+		);
+	}
+
 	async deliveries(
 		authorization: string | undefined,
 		query: TeamQueryDto

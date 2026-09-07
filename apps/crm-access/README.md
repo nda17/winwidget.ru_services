@@ -202,6 +202,24 @@ Intake authorization DTO плюс `ownerSubject`, `Cache-Control: no-store`.
 структуры разрешён только `OWNER`/`CRM_ADMIN`, включая `READ_ONLY`.
 `access:read-team` не раскрывает данные менеджерам или аналитикам.
 
+Отдельный `GET options?workspaceId=…&page=1&pageSize=20&selectedId=…`
+возвращает только `{id,name}` доступных для входящих обращений отделов.
+Матрица: OWNER/CRM_ADMIN — все собственные активные отделы;
+TEAM_LEAD/MANAGER — только текущие `teamIds` серверной авторизации;
+ANALYST, отключённый сотрудник и чужой workspace — отказ. Чтение доступно
+при READ_ONLY, но не разрешает изменения. Административные списки и команды
+сохраняют прежние права, новая ручка их не заменяет.
+
+Ответ: `schemaVersion:1`, `workspaceId`, `subject`, `page`, `pageSize`,
+`total`, `items:[{id,name}]`, `selected:{id,name}|null`.
+Необязательный `selectedId` — UUID v4, проверяемый тем же фильтром доступа:
+имя выбранного отдела доступно и на другой странице; для чужого, архивного
+или недоступного ID возвращается `null`, без раскрытия существования.
+Страница, количество и выбранное имя читаются в одном Repeatable Read
+snapshot CRM Access. Заголовок — `Cache-Control: no-store`.
+Lookup ничего не записывает и не публикует RabbitMQ events. Команды Intake
+по-прежнему получают UUID и независимо перепроверяют доступ на сервере.
+
 Команды: `POST teams`, `teams/:id/rename`, `teams/:id/archive`,
 `invitations`, `invitations/:id/revoke`,
 `members/:id/change-role`, `members/:id/set-teams`, `members/:id/disable`,

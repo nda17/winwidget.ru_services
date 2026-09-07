@@ -36,6 +36,12 @@ export class TeamQueryDto {
 	pageSize = 20;
 }
 
+export class TeamOptionsQueryDto extends TeamQueryDto {
+	@IsOptional()
+	@IsUUID('4')
+	selectedId?: string;
+}
+
 export class TeamCommandDto {
 	@Equals(1)
 	schemaVersion!: 1;
