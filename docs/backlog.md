@@ -155,10 +155,8 @@ backend/business gates MVP.
 - при запуске проверить реальные caller/receiver пары токенов и независимую
   backend-авторизацию доменных команд; синхронизированные private env и
   `/crm/access/permissions` сами по себе не подтверждают работающие HTTP-вызовы;
-- держать публичные CRM routes закрытыми до согласованного применения Billing
-  provenance migration/runtime и `crm-access` migration/runtime: новый exact
-  Billing-контракт несовместим со старым parser, а новые Billing `NOT NULL`
-  поля нельзя оставлять со старым Trial write-path;
+- держать публичные CRM routes закрытыми до запуска совместимого `crm-access`
+  runtime: новый exact Billing-контракт нельзя подключать к старому parser;
 - добавить точные Gateway route prefixes `/api/v1/crm/access` -> `crm-access`,
   `/api/v1/crm/templates` и `/api/v1/crm/sales` -> `crm-sales`,
   `/api/v1/crm/customers` -> `crm-customers`, `/api/v1/crm/intake` -> `crm-intake`,
@@ -191,14 +189,8 @@ backend/business gates MVP.
   Для удалённых HTTP-вызовов — HTTPS private ingress, без
   redirects и отключения TLS verification. Не раскрывать internal routes в
   публичном Gateway; не подменять удалённые адреса localhost;
-- проверить PostgreSQL 18 migrations, Identity backfill существующих
-  пользователей, вход через основной сайт, явную идемпотентную активацию Trial
+- проверить вход через основной сайт, явную идемпотентную активацию Trial
   и fail-closed доступ при недоступности Identity/Billing;
-- исключить окно между Identity backfill и переключением нового runtime:
-  остановить создание пользователей старой ревизией через drain/write-fence
-  либо выполнить доказанную идемпотентную reconciliation после её остановки;
-  rollout блокируется, пока любой пользователь, созданный в этом окне, может
-  остаться без личного workspace и OWNER membership;
 - до публикации каталога закрепить immutable fingerprint каждой пары
   `templateKey@version`; после публикации не переписывать v1, а выпускать новую
   версию с точной установкой выбранной пары;
