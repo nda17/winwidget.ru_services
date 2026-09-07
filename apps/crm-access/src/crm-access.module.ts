@@ -42,6 +42,8 @@ import { BillingCommerceClient } from './billing/billing-commerce.client';
 import { CrmBillingReconciliationService } from './billing/billing-reconciliation.service';
 import { CrmWorkspaceBrandingController } from './branding/workspace-branding.controller';
 import { CrmWorkspaceBrandingService } from './branding/workspace-branding.service';
+import { TaskReminderRecipientsController } from './team/task-reminder-recipients.controller';
+import { TaskReminderRecipientsService } from './team/task-reminder-recipients.service';
 
 const role = parseCrmAccessRole(process.env.CRM_ACCESS_PROCESS_ROLE);
 
@@ -63,6 +65,7 @@ const role = parseCrmAccessRole(process.env.CRM_ACCESS_PROCESS_ROLE);
 					CrmWorkspaceBrandingController,
 					CrmAssigneeController,
 					CrmAssigneeAuthorizationController,
+					TaskReminderRecipientsController,
 					CrmBillingController,
 					BillingOperationController
 				]
@@ -80,6 +83,7 @@ const role = parseCrmAccessRole(process.env.CRM_ACCESS_PROCESS_ROLE);
 		CrmEmployeeProfileService,
 		CrmWorkspaceBrandingService,
 		CrmAssigneeService,
+		TaskReminderRecipientsService,
 		IdentityInvitationClient,
 		CrmTeamAdmissionService,
 		CrmTeamRabbitService,

@@ -7,6 +7,7 @@ import {
 import { randomUUID } from 'node:crypto';
 import {
 	AssigneeDirectoryDto,
+	ReminderDirectoryDto,
 	WorkspaceDirectoryController
 } from './workspace-directory.controller';
 import { IDENTITY_GLOBAL_PREFIX_EXCLUDES } from '../runtime/identity-http.config';
@@ -42,6 +43,120 @@ describe('Scoped WinCRM member directory', () => {
 			controller: new WorkspaceDirectoryController(prisma as never)
 		};
 	};
+	it('keeps reminder destinations private, exact and read-only', async () => {
+		const { prisma, controller } = setup();
+		prisma.workspaceMember.findMany.mockResolvedValueOnce([
+			{
+				id: membershipId,
+				userId: 'subject',
+				role: 'MEMBER',
+				user: {
+					authIdentities: [{ value: ' Verified@Example.test ' }],
+					telegramNotificationChannel: {
+						chatId: '12345',
+						isActive: true,
+						disabledAt: null
+					}
+				}
+			}
+		] as never);
+		await expect(
+			controller.reminderDirectory(workspaceId, {
+				schemaVersion: 1,
+				membershipIds: [membershipId],
+				includeOwner: false
+			})
+		).resolves.toEqual({
+			schemaVersion: 1,
+			workspaceId,
+			items: [
+				{
+					membershipId,
+					subject: 'subject',
+					workspaceRole: 'MEMBER',
+					email: 'verified@example.test',
+					telegramChatId: '12345'
+				}
+			]
+		});
+		expect(prisma.$executeRawUnsafe).toHaveBeenCalledWith(
+			'SET TRANSACTION READ ONLY'
+		);
+		expect(prisma.workspaceMember.findMany).toHaveBeenCalledWith(
+			expect.objectContaining({
+				where: {
+					workspaceId,
+					status: 'ACTIVE',
+					user: { status: 'ACTIVE', deletedAt: null },
+					OR: [{ id: { in: [membershipId] } }]
+				}
+			})
+		);
+		expect(IDENTITY_GLOBAL_PREFIX_EXCLUDES).toContainEqual({
+			path: 'internal/v1/crm-access/workspaces/:workspaceId/reminder-directory',
+			method: RequestMethod.POST
+		});
+	});
+	it.each([
+		{ chatId: '12345', isActive: false, disabledAt: null },
+		{ chatId: '12345', isActive: true, disabledAt: new Date() },
+		{ chatId: '-12345', isActive: true, disabledAt: null },
+		null
+	])(
+		'does not expose a disabled, missing or non-personal Telegram channel',
+		async channel => {
+			const { prisma, controller } = setup();
+			prisma.workspaceMember.findMany.mockResolvedValueOnce([
+				{
+					id: membershipId,
+					userId: 'subject',
+					role: 'MEMBER',
+					user: {
+						authIdentities: [],
+						telegramNotificationChannel: channel
+					}
+				}
+			] as never);
+			const result = await controller.reminderDirectory(workspaceId, {
+				schemaVersion: 1,
+				membershipIds: [membershipId],
+				includeOwner: false
+			});
+			expect(result.items[0]).toMatchObject({
+				email: null,
+				telegramChatId: null
+			});
+		}
+	);
+	it('bounds reminder lookup and requires explicit owner selection', async () => {
+		const pipe = new ValidationPipe({
+			transform: true,
+			whitelist: true,
+			forbidNonWhitelisted: true
+		});
+		await expect(
+			pipe.transform(
+				{ schemaVersion: 1, membershipIds: [], includeOwner: false },
+				{ type: 'body', metatype: ReminderDirectoryDto }
+			)
+		).resolves.toBeInstanceOf(ReminderDirectoryDto);
+		await expect(
+			pipe.transform(
+				{
+					schemaVersion: 1,
+					membershipIds: Array.from({ length: 101 }, () => randomUUID()),
+					includeOwner: false
+				},
+				{ type: 'body', metatype: ReminderDirectoryDto }
+			)
+		).rejects.toBeDefined();
+		await expect(
+			pipe.transform(
+				{ schemaVersion: 1, membershipIds: [] },
+				{ type: 'body', metatype: ReminderDirectoryDto }
+			)
+		).rejects.toBeDefined();
+	});
 	it('returns only exact page IDs and verified EMAIL, never general user profiles', async () => {
 		const { prisma, controller } = setup();
 		await expect(

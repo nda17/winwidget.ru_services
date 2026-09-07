@@ -47,6 +47,10 @@ export class AssigneeDirectoryDto {
 	@IsBoolean() includeOwner!: boolean;
 }
 
+export class ReminderDirectoryDto extends WorkspaceDirectoryDto {
+	@IsBoolean() includeOwner!: boolean;
+}
+
 @Controller('internal/v1/crm-access/workspaces')
 @UseGuards(IdentityInternalGuard)
 @InternalServices('crm-access')
@@ -60,6 +64,107 @@ export class AssigneeDirectoryDto {
 )
 export class WorkspaceDirectoryController {
 	constructor(private readonly prisma: IdentityPrismaService) {}
+
+	// Private delivery destinations, never included in the browser directory.
+	@Post(':workspaceId/reminder-directory')
+	@HttpCode(200)
+	@Header('Cache-Control', 'no-store')
+	async reminderDirectory(
+		@Param('workspaceId', new ParseUUIDPipe({ version: '4' }))
+		workspaceId: string,
+		@Body() dto: ReminderDirectoryDto
+	) {
+		return this.prisma.$transaction(
+			async tx => {
+				await tx.$executeRawUnsafe('SET TRANSACTION READ ONLY');
+				await tx.$executeRawUnsafe(
+					"SET LOCAL statement_timeout = '1500ms'"
+				);
+				if (
+					!(await tx.workspace.findFirst({
+						where: { id: workspaceId, status: 'ACTIVE' },
+						select: { id: true }
+					}))
+				)
+					throw new NotFoundException(
+						'Workspace directory is unavailable'
+					);
+				const members = await tx.workspaceMember.findMany({
+					where: {
+						workspaceId,
+						status: 'ACTIVE',
+						user: { status: 'ACTIVE', deletedAt: null },
+						OR: [
+							{ id: { in: dto.membershipIds } },
+							...(dto.includeOwner ? [{ role: 'OWNER' as const }] : [])
+						]
+					},
+					select: {
+						id: true,
+						userId: true,
+						role: true,
+						user: {
+							select: {
+								authIdentities: {
+									where: { type: 'EMAIL', verifiedAt: { not: null } },
+									select: { value: true },
+									orderBy: { id: 'asc' },
+									take: 1
+								},
+								telegramNotificationChannel: {
+									select: {
+										chatId: true,
+										isActive: true,
+										disabledAt: true
+									}
+								}
+							}
+						}
+					},
+					orderBy: { id: 'asc' },
+					take: 102
+				});
+				if (
+					members.length >
+						dto.membershipIds.length + Number(dto.includeOwner) ||
+					members.filter(member => member.role === 'OWNER').length > 1
+				)
+					throw new ServiceUnavailableException(
+						'Workspace owner binding is ambiguous'
+					);
+				return {
+					schemaVersion: 1 as const,
+					workspaceId,
+					items: members.map(member => {
+						const email =
+							member.user.authIdentities[0]?.value.trim().toLowerCase() ??
+							null;
+						const channel = member.user.telegramNotificationChannel;
+						const chatId = channel?.chatId.trim();
+						return {
+							membershipId: member.id,
+							subject: member.userId,
+							workspaceRole: member.role,
+							email:
+								email &&
+								email.length <= 254 &&
+								/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)
+									? email
+									: null,
+							telegramChatId:
+								channel?.isActive &&
+								channel.disabledAt === null &&
+								chatId &&
+								/^[1-9][0-9]{0,18}$/.test(chatId)
+									? chatId
+									: null
+						};
+					})
+				};
+			},
+			{ isolationLevel: 'RepeatableRead', maxWait: 500, timeout: 2000 }
+		);
+	}
 
 	@Post(':workspaceId/assignee-directory')
 	@HttpCode(200)

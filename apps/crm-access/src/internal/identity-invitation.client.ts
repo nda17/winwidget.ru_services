@@ -36,6 +36,13 @@ export interface IdentityDirectoryEntry {
 export interface IdentityAssigneeEntry extends IdentityDirectoryEntry {
 	workspaceRole: 'OWNER' | 'MEMBER';
 }
+export interface IdentityReminderEntry {
+	membershipId: string;
+	subject: string;
+	workspaceRole: 'OWNER' | 'MEMBER';
+	email: string | null;
+	telegramChatId: string | null;
+}
 const date = (value: unknown): value is string =>
 	typeof value === 'string' &&
 	Number.isFinite(Date.parse(value)) &&
@@ -68,6 +75,85 @@ export class IdentityInvitationClient {
 			'IDENTITY_INTERNAL_TIMEOUT_MS',
 			config.get<string>('IDENTITY_INTERNAL_TIMEOUT_MS')
 		);
+	}
+	async reminderDirectory(
+		workspaceId: string,
+		members: { membershipId: string; subject: string }[],
+		includeOwner: boolean
+	): Promise<IdentityReminderEntry[]> {
+		const invalid = () =>
+			new ServiceUnavailableException(
+				'Reminder directory contract is invalid'
+			);
+		if (
+			members.length > 100 ||
+			new Set(members.map(item => item.membershipId)).size !==
+				members.length
+		)
+			throw invalid();
+		const value = await this.post(
+			`/workspaces/${workspaceId}/reminder-directory`,
+			{
+				schemaVersion: 1,
+				membershipIds: members.map(item => item.membershipId),
+				includeOwner
+			},
+			undefined,
+			true
+		);
+		if (
+			!isRecord(value) ||
+			!hasExactKeys(value, ['schemaVersion', 'workspaceId', 'items']) ||
+			value.schemaVersion !== 1 ||
+			value.workspaceId !== workspaceId ||
+			!Array.isArray(value.items) ||
+			value.items.length > members.length + Number(includeOwner)
+		)
+			throw invalid();
+		const expected = new Map(
+			members.map(item => [item.membershipId, item.subject])
+		);
+		const ids = new Set<string>(),
+			subjects = new Set<string>();
+		let owners = 0;
+		for (const item of value.items) {
+			if (
+				!isRecord(item) ||
+				!hasExactKeys(item, [
+					'membershipId',
+					'subject',
+					'workspaceRole',
+					'email',
+					'telegramChatId'
+				]) ||
+				!isUuidV4(item.membershipId) ||
+				typeof item.subject !== 'string' ||
+				!/^[^\s\x00-\x1f\x7f]{1,256}$/.test(item.subject) ||
+				!['OWNER', 'MEMBER'].includes(String(item.workspaceRole)) ||
+				ids.has(item.membershipId) ||
+				subjects.has(item.subject) ||
+				(expected.has(item.membershipId)
+					? expected.get(item.membershipId) !== item.subject
+					: !(includeOwner && item.workspaceRole === 'OWNER')) ||
+				!(
+					item.email === null ||
+					(typeof item.email === 'string' &&
+						item.email.length <= 254 &&
+						item.email === item.email.trim().toLowerCase() &&
+						/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(item.email))
+				) ||
+				!(
+					item.telegramChatId === null ||
+					(typeof item.telegramChatId === 'string' &&
+						/^[1-9][0-9]{0,18}$/.test(item.telegramChatId))
+				)
+			)
+				throw invalid();
+			if (item.workspaceRole === 'OWNER' && ++owners > 1) throw invalid();
+			ids.add(item.membershipId);
+			subjects.add(item.subject);
+		}
+		return value.items as unknown as IdentityReminderEntry[];
 	}
 	async create(intent: CrmInvitationIntent) {
 		const response = await this.post(

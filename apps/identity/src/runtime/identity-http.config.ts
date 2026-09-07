@@ -2,6 +2,10 @@ import { RequestMethod } from '@nestjs/common';
 
 export const IDENTITY_GLOBAL_PREFIX_EXCLUDES = [
 	{
+		path: 'internal/v1/crm-access/workspaces/:workspaceId/reminder-directory',
+		method: RequestMethod.POST
+	},
+	{
 		path: 'internal/v1/notification-delivery/wincrm-invitations/:id/delivery-context',
 		method: RequestMethod.POST
 	},

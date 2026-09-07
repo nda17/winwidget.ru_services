@@ -32,6 +32,55 @@ describe('Identity assignee directory reader', () => {
 				{ status: 200 }
 			)
 		);
+	it('reads private verified reminder destinations without changing the assignee response', async () => {
+		const item = {
+			...member,
+			workspaceRole: 'MEMBER',
+			email: 'member@example.test',
+			telegramChatId: '12345'
+		};
+		response([item]);
+		expect(
+			await new IdentityInvitationClient(config).reminderDirectory(
+				workspaceId,
+				[member],
+				false
+			)
+		).toEqual([item]);
+		expect(fetchMock.mock.calls[0][0]).toBe(
+			`http://127.0.0.1:4900/internal/v1/crm-access/workspaces/${workspaceId}/reminder-directory`
+		);
+		expect(fetchMock.mock.calls[0][1]).toMatchObject({
+			redirect: 'error',
+			cache: 'no-store'
+		});
+	});
+	it.each([
+		{ subject: 'another' },
+		{ email: 'invalid' },
+		{ telegramChatId: '-123' },
+		{ secret: 'unexpected' }
+	])(
+		'rejects a mismatched or unsafe private reminder response %p',
+		async patch => {
+			response([
+				{
+					...member,
+					workspaceRole: 'MEMBER',
+					email: null,
+					telegramChatId: null,
+					...patch
+				}
+			]);
+			await expect(
+				new IdentityInvitationClient(config).reminderDirectory(
+					workspaceId,
+					[member],
+					false
+				)
+			).rejects.toMatchObject({ status: 503 });
+		}
+	);
 	it('accepts an active subset and sends only exact requested IDs with no redirects/cache', async () => {
 		response([entry]);
 		expect(
