@@ -502,9 +502,27 @@ jobs:
       - name: Prove login OTP concurrency and durable quotas on PostgreSQL 18
         if: matrix.app == 'identity'
         env:
+          IDENTITY_OTP_IMAGE: winwidget-identity:otp-ci-${{ github.sha }}
+          IDENTITY_OTP_REVISION: ${{ github.sha }}
           IDENTITY_TEST_DATABASE_URL: postgresql://identity_otp_runtime_ci:identity_otp_runtime_ci@127.0.0.1:5432/winwidget_identity_test_otp_ci?schema=identity
           IDENTITY_TEST_MIGRATION_DATABASE_URL: postgresql://identity_otp_migration_ci:identity_otp_migration_ci@127.0.0.1:5432/winwidget_identity_test_otp_ci?schema=identity
-        run: node apps/identity/test/integration/login-otp-postgres18.integration.mjs
+        run: |
+          set -euo pipefail
+          # Keep this independent least-privilege gate in the production-shaped
+          # runtime too; fixture privileges and all assertions remain unchanged.
+          docker build --build-arg "APP_REVISION=$IDENTITY_OTP_REVISION" \
+            --tag "$IDENTITY_OTP_IMAGE" apps/identity
+          test "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$IDENTITY_OTP_IMAGE")" = "$IDENTITY_OTP_REVISION"
+          docker run --rm --network host --read-only --cap-drop ALL \
+            --security-opt no-new-privileges --user 1001:1001 \
+            --memory 1g --memory-swap 1g --pids-limit 128 --ulimit core=0:0 \
+            --tmpfs /tmp:rw,noexec,nosuid,size=16m \
+            --env IDENTITY_INTEGRATION_ALLOW_MUTATION \
+            --env IDENTITY_TEST_DATABASE_URL \
+            --env IDENTITY_TEST_MIGRATION_DATABASE_URL \
+            --mount "type=bind,src=$PWD/apps/identity/test/integration/login-otp-postgres18.integration.mjs,dst=/app/test/integration/login-otp-postgres18.integration.mjs,readonly" \
+            --entrypoint node "$IDENTITY_OTP_IMAGE" \
+            /app/test/integration/login-otp-postgres18.integration.mjs
 
   crm-database-access:
     name: CRM isolated PostgreSQL 18 access / ${{ matrix.app }}
@@ -1167,10 +1185,28 @@ jobs:
       - name: Prove passwordless login challenge and durable rate limits on PostgreSQL 18
         if: matrix.app == 'identity'
         env:
+          IDENTITY_OTP_IMAGE: winwidget-identity:otp-ci-${{ github.sha }}
+          IDENTITY_OTP_REVISION: ${{ github.sha }}
           IDENTITY_INTEGRATION_ALLOW_MUTATION: 'true'
           IDENTITY_TEST_DATABASE_URL: ${{ env.DOMAIN_RUNTIME_URL }}
           IDENTITY_TEST_MIGRATION_DATABASE_URL: ${{ env.DOMAIN_MIGRATION_URL }}
-        run: node apps/identity/test/integration/login-otp-postgres18.integration.mjs
+        run: |
+          set -euo pipefail
+          # Exercise the complete test with image-owned Node/OpenSSL/Prisma,
+          # not the host runner's native libraries or node_modules.
+          docker build --build-arg "APP_REVISION=$IDENTITY_OTP_REVISION" \
+            --tag "$IDENTITY_OTP_IMAGE" apps/identity
+          test "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$IDENTITY_OTP_IMAGE")" = "$IDENTITY_OTP_REVISION"
+          docker run --rm --network host --read-only --cap-drop ALL \
+            --security-opt no-new-privileges --user 1001:1001 \
+            --memory 1g --memory-swap 1g --pids-limit 128 --ulimit core=0:0 \
+            --tmpfs /tmp:rw,noexec,nosuid,size=16m \
+            --env IDENTITY_INTEGRATION_ALLOW_MUTATION \
+            --env IDENTITY_TEST_DATABASE_URL \
+            --env IDENTITY_TEST_MIGRATION_DATABASE_URL \
+            --mount "type=bind,src=$PWD/apps/identity/test/integration/login-otp-postgres18.integration.mjs,dst=/app/test/integration/login-otp-postgres18.integration.mjs,readonly" \
+            --entrypoint node "$IDENTITY_OTP_IMAGE" \
+            /app/test/integration/login-otp-postgres18.integration.mjs
       - name: Prove bounded read-only export on PostgreSQL 18
         if: matrix.app == 'crm-customers' || matrix.app == 'crm-sales' || matrix.app == 'crm-intake'
         run: |

@@ -431,6 +431,32 @@ exactFiles('.github/scripts', [
 exactFiles('deploy', ['docker-compose.prod.yml', 'docker-compose.crm.yml']);
 
 const servicesWorkflow = readFileSync('.github/workflows/ci.yml', 'utf8');
+for (const otpGateName of [
+	'Prove passwordless login challenge and durable rate limits on PostgreSQL 18',
+	'Prove login OTP concurrency and durable quotas on PostgreSQL 18'
+]) {
+	const otpImageStep = servicesWorkflow.match(new RegExp(
+		'      - name: ' + otpGateName + '\\n([\\s\\S]*?)(?=\\n(?:      - name:|  [a-z][a-z-]*:))'
+	));
+	if (!otpImageStep || [
+		"if: matrix.app == 'identity'",
+		'IDENTITY_OTP_IMAGE: winwidget-identity:otp-ci-${{ github.sha }}',
+		'IDENTITY_OTP_REVISION: ${{ github.sha }}',
+		'set -euo pipefail',
+		'docker build --build-arg "APP_REVISION=$IDENTITY_OTP_REVISION"',
+		'--tag "$IDENTITY_OTP_IMAGE" apps/identity',
+		'docker run --rm --network host --read-only --cap-drop ALL',
+		'--security-opt no-new-privileges --user 1001:1001',
+		'--env IDENTITY_INTEGRATION_ALLOW_MUTATION',
+		'--env IDENTITY_TEST_DATABASE_URL',
+		'--env IDENTITY_TEST_MIGRATION_DATABASE_URL',
+		'--mount "type=bind,src=$PWD/apps/identity/test/integration/login-otp-postgres18.integration.mjs,dst=/app/test/integration/login-otp-postgres18.integration.mjs,readonly"',
+		'--entrypoint node "$IDENTITY_OTP_IMAGE"'
+	].some(value => !otpImageStep[1].includes(value)) ||
+		/continue-on-error|\|\|\s*true|--privileged|--env-file|node_modules:/.test(otpImageStep[1])) {
+		throw new Error('Full Identity OTP integration must gate CI in its immutable production image');
+	}
+}
 if (!servicesWorkflow.includes('node .github/scripts/test-crm-bootstrap-failure.mjs "${{ matrix.app }}"')) {
 	throw new Error('CRM bounded bootstrap process gate is missing');
 }

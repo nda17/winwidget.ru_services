@@ -758,6 +758,10 @@ recovery evidence не вынесены из восстанавливаемой 
 service-owned CAS recovery. Не перехватывать действующий lease и не очищать
 очередь. Обязательны тесты crash-after-claim, redelivery-before-expiry,
 повторного запуска и восстановления без параллельных внешних действий.
+`claim()` также должен повторно проверять expiry/availability в условии
+`updateMany`: прежний worker может продлить тот же lease token между чтением
+и CAS. Добавить тест этого race и CAS-завершение просроченного `PROCESSING`
+с исчерпанными попытками, чтобы задание не оставалось зависшим после ACK.
 Исправление не входит в узкий rollout OTP и удаления пользовательского Backlog.
 
 ### P2 — выделенная recovery session boundary перед расширением control plane
@@ -846,6 +850,18 @@ consent snapshot в Billing остаётся отдельным обязател
 - Учесть legal hold и восстановимость отчётности.
 
 ## Identity и доступ
+
+### P2 — локализовать нативное падение Prisma на hosted CI runner
+
+В Services CI `34128464940` на ревизии `df35b263` OTP integration завершился
+с `SIGSEGV` при первом `PrismaClient.$connect()`, до чтения роли и создания
+fixtures: Node 20.20.2, OpenSSL 3.0.19, Prisma 5.22.0. Точная причина нативного
+падения не установлена; оно не является подтверждённым production-инцидентом.
+Полный OTP-тест должен проходить в release-shaped Identity image со своими
+Node/OpenSSL/Prisma и изолированной PostgreSQL 18, без retry-to-green и пропуска
+проверок. Перед обновлением Prisma/Node отдельно воспроизвести host-runner
+сбой, проверить старт/конкурентный вход в целевом образе и совместимость всех
+Identity auth-сценариев. Не переносить coredump с credentials в CI artifacts.
 
 ### P1 — подтвердить реальную доставку и вход по резервному коду
 
