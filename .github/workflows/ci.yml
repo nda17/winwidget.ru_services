@@ -1405,7 +1405,7 @@ jobs:
           done
 
   deploy-production:
-    name: Upgrade WinCRM services and scoped companions
+    name: Activate WinCRM commerce on verified existing images
     needs:
       - billing-crm-policy-integration
       - billing-wincrm-commerce-integration
@@ -1422,13 +1422,13 @@ jobs:
       - service-integration
       - widgets-integration
     if: github.event_name == 'push' && github.ref == 'refs/heads/prod'
-    uses: nda17/winwidget.ru_infra/.github/workflows/deploy-production.yml@96200bea96e89122018fd46d2e1df909f6afb30c
+    uses: nda17/winwidget.ru_infra/.github/workflows/deploy-production.yml@87ee9e36cf451d5b9ecd7f29604d9f19febb143a
     with:
       services_revision: ${{ github.sha }}
-      release_scope: crm-upgrade
+      release_scope: crm-commerce-activate
       expected_live_revision: '837113b9f9f303bd6c043c2a2e37b0791369d7a3'
-      expected_service_env_sha256: '667977d5260de85dcfbc17ccac618446168773f67af5735ab7003bdbe36b4be1'
-      expected_crm_upgrade_baseline_sha256: '89a718fdbbea50962a5e1235b9aee816c6f16cc07d5f63b3c07edebe6ca8fb52'
+      expected_service_env_sha256: '73b86415a52f7b9756acd7d24efae98187d80de684f1eeb40b9fcfd465e7fccd'
+      expected_crm_commerce_baseline_sha256: '385019aca3651d14ba7705465873ed3dc6eeb7d9a5e5293a7882d56f782258cb'
     secrets:
       BACKEND_PRODUCTION_SSH_HOST: ${{ secrets.PRODUCTION_SSH_HOST }}
       BACKEND_PRODUCTION_SSH_PORT: ${{ secrets.PRODUCTION_SSH_PORT }}
