@@ -849,8 +849,8 @@ jobs:
           --health-retries 30
     env:
       BILLING_WINCRM_COMMERCE_TEST_ALLOW_MUTATION: 'true'
-      BILLING_WINCRM_COMMERCE_TEST_DATABASE_URL: 'postgresql://winwidget_billing_commerce_runtime_ci:billing_commerce_runtime_ci_password@127.0.0.1:5432/winwidget_billing_commerce_ci?schema=billing&sslmode=disable'
-      BILLING_WINCRM_COMMERCE_TEST_RUNTIME_ROLE: winwidget_billing_commerce_runtime_ci
+      BILLING_WINCRM_COMMERCE_TEST_DATABASE_URL: 'postgresql://winwidget_billing_runtime:billing_commerce_runtime_ci_password@127.0.0.1:5432/winwidget_billing_commerce_ci?schema=billing&sslmode=disable'
+      BILLING_WINCRM_COMMERCE_TEST_RUNTIME_ROLE: winwidget_billing_runtime
       BILLING_DATABASE_URL: 'postgresql://winwidget_billing_commerce_migration_ci:billing_commerce_migration_ci_password@127.0.0.1:5432/winwidget_billing_commerce_ci?schema=billing&sslmode=disable'
       BILLING_COMMERCE_MIGRATION_ROLE_PASSWORD: billing_commerce_migration_ci_password
       BILLING_COMMERCE_RUNTIME_ROLE_PASSWORD: billing_commerce_runtime_ci_password
@@ -881,24 +881,29 @@ jobs:
             -c "CREATE ROLE winwidget_billing_commerce_migration_ci LOGIN PASSWORD '$BILLING_COMMERCE_MIGRATION_ROLE_PASSWORD' NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS"
           docker exec "$POSTGRES_CONTAINER_ID" psql -X \
             -U billing_wincrm_bootstrap_ci -d postgres -v ON_ERROR_STOP=1 \
-            -c "CREATE ROLE winwidget_billing_commerce_runtime_ci LOGIN PASSWORD '$BILLING_COMMERCE_RUNTIME_ROLE_PASSWORD' NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS"
+            -c "CREATE ROLE winwidget_billing_runtime LOGIN PASSWORD '$BILLING_COMMERCE_RUNTIME_ROLE_PASSWORD' NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS"
           docker exec "$POSTGRES_CONTAINER_ID" psql -X \
             -U billing_wincrm_bootstrap_ci -d postgres -v ON_ERROR_STOP=1 \
             -c 'CREATE DATABASE winwidget_billing_commerce_ci OWNER billing_wincrm_bootstrap_ci'
           docker exec "$POSTGRES_CONTAINER_ID" psql -X \
             -U billing_wincrm_bootstrap_ci -d winwidget_billing_commerce_ci -v ON_ERROR_STOP=1 \
-            -c "REVOKE ALL ON DATABASE winwidget_billing_commerce_ci FROM PUBLIC; GRANT CONNECT ON DATABASE winwidget_billing_commerce_ci TO winwidget_billing_commerce_migration_ci, winwidget_billing_commerce_runtime_ci; REVOKE ALL ON SCHEMA public FROM PUBLIC; CREATE SCHEMA billing AUTHORIZATION winwidget_billing_commerce_migration_ci; CREATE SCHEMA foreign_service_guard AUTHORIZATION billing_wincrm_bootstrap_ci; CREATE TABLE foreign_service_guard.sentinel (id INTEGER PRIMARY KEY); REVOKE ALL ON SCHEMA foreign_service_guard FROM PUBLIC; REVOKE ALL ON ALL TABLES IN SCHEMA foreign_service_guard FROM PUBLIC"
+            -c "REVOKE ALL ON DATABASE winwidget_billing_commerce_ci FROM PUBLIC; GRANT CONNECT ON DATABASE winwidget_billing_commerce_ci TO winwidget_billing_commerce_migration_ci, winwidget_billing_runtime; REVOKE ALL ON SCHEMA public FROM PUBLIC; CREATE SCHEMA billing AUTHORIZATION winwidget_billing_commerce_migration_ci; CREATE SCHEMA foreign_service_guard AUTHORIZATION billing_wincrm_bootstrap_ci; CREATE TABLE foreign_service_guard.sentinel (id INTEGER PRIMARY KEY); REVOKE ALL ON SCHEMA foreign_service_guard FROM PUBLIC; REVOKE ALL ON ALL TABLES IN SCHEMA foreign_service_guard FROM PUBLIC"
+          # Reproduce the existing production defaults before migrations. The
+          # new migration, not a later CI grant, must remove CRM-only privileges.
+          docker exec "$POSTGRES_CONTAINER_ID" psql -X \
+            -U billing_wincrm_bootstrap_ci -d winwidget_billing_commerce_ci -v ON_ERROR_STOP=1 \
+            -c "ALTER DEFAULT PRIVILEGES FOR ROLE winwidget_billing_commerce_migration_ci IN SCHEMA billing GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO winwidget_billing_runtime"
       - name: Generate Billing Prisma client
         run: pnpm --dir apps/billing run prisma:generate
       - name: Apply Billing migrations as migration role
         run: pnpm --dir apps/billing run prisma:migrate:deploy
-      - name: Grant exact WinCRM commerce runtime privileges
+      - name: Grant schema access without repairing commerce table ACL
         env:
           POSTGRES_CONTAINER_ID: ${{ job.services.postgres.id }}
         run: |
           docker exec "$POSTGRES_CONTAINER_ID" psql -X \
             -U billing_wincrm_bootstrap_ci -d winwidget_billing_commerce_ci -v ON_ERROR_STOP=1 \
-            -c "GRANT USAGE ON SCHEMA billing TO winwidget_billing_commerce_runtime_ci; GRANT SELECT ON billing.service_identity, billing.crm_commercial_policies TO winwidget_billing_commerce_runtime_ci; GRANT SELECT, INSERT ON billing.command_receipts, billing.crm_auto_renewal_consents, billing.identity_contact_projections TO winwidget_billing_commerce_runtime_ci; GRANT SELECT, INSERT, UPDATE ON billing.source_sequences, billing.crm_entitlements, billing.crm_commerce_accounts, billing.crm_commerce_commands, billing.crm_orders, billing.crm_paid_periods, billing.crm_auto_renewals, billing.crm_provider_operations, billing.crm_provider_deliveries, billing.crm_payment_receipts TO winwidget_billing_commerce_runtime_ci; GRANT SELECT, INSERT, UPDATE, DELETE ON billing.outbox_events TO winwidget_billing_commerce_runtime_ci; REVOKE ALL ON billing._prisma_migrations FROM winwidget_billing_commerce_runtime_ci; REVOKE ALL ON FUNCTION billing.protect_wincrm_commerce_evidence() FROM PUBLIC, winwidget_billing_commerce_runtime_ci"
+            -c "GRANT USAGE ON SCHEMA billing TO winwidget_billing_runtime; REVOKE ALL ON billing._prisma_migrations FROM winwidget_billing_runtime"
       - name: Build Billing
         run: pnpm --dir apps/billing run build
       - name: Prove isolated WinCRM commerce transactions, snapshots and runtime ACL

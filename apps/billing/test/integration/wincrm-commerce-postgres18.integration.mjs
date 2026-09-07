@@ -107,6 +107,13 @@ try {
 	const [consentAcl] =
 		await prisma.$queryRaw`SELECT has_table_privilege(current_user, 'billing.crm_auto_renewal_consents','UPDATE') AS allowed`;
 	assert.equal(consentAcl.allowed, false);
+	// The production-named CI role starts with the same broad table defaults.
+	// Migrations must restrict CRM evidence without modifying Widgets payments.
+	if (role === 'winwidget_billing_runtime') {
+		const [widgetsAcl] =
+			await prisma.$queryRaw`SELECT has_table_privilege(current_user, 'billing.payments', 'DELETE') AS allowed`;
+		assert.equal(widgetsAcl.allowed, true, 'legacy Widgets ACL preserved');
+	}
 	await assert.rejects(
 		prisma.$queryRawUnsafe(
 			'SELECT id FROM foreign_service_guard.sentinel LIMIT 1'

@@ -281,7 +281,13 @@ loopback БД `winwidget_billing_*_test`/`*_ci`, ограниченной runtim
 `BILLING_WINCRM_COMMERCE_TEST_DATABASE_URL`,
 `BILLING_WINCRM_COMMERCE_TEST_RUNTIME_ROLE`. Предварительно применяются все
 migrations, генерируется клиент и собирается Billing. CI использует отдельную
-чистую БД, не результаты изменяющего policy-test.
+чистую БД, не результаты изменяющего policy-test. В commerce job создаётся
+`winwidget_billing_runtime` с исходными production default grants до миграций:
+миграция `20260909110000_restrict_wincrm_commerce_runtime_acl` должна убрать
+CRM-only DELETE/TRUNCATE, UPDATE согласий и EXECUTE защитной функции.
+Позднейшие CI grants не исправляют эти ACL; отдельно проверяется сохранность
+DELETE на прежней таблице Widgets `billing.payments`. Миграция не меняет
+общие default privileges или ACL старых платёжных таблиц.
 Новые 8 изменяемых CRM commerce-таблиц получают SELECT/INSERT/UPDATE;
 `crm_auto_renewal_consents` — только SELECT/INSERT. DELETE/TRUNCATE и прямой
 EXECUTE `protect_wincrm_commerce_evidence()` запрещены. Для синтетического
