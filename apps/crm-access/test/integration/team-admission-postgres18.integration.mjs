@@ -680,6 +680,15 @@ try {
 		workspaceId,
 		name: 'Other department'
 	};
+	await prisma.crmWorkspaceAccess.create({
+		data: {
+			workspaceId: foreign.workspaceId,
+			activatedBySubject: `lookup-foreign-owner-${randomUUID()}`,
+			billingEntitlementId: randomUUID(),
+			provisioningCommandId: randomUUID(),
+			provisioningCommandType: 'START_TRIAL'
+		}
+	});
 	await prisma.crmTeam.createMany({
 		data: [...lookupTeams, archived, foreign, unassigned]
 	});
