@@ -46,8 +46,19 @@ async function main() {
 	assert.equal(runtimeTarget.database, migrationTarget.database);
 	assert.equal(runtimeTarget.peer, migrationTarget.peer);
 	assert.notEqual(runtimeTarget.role, migrationTarget.role);
+	// Keep the schema environment and explicit client override bound to the
+	// same guarded fixture, independently of the calling CI job environment.
+	process.env.IDENTITY_DATABASE_URL = runtimeTarget.raw;
 	require('reflect-metadata');
-	const { PrismaClient } = require('@prisma/identity-client');
+	const { PrismaClient, Prisma } = require('@prisma/identity-client');
+	const safeVersion = value =>
+		typeof value === 'string' && /^[A-Za-z0-9.+-]{1,80}$/.test(value)
+			? value
+			: 'unknown';
+	writeSync(
+		1,
+		`Identity login OTP PostgreSQL18 runtime: node=${safeVersion(process.versions.node)} openssl=${safeVersion(process.versions.openssl)} prisma=${safeVersion(Prisma.prismaVersion.client)}\n`
+	);
 	const { ConfigService } = require('@nestjs/config');
 	const { hash, compare } = require('bcryptjs');
 	const {
@@ -98,7 +109,9 @@ async function main() {
 	);
 	let failure = null;
 	try {
-		checkpoint('database-role');
+		checkpoint('connect-runtime');
+		await runtime.$connect();
+		checkpoint('role-query');
 		const [role] =
 			await runtime.$queryRawUnsafe(`SELECT current_user AS name, current_setting('server_version_num')::integer AS version,
 			NOT rolsuper AND NOT rolcreatedb AND NOT rolcreaterole AND NOT rolbypassrls AND NOT rolinherit AND NOT rolreplication AS restricted
@@ -106,11 +119,15 @@ async function main() {
 		assert.equal(role.name, runtimeTarget.role);
 		assert.equal(Math.floor(role.version / 10_000), 18);
 		assert.equal(role.restricted, true);
+		checkpoint('ddl-probe');
 		await assert.rejects(
 			runtime.$executeRawUnsafe(
 				'CREATE TABLE identity.otp_forbidden_probe (id INTEGER)'
 			)
 		);
+		checkpoint('connect-migrator');
+		await migrator.$connect();
+		checkpoint('seed-fixture');
 		for (let index = 0; index < users.length; index++) {
 			await migrator.user.create({
 				data: {
