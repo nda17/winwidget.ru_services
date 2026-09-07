@@ -559,6 +559,9 @@ export function validateCrmCompose(config) {
 				'CORS_ALLOWED_ORIGINS',
 				...Object.keys(origins[app]),
 				...tokenNames[app],
+				...(app === 'crm-customers' && role === 'api'
+					? ['CRM_CUSTOMERS_DADATA_API_KEY']
+					: []),
 				...(app === 'crm-access'
 					? [
 							'TRUST_PROXY',
@@ -584,6 +587,17 @@ export function validateCrmCompose(config) {
 				envKeys,
 				'CRM process received an unexpected credential or setting'
 			);
+			if (app === 'crm-customers' && role === 'api') {
+				const key = env.CRM_CUSTOMERS_DADATA_API_KEY;
+				check(
+					typeof key === 'string' &&
+						(key === '' ||
+							(key.length <= 512 &&
+								!/[\x00-\x20\x7f-\uffff]/.test(key) &&
+								!/^(?:change|replace|example|placeholder)/i.test(key))),
+					'Invalid optional Customers lookup credential'
+				);
+			}
 			same(env.NODE_ENV, 'production', 'CRM NODE_ENV must be production');
 			same(env.MODE, 'production', 'CRM MODE must be production');
 			same(env.APP_REVISION, revision, 'CRM role revision drift');

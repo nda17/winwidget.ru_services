@@ -373,6 +373,107 @@ test('real Compose normalization validates twenty isolated CRM definitions witho
 	assert.equal(report.releaseApproved, false);
 });
 
+test('optional DaData key is declared only in Customers API, never in a shared anchor', () => {
+	const key = 'CRM_CUSTOMERS_DADATA_API_KEY';
+	const apiSource = template.slice(
+		template.indexOf('  crm-customers-api:'),
+		template.indexOf('  crm-customers-migrate:')
+	);
+	assert.ok(apiSource.includes('      ' + key + ': ${' + key + ':-}'));
+	assert.equal(
+		template.split('\n').filter(line => line.includes(key)).length,
+		1
+	);
+	for (const value of [
+		undefined,
+		'',
+		fixtureSecret('dadata').slice(0, 40)
+	]) {
+		const result = compose(['*'], ['--format', 'json'], { [key]: value });
+		assert.equal(result.status, 0, 'Optional lookup config must render');
+		const candidate = JSON.parse(result.stdout);
+		assert.equal(
+			candidate.services['crm-customers-api'].environment[key],
+			value ?? ''
+		);
+		assert.doesNotThrow(() => validateCrmCompose(candidate));
+		for (const [name, service] of Object.entries(candidate.services)) {
+			if (name === 'crm-customers-api') continue;
+			assert.equal(
+				Object.hasOwn(service.environment ?? {}, key),
+				false,
+				'Lookup credential escaped its API role'
+			);
+		}
+	}
+});
+
+test('lookup key cannot be forwarded to any other CRM or companion process', () => {
+	const key = 'CRM_CUSTOMERS_DADATA_API_KEY';
+	for (const name of Object.keys(config.services)) {
+		if (name === 'crm-customers-api') continue;
+		for (const value of ['', fixtureSecret('dadata')]) {
+			const changed = structuredClone(config);
+			changed.services[name].environment[key] = value;
+			assert.throws(() => validateCrmCompose(changed), name);
+		}
+	}
+	const value = companion();
+	for (const name of Object.keys(value.config.services)) {
+		const changed = structuredClone(value.config);
+		changed.services[name].environment ??= {};
+		changed.services[name].environment[key] = fixtureSecret('dadata');
+		assert.throws(
+			() => validateCrmCompanionCompose(changed, value.source),
+			name
+		);
+	}
+});
+
+test('optional lookup key rejects missing wiring and unsafe configured strings without disclosure', () => {
+	const key = 'CRM_CUSTOMERS_DADATA_API_KEY';
+	const missing = structuredClone(config);
+	delete missing.services['crm-customers-api'].environment[key];
+	assert.throws(() => validateCrmCompose(missing));
+	for (const value of [
+		undefined,
+		null,
+		1,
+		' ',
+		'unsafe\r\nHeader',
+		'unsafe\u0085',
+		'example-key',
+		'x'.repeat(513)
+	]) {
+		const changed = structuredClone(config);
+		changed.services['crm-customers-api'].environment[key] = value;
+		assert.throws(
+			() => validateCrmCompose(changed),
+			/Invalid optional Customers lookup credential/
+		);
+	}
+	const canary = 'private-lookup-canary\n';
+	const changed = structuredClone(config);
+	changed.services['crm-customers-api'].environment[key] = canary;
+	const result = spawnSync(
+		process.execPath,
+		['.github/scripts/validate-crm-compose.mjs'],
+		{
+			cwd: root,
+			encoding: 'utf8',
+			input: JSON.stringify(changed),
+			timeout: 5000
+		}
+	);
+	assert.equal(result.status, 1);
+	assert.equal(result.stdout, '');
+	assert.equal(
+		result.stderr,
+		'CRM Compose validation failed: Invalid optional Customers lookup credential\n'
+	);
+	assert.ok(!result.stderr.includes('private-lookup-canary'));
+});
+
 test('CRM APIs permit shared admin origins while background roles preserve the CRM-only origin', () => {
 	for (const [name, service] of Object.entries(config.services)) {
 		if (!service.environment?.CORS_ALLOWED_ORIGINS) continue;
