@@ -340,16 +340,22 @@ test('real Compose normalization validates twenty isolated CRM definitions witho
 	assert.equal(report.releaseApproved, false);
 });
 
-test('CRM permits only the working app and shared admin origins', () => {
+test('CRM APIs permit shared admin origins while background roles preserve the CRM-only origin', () => {
 	for (const [name, service] of Object.entries(config.services)) {
 		if (!service.environment?.CORS_ALLOWED_ORIGINS) continue;
+		const api = name.endsWith('-api');
 		assert.equal(
 			service.environment.CORS_ALLOWED_ORIGINS,
-			'https://crm.winwidget.ru,https://winwidget.ru'
+			api
+				? 'https://crm.winwidget.ru,https://winwidget.ru'
+				: 'https://crm.winwidget.ru'
 		);
 		for (const origin of [
 			'*',
-			'https://crm.winwidget.ru',
+			api
+				? 'https://crm.winwidget.ru'
+				: 'https://crm.winwidget.ru,https://winwidget.ru',
+			'https://winwidget.ru',
 			'https://crm.winwidget.ru,https://unexpected.example'
 		]) {
 			const changed = structuredClone(config);
@@ -515,16 +521,34 @@ test('equivalent Compose versions may omit image-default nulls or return numeric
 });
 
 test('consistent enabled feature settings still cannot assert release approval', () => {
-	const candidate = structuredClone(config);
-	for (const service of Object.values(candidate.services))
-		for (const key of [
-			'CRM_ACCESS_BILLING_ENABLED',
-			'CRM_INTAKE_WIDGETS_ENABLED',
-			'CRM_INTAKE_WIDGET_TRANSFERS_ENABLED'
-		]) {
-			if (key in service.environment) service.environment[key] = 'true';
-		}
+	const rendered = compose(['*'], ['--format', 'json'], {
+		CRM_ACCESS_BILLING_ENABLED: 'true',
+		CRM_INTAKE_WIDGETS_ENABLED: 'true',
+		CRM_INTAKE_WIDGET_TRANSFERS_ENABLED: 'true'
+	});
+	assert.equal(rendered.status, 0, 'Enabled synthetic Compose must render');
+	const candidate = JSON.parse(rendered.stdout);
+	for (const [role] of CRM_SERVICES.find(([app]) => app === 'crm-intake')[4]) {
+		const env = candidate.services['crm-intake-' + role].environment;
+		assert.equal(env.CRM_INTAKE_WIDGETS_ENABLED, 'true');
+		assert.equal(
+			env.CRM_INTAKE_WIDGET_TRANSFERS_ENABLED,
+			role.startsWith('widget-control-') ? 'false' : 'true'
+		);
+		assert.equal(
+			env.CORS_ALLOWED_ORIGINS,
+			role === 'api'
+				? 'https://crm.winwidget.ru,https://winwidget.ru'
+				: 'https://crm.winwidget.ru'
+		);
+	}
 	assert.equal(validateCrmCompose(candidate).releaseApproved, false);
+	for (const role of ['widget-control-worker', 'widget-control-publisher']) {
+		const changed = structuredClone(candidate);
+		changed.services['crm-intake-' + role].environment
+			.CRM_INTAKE_WIDGET_TRANSFERS_ENABLED = 'true';
+		assert.throws(() => validateCrmCompose(changed), /role contract/);
+	}
 });
 
 const reject = (name, mutate) =>
@@ -681,6 +705,16 @@ for (const role of [
 			].environment.CRM_INTAKE_WIDGETS_ENABLED = 'false';
 		}
 	);
+for (const role of ['widget-transfer-worker', 'widget-transfer-publisher'])
+	reject('specialized ' + role + ' cannot disable transfers', value => {
+		value.services['crm-intake-' + role].environment
+			.CRM_INTAKE_WIDGET_TRANSFERS_ENABLED = 'false';
+	});
+for (const role of ['widget-control-worker', 'widget-control-publisher'])
+	reject('specialized ' + role + ' cannot enable transfers', value => {
+		value.services['crm-intake-' + role].environment
+			.CRM_INTAKE_WIDGET_TRANSFERS_ENABLED = 'true';
+	});
 reject('no cross-role feature gate mismatch', value => {
 	value.services[
 		'crm-access-worker'

@@ -578,7 +578,9 @@ export function validateCrmCompose(config) {
 			);
 			same(
 				env.CORS_ALLOWED_ORIGINS,
-				'https://crm.winwidget.ru,https://winwidget.ru',
+				role === 'api'
+					? 'https://crm.winwidget.ru,https://winwidget.ru'
+					: 'https://crm.winwidget.ru',
 				'Unexpected CRM origin'
 			);
 			for (const [key, dependencyPort] of Object.entries(origins[app])) {
@@ -638,7 +640,9 @@ export function validateCrmCompose(config) {
 							key === 'CRM_INTAKE_WIDGETS_ENABLED') ||
 							role.startsWith('widget-transfer-')
 							? 'true'
-							: first.environment[key],
+							: role.startsWith('widget-control-')
+								? 'false'
+								: first.environment[key],
 						'CRM connector consumer readiness differs from its role contract'
 					);
 				}

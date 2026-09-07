@@ -159,6 +159,7 @@ services:
     environment:
       <<: *crm-access-env
       CRM_ACCESS_PROCESS_ROLE: worker
+      CORS_ALLOWED_ORIGINS: https://crm.winwidget.ru
       CRM_ACCESS_PORT: '5301'
       CRM_ACCESS_DATABASE_URL: ${CRM_ACCESS_WORKER_DATABASE_URL:?CRM_ACCESS_WORKER_DATABASE_URL is required}
       RABBITMQ_URL: ${CRM_ACCESS_WORKER_RABBITMQ_URL:?CRM_ACCESS_WORKER_RABBITMQ_URL is required}
@@ -189,6 +190,7 @@ services:
     environment:
       <<: *crm-access-env
       CRM_ACCESS_PROCESS_ROLE: outbox-publisher
+      CORS_ALLOWED_ORIGINS: https://crm.winwidget.ru
       CRM_ACCESS_PORT: '5302'
       CRM_ACCESS_DATABASE_URL: ${CRM_ACCESS_OUTBOX_PUBLISHER_DATABASE_URL:?CRM_ACCESS_OUTBOX_PUBLISHER_DATABASE_URL is required}
       RABBITMQ_URL: ${CRM_ACCESS_OUTBOX_PUBLISHER_RABBITMQ_URL:?CRM_ACCESS_OUTBOX_PUBLISHER_RABBITMQ_URL is required}
@@ -289,6 +291,7 @@ services:
     environment:
       <<: *crm-intake-env
       CRM_INTAKE_PROCESS_ROLE: worker
+      CORS_ALLOWED_ORIGINS: https://crm.winwidget.ru
       CRM_INTAKE_PORT: '5311'
       CRM_INTAKE_DATABASE_URL: ${CRM_INTAKE_WORKER_DATABASE_URL:?CRM_INTAKE_WORKER_DATABASE_URL is required}
       CRM_INTAKE_RABBITMQ_URL: ${CRM_INTAKE_WORKER_RABBITMQ_URL:?CRM_INTAKE_WORKER_RABBITMQ_URL is required}
@@ -318,6 +321,7 @@ services:
     environment:
       <<: *crm-intake-env
       CRM_INTAKE_PROCESS_ROLE: publisher
+      CORS_ALLOWED_ORIGINS: https://crm.winwidget.ru
       CRM_INTAKE_PORT: '5312'
       CRM_INTAKE_DATABASE_URL: ${CRM_INTAKE_PUBLISHER_DATABASE_URL:?CRM_INTAKE_PUBLISHER_DATABASE_URL is required}
       CRM_INTAKE_RABBITMQ_URL: ${CRM_INTAKE_PUBLISHER_RABBITMQ_URL:?CRM_INTAKE_PUBLISHER_RABBITMQ_URL is required}
@@ -347,8 +351,10 @@ services:
     environment:
       <<: *crm-intake-env
       CRM_INTAKE_PROCESS_ROLE: widget-control-worker
+      CORS_ALLOWED_ORIGINS: https://crm.winwidget.ru
       # Consumers are prepared before the public connector is opened.
       CRM_INTAKE_WIDGETS_ENABLED: 'true'
+      CRM_INTAKE_WIDGET_TRANSFERS_ENABLED: 'false'
       CRM_INTAKE_PORT: '5313'
       CRM_INTAKE_DATABASE_URL: ${CRM_INTAKE_WIDGET_CONTROL_WORKER_DATABASE_URL:?CRM_INTAKE_WIDGET_CONTROL_WORKER_DATABASE_URL is required}
       CRM_INTAKE_RABBITMQ_URL: ${CRM_INTAKE_WIDGET_CONTROL_WORKER_RABBITMQ_URL:?CRM_INTAKE_WIDGET_CONTROL_WORKER_RABBITMQ_URL is required}
@@ -378,7 +384,9 @@ services:
     environment:
       <<: *crm-intake-env
       CRM_INTAKE_PROCESS_ROLE: widget-control-publisher
+      CORS_ALLOWED_ORIGINS: https://crm.winwidget.ru
       CRM_INTAKE_WIDGETS_ENABLED: 'true'
+      CRM_INTAKE_WIDGET_TRANSFERS_ENABLED: 'false'
       CRM_INTAKE_PORT: '5314'
       CRM_INTAKE_DATABASE_URL: ${CRM_INTAKE_WIDGET_CONTROL_PUBLISHER_DATABASE_URL:?CRM_INTAKE_WIDGET_CONTROL_PUBLISHER_DATABASE_URL is required}
       CRM_INTAKE_RABBITMQ_URL: ${CRM_INTAKE_WIDGET_CONTROL_PUBLISHER_RABBITMQ_URL:?CRM_INTAKE_WIDGET_CONTROL_PUBLISHER_RABBITMQ_URL is required}
@@ -408,6 +416,7 @@ services:
     environment:
       <<: *crm-intake-env
       CRM_INTAKE_PROCESS_ROLE: widget-transfer-worker
+      CORS_ALLOWED_ORIGINS: https://crm.winwidget.ru
       CRM_INTAKE_WIDGETS_ENABLED: 'true'
       CRM_INTAKE_WIDGET_TRANSFERS_ENABLED: 'true'
       CRM_INTAKE_PORT: '5315'
@@ -439,6 +448,7 @@ services:
     environment:
       <<: *crm-intake-env
       CRM_INTAKE_PROCESS_ROLE: widget-transfer-publisher
+      CORS_ALLOWED_ORIGINS: https://crm.winwidget.ru
       CRM_INTAKE_WIDGETS_ENABLED: 'true'
       CRM_INTAKE_WIDGET_TRANSFERS_ENABLED: 'true'
       CRM_INTAKE_PORT: '5316'

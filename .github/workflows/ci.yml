@@ -1405,7 +1405,7 @@ jobs:
       - service-integration
       - widgets-integration
     if: github.event_name == 'push' && github.ref == 'refs/heads/prod'
-    uses: nda17/winwidget.ru_infra/.github/workflows/deploy-production.yml@c5bd31d56e5c0b3d5f8d093253bb28041f870e0c
+    uses: nda17/winwidget.ru_infra/.github/workflows/deploy-production.yml@53074ad09c63c8710d0d0dfc0f13ed2b77da70a9
     with:
       services_revision: ${{ github.sha }}
       release_scope: crm-upgrade
