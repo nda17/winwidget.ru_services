@@ -1,5 +1,4 @@
 import {
-	BadRequestException,
 	ConflictException,
 	ForbiddenException,
 	NotFoundException
@@ -422,20 +421,5 @@ describe('Company v2 persistence and legacy compatibility', () => {
 		expect(
 			await service.activities('company', context, record.id, query)
 		).toMatchObject({ schemaVersion: 1 });
-	});
-	it('does not enable any v2 contact operation', async () => {
-		const { service, prisma } = setup();
-		await expect(
-			service.create('contact', context, command)
-		).rejects.toBeInstanceOf(BadRequestException);
-		await expect(
-			service.list(
-				'contact',
-				context,
-				{ workspaceId, page: 1, pageSize: 25 },
-				2
-			)
-		).rejects.toBeInstanceOf(BadRequestException);
-		expect(prisma.$transaction).not.toHaveBeenCalled();
 	});
 });

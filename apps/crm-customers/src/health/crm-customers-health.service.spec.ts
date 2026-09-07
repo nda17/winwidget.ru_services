@@ -72,4 +72,17 @@ describe('CrmCustomersHealthService', () => {
 			new CrmCustomersHealthService(prisma).readiness()
 		).rejects.toBeInstanceOf(ServiceUnavailableException);
 	});
+	it('checks all contact preference columns before readiness', async () => {
+		const prisma = createPrisma();
+		await new CrmCustomersHealthService(prisma).readiness();
+		const query = (prisma.$queryRaw as jest.Mock).mock.calls
+			.map(([parts]) => parts.join('') as string)
+			.find(sql => sql.includes('FROM crm_customers.contacts'));
+		for (const column of [
+			'time_zone',
+			'preferred_call_start',
+			'preferred_call_end'
+		])
+			expect(query).toContain(`c.${column}`);
+	});
 });

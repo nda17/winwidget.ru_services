@@ -1,6 +1,7 @@
 import { ForbiddenException } from '@nestjs/common';
 import {
 	COMPANY_EXPORT_V2_COLUMNS,
+	CONTACT_EXPORT_V2_COLUMNS,
 	CustomersExportService,
 	EXPORT_COLUMNS
 } from './export.service';
@@ -133,21 +134,66 @@ describe('Customers export snapshot authorization', () => {
 			Object.keys(tx.company.findMany.mock.calls[0][0].select)
 		).toEqual(EXPORT_COLUMNS.companies);
 	});
-	test('does not invent a v2 contacts export', async () => {
-		const { service, authorize, prisma } = setup();
-		await expect(
-			service.prepare(
+	test.each(['json', 'csv'] as const)(
+		'v2 contacts include optional call preferences in %s without changing legacy export',
+		async format => {
+			const { service, tx, authorize } = setup();
+			const row = Object.fromEntries(
+				CONTACT_EXPORT_V2_COLUMNS.map(key => [key, null])
+			);
+			Object.assign(row, {
+				id: '22222222-2222-4222-8222-222222222222',
+				workspaceId,
+				name: '=Ирина',
+				version: 1,
+				createdBySubject: 'owner',
+				timeZone: 'Europe/Moscow',
+				preferredCallStart: '22:00',
+				preferredCallEnd: '07:00'
+			});
+			tx.contact.findMany.mockResolvedValue([row]);
+			const file = await service.prepare(
 				'Bearer user',
 				workspaceId,
 				'contacts',
-				'json',
+				format,
 				undefined,
 				2
-			)
-		).rejects.toMatchObject({ status: 400 });
-		expect(authorize).not.toHaveBeenCalled();
-		expect(prisma.$transaction).not.toHaveBeenCalled();
-	});
+			);
+			expect(exportHeaders(file)['X-WinCRM-Export-Schema']).toBe('2');
+			expect(
+				Object.keys(tx.contact.findMany.mock.calls[0][0].select)
+			).toEqual(CONTACT_EXPORT_V2_COLUMNS);
+			expect(authorize).toHaveBeenCalledTimes(2);
+			if (format === 'json')
+				expect(JSON.parse(file.body.toString())).toMatchObject({
+					schemaVersion: 2,
+					items: [row]
+				});
+			else {
+				expect(file.body.toString()).toContain(
+					'"timeZone","preferredCallStart","preferredCallEnd"'
+				);
+				expect(file.body.toString()).toContain('"\'=Ирина"');
+			}
+			tx.contact.findMany.mockClear();
+			const legacyFile = await service.prepare(
+				'Bearer user',
+				workspaceId,
+				'contacts',
+				'json'
+			);
+			expect(exportHeaders(legacyFile)['X-WinCRM-Export-Schema']).toBe(
+				'1'
+			);
+			expect(
+				Object.keys(tx.contact.findMany.mock.calls[0][0].select)
+			).toEqual(EXPORT_COLUMNS.contacts);
+			expect(
+				JSON.parse(legacyFile.body.toString()).items[0]
+			).not.toHaveProperty('timeZone');
+		}
+	);
 	test('READ_ONLY owner uses bounded read-only repeatable snapshot then fresh permission then audit', async () => {
 		const { service, tx, prisma, authorize, audit, findMany } = setup();
 		const file = await service.prepare(

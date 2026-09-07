@@ -22,6 +22,16 @@ export class ExportEntity {
 @Controller('crm/customers/exports')
 export class CustomersExportController {
 	constructor(private readonly exports: CustomersExportService) {}
+	@Get('v2/contacts')
+	async downloadContactsV2(
+		@Headers('authorization') bearer: string | undefined,
+		@Query() query: ExportQuery,
+		@Req() request: Request,
+		@Res() response: Response
+	) {
+		return this.send(bearer, 'contacts', query, request, response, 2);
+	}
+
 	@Get('v2/companies')
 	async downloadCompaniesV2(
 		@Headers('authorization') bearer: string | undefined,

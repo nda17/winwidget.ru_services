@@ -73,6 +73,9 @@ model Contact {
   phone            String?   @db.VarChar(16)
   email            String?   @db.VarChar(254)
   companyId        String?   @map("company_id") @db.Uuid
+  timeZone         String?   @map("time_zone") @db.VarChar(100)
+  preferredCallStart String? @map("preferred_call_start") @db.VarChar(5)
+  preferredCallEnd  String?  @map("preferred_call_end") @db.VarChar(5)
   notes            String?   @db.VarChar(5000)
   createdBySubject String    @map("created_by_subject") @db.VarChar(256)
   teamId           String?   @map("team_id") @db.Uuid

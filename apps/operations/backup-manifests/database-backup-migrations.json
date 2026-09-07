@@ -291,7 +291,7 @@
 			]
 		},
 		"crm-customers": {
-			"manifestSha256": "0a4b9896b08dca460c498aec2502994828bb3a26dd3ac5fdaec2ec37b32347e0",
+			"manifestSha256": "7dd82cb9ce3c8956fbac6469207b87cc36e85addc0feacef853d550e3d88722b",
 			"migrations": [
 				{
 					"name": "20260902011000_init_crm_customers",
@@ -312,6 +312,10 @@
 				{
 					"name": "20260907210000_add_company_requisites",
 					"checksum": "2906853950f496d481dc831af21d824418ecd7281f105ad3b3356e98c90fbfc1"
+				},
+				{
+					"name": "20260907223000_add_contact_call_preferences",
+					"checksum": "6ec838976adc8aa583b29a7732fe9cbddabb60d63ab7efd3b67c7d78968e0fec"
 				}
 			]
 		},

@@ -2,12 +2,15 @@ import { BadRequestException, Type, ValidationPipe } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import {
 	ArchiveCompanyV2Dto,
+	ArchiveContactV2Dto,
 	CreateCompanyDto,
 	CreateCompanyV2Dto,
 	CreateContactDto,
+	CreateContactV2Dto,
 	CustomerListQuery,
 	UpdateCompanyV2Dto,
-	UpdateContactDto
+	UpdateContactDto,
+	UpdateContactV2Dto
 } from './customers.dto';
 
 const pipe = new ValidationPipe({
@@ -15,6 +18,92 @@ const pipe = new ValidationPipe({
 	whitelist: true,
 	forbidNonWhitelisted: true,
 	validationError: { target: false, value: false }
+});
+
+describe('Contact v2 field validation without widening v1', () => {
+	const contact = {
+		schemaVersion: 2,
+		workspaceId: randomUUID(),
+		commandId: randomUUID(),
+		name: 'Ирина'
+	};
+	const body = (
+		value: unknown,
+		metatype: Type<unknown> = CreateContactV2Dto
+	) => pipe.transform(value, { type: 'body', metatype });
+	it.each(['Europe/Moscow', 'America/New_York', 'UTC'])(
+		'accepts explicit IANA zone %s and strict local times',
+		async timeZone => {
+			await expect(
+				body({
+					...contact,
+					timeZone,
+					preferredCallStart: '23:00',
+					preferredCallEnd: '07:00'
+				})
+			).resolves.toMatchObject({ timeZone });
+		}
+	);
+	it('allows absent/null fields and separate v2 update/archive ancestry', async () => {
+		await expect(body(contact)).resolves.toMatchObject(contact);
+		await expect(
+			body(
+				{
+					...contact,
+					timeZone: null,
+					preferredCallStart: null,
+					preferredCallEnd: null,
+					expectedVersion: 1
+				},
+				UpdateContactV2Dto
+			)
+		).resolves.toMatchObject({ timeZone: null });
+		const archive = {
+			schemaVersion: 2,
+			workspaceId: contact.workspaceId,
+			commandId: contact.commandId
+		};
+		await expect(
+			body({ ...archive, expectedVersion: 1 }, ArchiveContactV2Dto)
+		).resolves.toMatchObject({ schemaVersion: 2 });
+		await expect(
+			body({ ...contact, expectedVersion: 1 }, ArchiveContactV2Dto)
+		).rejects.toBeInstanceOf(BadRequestException);
+	});
+	it.each([
+		{ schemaVersion: 1 },
+		{ schemaVersion: '2' },
+		{ timeZone: 'Mars/Test' },
+		{ timeZone: '+03:00' },
+		{ timeZone: '' },
+		{ timeZone: 'x'.repeat(101) },
+		{ timeZone: 3 },
+		{ preferredCallStart: '24:00' },
+		{ preferredCallEnd: '12:60' },
+		{ preferredCallStart: '8:00' },
+		{ preferredCallEnd: '08:00:00' },
+		{ preferredCallEnd: 800 },
+		{ expectedVersion: 1 },
+		{ legalName: 'company-only' }
+	])('rejects invalid contact input %j', extra =>
+		expect(body({ ...contact, ...extra })).rejects.toBeInstanceOf(
+			BadRequestException
+		)
+	);
+	it('does not let legacy commands accept new fields or v2', async () => {
+		await expect(body(contact, CreateContactDto)).rejects.toBeInstanceOf(
+			BadRequestException
+		);
+		await expect(
+			body(
+				{ ...contact, schemaVersion: 1, timeZone: 'UTC' },
+				CreateContactDto
+			)
+		).rejects.toBeInstanceOf(BadRequestException);
+		await expect(
+			body({ ...contact, expectedVersion: 0 }, UpdateContactV2Dto)
+		).rejects.toBeInstanceOf(BadRequestException);
+	});
 });
 
 describe('Company v2 validation is isolated from legacy commands', () => {

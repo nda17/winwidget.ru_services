@@ -9,6 +9,7 @@ import { CustomersAuthorizationClient } from './access/customers-authorization.c
 import { CustomersController } from './customers/customers.controller';
 import { CustomersService } from './customers/customers.service';
 import { CompaniesV2Controller } from './customers/companies-v2.controller';
+import { ContactsV2Controller } from './customers/contacts-v2.controller';
 import { CompanyLookupController } from './company-lookup/company-lookup.controller';
 import { CompanyLookupService } from './company-lookup/company-lookup.service';
 import { CompanyLookupProvider } from './company-lookup/company-lookup.provider';
@@ -28,6 +29,7 @@ import {
 		CrmCustomersHealthController,
 		CustomersController,
 		CompaniesV2Controller,
+		ContactsV2Controller,
 		CompanyLookupController,
 		CustomersExportController,
 		ContactIntakeOperationController

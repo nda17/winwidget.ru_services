@@ -8,6 +8,7 @@ import {
 } from '@nestjs/common';
 import { Company, Contact, Prisma } from '@prisma/crm-customers-client';
 import { createHash } from 'node:crypto';
+import { isTimeZone } from 'class-validator';
 import {
 	assertCustomersPermission,
 	CustomersAuthorization
@@ -16,14 +17,17 @@ import { CrmCustomersPrismaService } from '../prisma/crm-customers-prisma.servic
 import {
 	ArchiveCustomerDto,
 	ArchiveCompanyV2Dto,
+	ArchiveContactV2Dto,
 	CreateCompanyDto,
 	CreateCompanyV2Dto,
 	CreateContactDto,
+	CreateContactV2Dto,
 	CustomerDuplicateQuery,
 	CustomerListQuery,
 	UpdateCompanyDto,
 	UpdateCompanyV2Dto,
-	UpdateContactDto
+	UpdateContactDto,
+	UpdateContactV2Dto
 } from './customers.dto';
 
 export type CustomerKind = 'contact' | 'company';
@@ -31,15 +35,18 @@ export type CustomerViewVersion = 1 | 2;
 type CustomerRow = Contact | Company;
 type CustomerData =
 	| CreateContactDto
+	| CreateContactV2Dto
 	| CreateCompanyDto
 	| CreateCompanyV2Dto;
 type CustomerWrite =
 	| CustomerData
 	| UpdateContactDto
+	| UpdateContactV2Dto
 	| UpdateCompanyDto
 	| UpdateCompanyV2Dto
 	| ArchiveCustomerDto
-	| ArchiveCompanyV2Dto;
+	| ArchiveCompanyV2Dto
+	| ArchiveContactV2Dto;
 type CustomerOperation = 'create' | 'update' | 'archive';
 
 export function customerScope(
@@ -84,7 +91,14 @@ export function customerView(
 				...common,
 				phone: (row as Contact).phone,
 				email: (row as Contact).email,
-				companyId: (row as Contact).companyId
+				companyId: (row as Contact).companyId,
+				...(viewVersion === 2
+					? {
+							timeZone: (row as Contact).timeZone,
+							preferredCallStart: (row as Contact).preferredCallStart,
+							preferredCallEnd: (row as Contact).preferredCallEnd
+						}
+					: {})
 			}
 		: {
 				...common,
@@ -169,9 +183,11 @@ export class CustomersService {
 
 	async duplicates(
 		context: CustomersAuthorization,
-		query: CustomerDuplicateQuery
+		query: CustomerDuplicateQuery,
+		viewVersion: CustomerViewVersion = 1
 	) {
 		this.assertContext(context, query.workspaceId, 'customers:read');
+		this.assertViewVersion('contact', viewVersion);
 		if (!query.phone && !query.email)
 			throw new BadRequestException('phone or email is required');
 		const candidates: Prisma.ContactWhereInput[] = [];
@@ -181,7 +197,8 @@ export class CustomersService {
 		return this.page(
 			'contact',
 			{ AND: [customerScope(context), { OR: candidates }] },
-			query
+			query,
+			viewVersion
 		);
 	}
 
@@ -239,7 +256,11 @@ export class CustomersService {
 		kind: CustomerKind,
 		context: CustomersAuthorization,
 		id: string,
-		command: UpdateContactDto | UpdateCompanyDto | UpdateCompanyV2Dto
+		command:
+			| UpdateContactDto
+			| UpdateContactV2Dto
+			| UpdateCompanyDto
+			| UpdateCompanyV2Dto
 	) {
 		return this.mutate(kind, 'update', context, command, id);
 	}
@@ -248,7 +269,7 @@ export class CustomersService {
 		kind: CustomerKind,
 		context: CustomersAuthorization,
 		id: string,
-		command: ArchiveCustomerDto | ArchiveCompanyV2Dto
+		command: ArchiveCustomerDto | ArchiveCompanyV2Dto | ArchiveContactV2Dto
 	) {
 		return this.mutate(kind, 'archive', context, command, id);
 	}
@@ -383,6 +404,15 @@ export class CustomersService {
 							if (prior.version !== expectedVersion)
 								throw this.versionConflict();
 						}
+						if (kind === 'contact' && command.schemaVersion === 2 && data)
+							this.assertContactCallPreferences({
+								timeZone: (prior as Contact | null)?.timeZone ?? null,
+								preferredCallStart:
+									(prior as Contact | null)?.preferredCallStart ?? null,
+								preferredCallEnd:
+									(prior as Contact | null)?.preferredCallEnd ?? null,
+								...data
+							});
 						if (
 							kind === 'contact' &&
 							data &&
@@ -537,7 +567,10 @@ export class CustomersService {
 					phone: (dto as CreateContactDto).phone ?? null,
 					email:
 						(dto as CreateContactDto).email?.trim().toLowerCase() || null,
-					companyId: (dto as CreateContactDto).companyId ?? null
+					companyId: (dto as CreateContactDto).companyId ?? null,
+					...(dto.schemaVersion === 2
+						? this.normalizeContactCallPreferences(dto, operation)
+						: {})
 				}
 			: {
 					...common,
@@ -570,11 +603,63 @@ export class CustomersService {
 		return data;
 	}
 
+	private normalizeContactCallPreferences(
+		dto: CreateContactV2Dto,
+		operation: 'create' | 'update'
+	) {
+		const data: Partial<
+			Pick<Contact, 'timeZone' | 'preferredCallStart' | 'preferredCallEnd'>
+		> = {};
+		for (const field of [
+			'timeZone',
+			'preferredCallStart',
+			'preferredCallEnd'
+		] as const) {
+			if (operation === 'create' || dto[field] !== undefined)
+				data[field] = dto[field] ?? null;
+		}
+		return data;
+	}
+
+	private assertContactCallPreferences(
+		data: Pick<
+			Contact,
+			'timeZone' | 'preferredCallStart' | 'preferredCallEnd'
+		>
+	) {
+		const {
+			timeZone,
+			preferredCallStart: start,
+			preferredCallEnd: end
+		} = data;
+		const validZone =
+			timeZone === null ||
+			(typeof timeZone === 'string' &&
+				timeZone.length <= 100 &&
+				/^[A-Za-z][A-Za-z0-9._+\/-]*$/.test(timeZone) &&
+				isTimeZone(timeZone));
+		const hhmm = /^(?:[01][0-9]|2[0-3]):[0-5][0-9]$/;
+		const validWindow =
+			(start === null && end === null) ||
+			(timeZone !== null &&
+				start !== null &&
+				end !== null &&
+				hhmm.test(start) &&
+				hhmm.test(end) &&
+				start !== end);
+		if (!validZone || !validWindow)
+			throw new BadRequestException({
+				code: 'crm_contact_call_preferences_invalid',
+				message:
+					'Use a valid time zone and either two different HH:mm values or no call window'
+			});
+	}
+
 	private assertViewVersion(
-		kind: CustomerKind,
+		_kind: CustomerKind,
 		viewVersion: CustomerViewVersion
 	) {
-		if (viewVersion !== 1 && !(kind === 'company' && viewVersion === 2))
+		if (viewVersion !== 1 && viewVersion !== 2)
 			throw new BadRequestException('Unsupported customer schema version');
 	}
 

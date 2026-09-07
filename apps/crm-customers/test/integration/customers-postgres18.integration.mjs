@@ -409,6 +409,111 @@ try {
 		context,
 		workspaceIds[2]
 	);
+	const preferences = {
+		timeZone: 'America/New_York',
+		preferredCallStart: '22:00',
+		preferredCallEnd: '07:00'
+	};
+	const contactV2Command = {
+		...command(context.workspaceId, { name: 'Contact call window' }),
+		schemaVersion: 2,
+		...preferences
+	};
+	const contactV2 = await service.create(
+		'contact',
+		context,
+		contactV2Command
+	);
+	assert.equal(contactV2.schemaVersion, 2);
+	for (const [key, value] of Object.entries(preferences))
+		assert.equal(contactV2.contact[key], value);
+	assert.deepEqual(
+		await service.create('contact', context, contactV2Command),
+		contactV2
+	);
+	const oldUpdate = await service.update(
+		'contact',
+		context,
+		contactV2.contact.id,
+		{
+			...command(context.workspaceId, { name: 'Legacy contact edit' }),
+			expectedVersion: 1
+		}
+	);
+	assert.equal(Object.hasOwn(oldUpdate.contact, 'timeZone'), false);
+	const persisted = await runtime.contact.findUniqueOrThrow({
+		where: { id: contactV2.contact.id }
+	});
+	for (const [key, value] of Object.entries(preferences))
+		assert.equal(persisted[key], value);
+	await assert.rejects(
+		service.update('contact', context, contactV2.contact.id, {
+			...contactV2Command,
+			commandId: randomUUID(),
+			expectedVersion: 2,
+			timeZone: null
+		}),
+		http(400)
+	);
+	// The runtime's existing table grants cover these columns; SQL itself rejects partial windows.
+	await assert.rejects(
+		runtime.$executeRawUnsafe(
+			'UPDATE crm_customers.contacts SET preferred_call_end = NULL WHERE id = $1::uuid AND workspace_id = $2::uuid',
+			contactV2.contact.id,
+			context.workspaceId
+		),
+		error => error?.code === 'P2010' && error?.meta?.code === '23514'
+	);
+	assert.equal(
+		(
+			await runtime.contact.findUniqueOrThrow({
+				where: { id: contactV2.contact.id }
+			})
+		).preferredCallEnd,
+		'07:00'
+	);
+	const cleared = await service.update(
+		'contact',
+		context,
+		contactV2.contact.id,
+		{
+			...contactV2Command,
+			commandId: randomUUID(),
+			expectedVersion: 2,
+			timeZone: null,
+			preferredCallStart: null,
+			preferredCallEnd: null
+		}
+	);
+	for (const key of Object.keys(preferences))
+		assert.equal(cleared.contact[key], null);
+	const failedContact = {
+		...contactV2Command,
+		commandId: randomUUID(),
+		name: 'Call preferences rollback'
+	};
+	await assert.rejects(
+		failure.create('contact', context, failedContact),
+		/forced receipt failure/
+	);
+	assert.equal(
+		await runtime.contact.count({
+			where: { workspaceId: context.workspaceId, name: failedContact.name }
+		}),
+		0
+	);
+	assert.equal(
+		await runtime.customerActivity.count({
+			where: { commandId: failedContact.commandId }
+		}),
+		0
+	);
+	assert.equal(
+		await runtime.customerCommand.count({
+			where: { commandId: failedContact.commandId }
+		}),
+		0
+	);
 	console.log(
 		'CRM Customers PostgreSQL 18 CRUD v1/v2, nullable requisites, replay, CAS, tenant/team scope, FK, rollback and append-only grants passed'
 	);

@@ -6,6 +6,7 @@ import {
 	IsInt,
 	IsOptional,
 	IsString,
+	IsTimeZone,
 	IsUrl,
 	IsUUID,
 	Matches,
@@ -111,5 +112,39 @@ export class UpdateCompanyV2Dto extends CreateCompanyV2Dto {
 }
 
 export class ArchiveCompanyV2Dto extends CompanyCommandV2Dto {
+	@IsInt() @Min(1) @Max(2_147_483_646) expectedVersion!: number;
+}
+
+export class ContactCommandV2Dto {
+	@Equals(2) schemaVersion!: 2;
+	@IsUUID('4') workspaceId!: string;
+	@IsUUID('4') commandId!: string;
+}
+
+export class CreateContactV2Dto extends ContactCommandV2Dto {
+	@IsString() @MaxLength(200) @Matches(/\S/) name!: string;
+	@IsOptional() @IsString() @MaxLength(5000) notes?: string | null;
+	@IsOptional() @IsUUID('4') teamId?: string | null;
+	@IsOptional() @Matches(/^\+[1-9][0-9]{6,14}$/) phone?: string | null;
+	@IsOptional() @IsEmail() @MaxLength(254) email?: string | null;
+	@IsOptional() @IsUUID('4') companyId?: string | null;
+	@IsOptional()
+	@MaxLength(100)
+	@IsTimeZone()
+	@Matches(/^[A-Za-z][A-Za-z0-9._+\/-]*$/)
+	timeZone?: string | null;
+	@IsOptional()
+	@Matches(/^(?:[01][0-9]|2[0-3]):[0-5][0-9]$/)
+	preferredCallStart?: string | null;
+	@IsOptional()
+	@Matches(/^(?:[01][0-9]|2[0-3]):[0-5][0-9]$/)
+	preferredCallEnd?: string | null;
+}
+
+export class UpdateContactV2Dto extends CreateContactV2Dto {
+	@IsInt() @Min(1) @Max(2_147_483_646) expectedVersion!: number;
+}
+
+export class ArchiveContactV2Dto extends ContactCommandV2Dto {
 	@IsInt() @Min(1) @Max(2_147_483_646) expectedVersion!: number;
 }

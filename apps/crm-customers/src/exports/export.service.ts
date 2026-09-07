@@ -61,6 +61,12 @@ export const COMPANY_EXPORT_V2_COLUMNS = [
 	'legalAddress',
 	'entityType'
 ] as const;
+export const CONTACT_EXPORT_V2_COLUMNS = [
+	...EXPORT_COLUMNS.contacts,
+	'timeZone',
+	'preferredCallStart',
+	'preferredCallEnd'
+] as const;
 type Entity = 'contacts' | 'companies';
 
 @Injectable()
@@ -81,8 +87,7 @@ export class CustomersExportService {
 		if (
 			!Object.prototype.hasOwnProperty.call(EXPORT_COLUMNS, entity) ||
 			!['json', 'csv'].includes(format) ||
-			![1, 2].includes(schemaVersion) ||
-			(schemaVersion === 2 && entity !== 'companies')
+			![1, 2].includes(schemaVersion)
 		)
 			throw new BadRequestException('Invalid export request');
 		const context = await this.authorization.authorize(
@@ -95,7 +100,9 @@ export class CustomersExportService {
 			const started = performance.now();
 			const columns =
 				schemaVersion === 2
-					? COMPANY_EXPORT_V2_COLUMNS
+					? entity === 'contacts'
+						? CONTACT_EXPORT_V2_COLUMNS
+						: COMPANY_EXPORT_V2_COLUMNS
 					: EXPORT_COLUMNS[entity];
 			const scope = exportScope(context, 'createdBySubject');
 			const snapshot = await this.prisma.$transaction(
@@ -141,7 +148,14 @@ export class CustomersExportService {
 											updatedAt: true,
 											phone: true,
 											email: true,
-											companyId: true
+											companyId: true,
+											...(schemaVersion === 2
+												? {
+														timeZone: true,
+														preferredCallStart: true,
+														preferredCallEnd: true
+													}
+												: {})
 										}
 									})
 								).map(row => exportItem(row, columns));
