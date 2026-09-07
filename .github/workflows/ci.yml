@@ -1352,7 +1352,7 @@ jobs:
           done
 
   deploy-production:
-    name: Apply isolated Billing CRM commerce ACL migration
+    name: Upgrade WinCRM services and scoped companions
     needs:
       - billing-crm-policy-integration
       - billing-wincrm-commerce-integration
@@ -1369,12 +1369,13 @@ jobs:
       - service-integration
       - widgets-integration
     if: github.event_name == 'push' && github.ref == 'refs/heads/prod'
-    uses: nda17/winwidget.ru_infra/.github/workflows/deploy-production.yml@d7186926fae0133ce4fa90a4ab4acc554df1ed6e
+    uses: nda17/winwidget.ru_infra/.github/workflows/deploy-production.yml@432e017a41b7b6a5a08baf786f20c0ad54ca04f3
     with:
       services_revision: ${{ github.sha }}
-      release_scope: billing-crm-commerce-acl
-      expected_live_revision: '774db6490808cbaff4ff96033c589205cb3935f7'
-      expected_service_env_sha256: 'a0ed9b243c69c882da78ebb8eb3926785a30d5b2615aa9e50c9ad3803d2a2fed'
+      release_scope: crm-upgrade
+      expected_live_revision: '837113b9f9f303bd6c043c2a2e37b0791369d7a3'
+      expected_service_env_sha256: '667977d5260de85dcfbc17ccac618446168773f67af5735ab7003bdbe36b4be1'
+      expected_crm_upgrade_baseline_sha256: 'd17fb6d18b56cc4f2f032838db21a1a989d99ad921e4db469c71b02431be948e'
     secrets:
       BACKEND_PRODUCTION_SSH_HOST: ${{ secrets.PRODUCTION_SSH_HOST }}
       BACKEND_PRODUCTION_SSH_PORT: ${{ secrets.PRODUCTION_SSH_PORT }}
