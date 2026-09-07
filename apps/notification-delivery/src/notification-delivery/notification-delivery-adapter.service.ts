@@ -32,14 +32,21 @@ import { Injectable } from '@nestjs/common';
 import { NotificationDeliveryReceiptStatus } from '@prisma/notification-delivery-client';
 import { WincrmInvitationContextService } from './wincrm-invitation-context.service';
 import { assertWincrmInvitationEvent } from '../messaging/wincrm-invitation.contract';
+import { assertWincrmTaskReminderEvent } from '../messaging/wincrm-task-reminder.contract';
+import { WincrmTaskReminderContextService } from './wincrm-task-reminder-context.service';
+import { WINCRM_TASK_REMINDER_EMAIL_EVENT_TYPE } from '../messaging/messaging.constants';
 
 export type NotificationDeliverySkipReason =
 	| 'INVITATION_EXPIRED'
-	| 'INVITATION_UNAVAILABLE';
-export type NotificationDeliveryResult = void | {
-	status: 'SKIPPED';
-	reason: NotificationDeliverySkipReason;
-};
+	| 'INVITATION_UNAVAILABLE'
+	| 'TASK_REMINDER_UNAVAILABLE';
+export type NotificationDeliveryResult =
+	| void
+	| {
+			status: 'SKIPPED';
+			reason: NotificationDeliverySkipReason;
+	  }
+	| { status: 'DEFERRED'; retryAt: string };
 
 @Injectable()
 export class NotificationDeliveryAdapterService {
@@ -47,7 +54,8 @@ export class NotificationDeliveryAdapterService {
 		private readonly emailService: EmailService,
 		private readonly telegram: TelegramInfoTransportService,
 		private readonly prisma: NotificationDeliveryPrismaService,
-		private readonly invitationContext: WincrmInvitationContextService
+		private readonly invitationContext: WincrmInvitationContextService,
+		private readonly reminderContext: WincrmTaskReminderContextService
 	) {}
 
 	async deliver(
@@ -57,6 +65,55 @@ export class NotificationDeliveryAdapterService {
 		lockToken?: string
 	): Promise<NotificationDeliveryResult> {
 		switch (kind) {
+			case 'wincrm-task-reminder-email':
+			case 'wincrm-task-reminder-telegram': {
+				assertWincrmTaskReminderEvent(event);
+				if (
+					!lockToken ||
+					event.eventId !== eventId ||
+					(kind === 'wincrm-task-reminder-email') !==
+						(event.eventType === WINCRM_TASK_REMINDER_EMAIL_EVENT_TYPE)
+				)
+					throw new Error(
+						'WinCRM task reminder requires a matching active claim'
+					);
+				const context = await this.reminderContext.resolve(event);
+				if (!context.deliver)
+					return context.retryAt
+						? { status: 'DEFERRED', retryAt: context.retryAt }
+						: { status: 'SKIPPED', reason: 'TASK_REMINDER_UNAVAILABLE' };
+				const claim =
+					await this.prisma.notificationDeliveryReceipt.findFirst({
+						where: {
+							eventId,
+							consumer: kind,
+							status: NotificationDeliveryReceiptStatus.PROCESSING,
+							lockToken,
+							leaseExpiresAt: { gt: new Date() }
+						},
+						select: { leaseExpiresAt: true }
+					});
+				if (
+					!claim?.leaseExpiresAt ||
+					claim.leaseExpiresAt.getTime() <= Date.now()
+				)
+					throw new Error(
+						'WinCRM task reminder claim is no longer active'
+					);
+				if (context.channel === 'EMAIL')
+					await this.emailService.sendWincrmTaskReminder(
+						context.destination.email!,
+						context.content,
+						eventId
+					);
+				else
+					await this.telegram.sendMessage(
+						context.destination.telegramChatId!,
+						`Напоминание о задаче WinCRM\n${context.content.title}\nСрок: ${new Date(context.content.dueAt).toLocaleString('ru-RU', { timeZone: context.content.timeZone })} (${context.content.timeZone})\nhttps://crm.winwidget.ru/tasks/${context.content.taskId}`,
+						{ parseMode: null }
+					);
+				return;
+			}
 			case 'wincrm-invitation-email': {
 				assertWincrmInvitationEvent(event);
 				if (!lockToken || event.eventId !== eventId)

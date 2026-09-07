@@ -2,7 +2,7 @@
 	"schemaVersion": 1,
 	"targets": {
 		"notification-delivery": {
-			"manifestSha256": "8dd527d4133c9978e6e426d54225c0bb8019355faf82922aa6d925e012b123c7",
+			"manifestSha256": "6c5bf79e6daeb866f24052f060dd71553cbcbaf8f2fc0edeec139b41769afcd3",
 			"migrations": [
 				{
 					"name": "20260727000000_init_notification_delivery",
@@ -39,6 +39,10 @@
 				{
 					"name": "20260907000000_add_wincrm_invitation_email",
 					"checksum": "dcbb2dded41b89ed178384893e03952ca8566f5556ce7a9d44ec5a4d67901983"
+				},
+				{
+					"name": "20260907230000_add_wincrm_task_reminders",
+					"checksum": "ecd2b1677dccc6c0515ef38baf28a4407c0ae4882c68bbcf4d60da11fd807b27"
 				}
 			]
 		},

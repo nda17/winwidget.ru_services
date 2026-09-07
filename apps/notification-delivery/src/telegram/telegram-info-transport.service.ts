@@ -41,6 +41,11 @@ export class TelegramInfoTransportService {
 
 	constructor(private readonly configService: ConfigService) {}
 
+	assertConfigured(): void {
+		this.getToken();
+		this.getApiBaseUrl();
+	}
+
 	async sendMessage(
 		chatId: string,
 		text: string,

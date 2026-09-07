@@ -6,6 +6,7 @@ import type { TelegramInfoTransportService } from '../telegram/telegram-info-tra
 import { render } from '@react-email/render';
 import type { Transporter } from 'nodemailer';
 import type { WincrmInvitationContextService } from './wincrm-invitation-context.service';
+import type { WincrmTaskReminderContextService } from './wincrm-task-reminder-context.service';
 
 describe('NotificationDeliveryAdapterService', () => {
 	const email = {
@@ -26,7 +27,8 @@ describe('NotificationDeliveryAdapterService', () => {
 		email,
 		telegram,
 		prisma,
-		invitationContext
+		invitationContext,
+		{} as WincrmTaskReminderContextService
 	);
 
 	beforeEach(() => {
@@ -472,7 +474,8 @@ describe('NotificationDeliveryAdapterService', () => {
 			email,
 			telegram,
 			checkpointPrisma,
-			invitationContext
+			invitationContext,
+			{} as WincrmTaskReminderContextService
 		);
 
 		await checkpointService.deliver(

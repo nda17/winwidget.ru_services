@@ -20,6 +20,14 @@ export const SUBSCRIPTION_EXPIRY_TELEGRAM_NOTIFICATION_EVENT_TYPE =
 	'notification.subscription-expiry.telegram.requested.v1';
 export const WINCRM_INVITATION_EMAIL_EVENT_TYPE =
 	'notification.wincrm.invitation.email.requested.v1';
+export const WINCRM_TASK_REMINDER_EMAIL_EVENT_TYPE =
+	'notification.wincrm.task-reminder.email.requested.v1';
+export const WINCRM_TASK_REMINDER_TELEGRAM_EVENT_TYPE =
+	'notification.wincrm.task-reminder.telegram.requested.v1';
+export const WINCRM_TASK_REMINDER_KINDS = [
+	'wincrm-task-reminder-email',
+	'wincrm-task-reminder-telegram'
+] as const;
 export const NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE =
 	'notification.delivery.outcome.v1';
 export const REPORTING_NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE =
@@ -49,7 +57,8 @@ export const DEFAULT_NOTIFICATION_DELIVERY_KINDS = [
 // New product delivery is opt-in; existing deployments retain their consumers.
 export const NOTIFICATION_DELIVERY_KINDS = [
 	...DEFAULT_NOTIFICATION_DELIVERY_KINDS,
-	'wincrm-invitation-email'
+	'wincrm-invitation-email',
+	...WINCRM_TASK_REMINDER_KINDS
 ] as const;
 
 export type NotificationDeliveryKind =
@@ -81,7 +90,9 @@ export const MESSAGING_ROUTING_KEYS: Record<MessagingKind, string> = {
 		SUBSCRIPTION_EXPIRY_EMAIL_NOTIFICATION_EVENT_TYPE,
 	'subscription-expiry-telegram':
 		SUBSCRIPTION_EXPIRY_TELEGRAM_NOTIFICATION_EVENT_TYPE,
-	'wincrm-invitation-email': WINCRM_INVITATION_EMAIL_EVENT_TYPE
+	'wincrm-invitation-email': WINCRM_INVITATION_EMAIL_EVENT_TYPE,
+	'wincrm-task-reminder-email': WINCRM_TASK_REMINDER_EMAIL_EVENT_TYPE,
+	'wincrm-task-reminder-telegram': WINCRM_TASK_REMINDER_TELEGRAM_EVENT_TYPE
 };
 
 export const MESSAGING_QUEUE_NAMES: Record<MessagingKind, string> = {
@@ -100,7 +111,11 @@ export const MESSAGING_QUEUE_NAMES: Record<MessagingKind, string> = {
 	'subscription-expiry-telegram':
 		'winwidget.notification.subscription-expiry.telegram',
 	'wincrm-invitation-email':
-		'winwidget.notification.wincrm.invitation.email'
+		'winwidget.notification.wincrm.invitation.email',
+	'wincrm-task-reminder-email':
+		'winwidget.notification.wincrm.task-reminder.email',
+	'wincrm-task-reminder-telegram':
+		'winwidget.notification.wincrm.task-reminder.telegram'
 };
 
 export const getManualRetryRoutingKey = (kind: MessagingKind): string =>

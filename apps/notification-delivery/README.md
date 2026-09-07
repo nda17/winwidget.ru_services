@@ -42,6 +42,70 @@ Delivery только публичный базовый URL сайта для с
 выполняет через неё reCAPTCHA-проверки; имя сохранено, чтобы production deploy
 использовал уже существующий env-контракт без отдельной миграции.
 
+## Напоминания о задачах WinCRM — отдельный opt-in
+
+Два новых kind: `wincrm-task-reminder-email` и `wincrm-task-reminder-telegram`.
+Default consumers остаются прежними 11; новое поведение включается только
+явным добавлением kind в `NOTIFICATION_DELIVERY_KINDS`. Сначала применить
+`20260907230000_add_wincrm_task_reminders` migration-ролью, подготовить отдельные
+queue/routing ACL и совместимый ND reader, затем включать Sales producer.
+Prisma-модели и grants не расширены: миграция добавляет ровно два kind к
+существующим CHECK allowlist, сохраняя прежние ограничения.
+
+Для каналов `email|telegram` event type / main routing —
+`notification.wincrm.task-reminder.<channel>.requested.v1`, queue —
+`winwidget.notification.wincrm.task-reminder.<channel>`. Manual routing —
+`manual.wincrm-task-reminder-<channel>`, DLQ —
+`wincrm-task-reminder-<channel>.dead-letter`. Retry/DLQ queues отдельные для
+каждого канала, по существующему `.retry-v2.<index>` шаблону. Обмены и
+publisher confirm/mandatory остаются прежними.
+
+Broker получает только `{schemaVersion:1,eventId,eventType,occurredAt,
+reference:{type:'wincrm-task-reminder',id,workspaceId}}`: UUIDv4, canonical
+UTC ISO, AMQP messageId равен eventId. Адрес, тема задачи и персональные
+данные в событие/Outbox не копируются. После PROCESSING claim ND выполняет
+POST `/internal/v1/notification-delivery/task-reminders/:id/delivery-context`
+на `CRM_SALES_INTERNAL_BASE_URL` с `x-winwidget-service: notification-delivery`,
+`x-winwidget-internal-token: CRM_SALES_NOTIFICATION_DELIVERY_TOKEN` и body
+`{schemaVersion:1,eventId,workspaceId,channel:'EMAIL'|'TELEGRAM'}`.
+Timeout 5 секунд, ответ до 8192 байт, redirects запрещены. HTTP/JSON/binding
+ошибки не разрешают отправку и проходят существующий retry/DLQ.
+
+Sales повторно проверяет актуальность задачи, правила, membership/видимость
+и подтверждённый канал. Ответ с точными event/reminder/workspace/channel
+bindings содержит `deliver,retryAt,destination,content`. При `deliver:false`
+destination/content строго null: retryAt null закрывает receipt как
+`SKIPPED / TASK_REMINDER_UNAVAILABLE`, а будущий retryAt (не далее 72 часов)
+атомарно сохраняет RETRY_SCHEDULED + Outbox. Quiet defer сохраняет retryAttempt
+и исключает ожидание из окна retry; не создаёт failure, не делает sleep и
+ACK выполняется только после коммита. Retry token защищает от ранней и
+повторной доставки; рестарт не сбрасывает эту защиту.
+
+При `deliver:true` актуальный PROCESSING/lockToken/lease проверяется перед
+вызовом транспорта. Email использует общий EmailLayout и стабильный
+Message-ID, Telegram — plain text (`parseMode:null`). Ссылка только
+`https://crm.winwidget.ru/tasks/:taskId`; она не предоставляет права доступа.
+Проверка eligibility не блокирует распределённо изменения после ответа;
+отозвать уже принятое провайдером сообщение нельзя. Crash после provider
+accept и до receipt допускает редкий дубль, не обещается exactly-once.
+
+Обратный private GET `/internal/v1/crm-sales/task-reminders/readiness`
+доступен только loopback socket + `x-winwidget-service: crm-sales` и отдельный
+`NOTIFICATION_DELIVERY_CRM_SALES_TOKEN`. Нельзя переиспользовать противоположный
+token, Operations или Identity credentials. Ответ
+`{schemaVersion:1,ready:true,checkedAt,channels:['EMAIL','TELEGRAM']}` требует
+оба реально запущенных consumer, worker/broker/outbox/retention readiness и
+настроенные SMTP/Telegram transports. Это не пробная отправка и не гарантия
+доступности внешнего провайдера; ошибки дают 503 без приватных деталей.
+
+Новые ключи нужны только ND runtime: `CRM_SALES_INTERNAL_BASE_URL`,
+`CRM_SALES_NOTIFICATION_DELIVERY_TOKEN`, `NOTIFICATION_DELIVERY_CRM_SALES_TOKEN`
+и opt-in kinds; SMTP/Telegram используют существующую конфигурацию.
+Изолированный `test:integration:wincrm-invitation` дополнительно проверяет
+оба reminder kind, CHECK binding, quiet defer на последней попытке, fresh
+receipt service после рестарта, early duplicate/token и один fake send.
+Ни SMTP, ни Telegram в тесте не вызываются.
+
 ## Приглашения WinCRM — отдельный opt-in
 
 Kind `wincrm-invitation-email` не входит в default consumers. Для включения

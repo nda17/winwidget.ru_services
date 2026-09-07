@@ -212,6 +212,112 @@ model TaskTimeline {
   @@schema("crm_sales")
 }
 
+model ReminderRule {
+  id                String @id @db.Uuid
+  workspaceId       String @map("workspace_id") @db.Uuid
+  scope             String @db.VarChar(16)
+  ownerSubject      String @map("owner_subject") @db.VarChar(256)
+  ownerMembershipId String? @map("owner_membership_id") @db.Uuid
+  version           Int @default(1)
+  configuration     Json
+  archivedAt        DateTime? @map("archived_at")
+  createdAt         DateTime @default(now()) @map("created_at")
+  updatedAt         DateTime @updatedAt @map("updated_at")
+  commands          ReminderRuleCommand[]
+
+  @@unique([id, workspaceId])
+  @@index([workspaceId, scope, ownerSubject, ownerMembershipId, archivedAt, createdAt, id], map: "reminder_rules_list_idx")
+  @@map("reminder_rules")
+  @@schema("crm_sales")
+}
+
+model ReminderRuleCommand {
+  commandId         String @id @map("command_id") @db.Uuid
+  workspaceId       String @map("workspace_id") @db.Uuid
+  actorSubject      String @map("actor_subject") @db.VarChar(256)
+  actorMembershipId String? @map("actor_membership_id") @db.Uuid
+  commandType       String @map("command_type") @db.VarChar(16)
+  requestHash       String @map("request_hash") @db.Char(64)
+  ruleId            String @map("rule_id") @db.Uuid
+  before            Json?
+  result            Json
+  createdAt         DateTime @default(now()) @map("created_at")
+  rule              ReminderRule @relation(fields: [ruleId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
+
+  @@index([workspaceId, ruleId, createdAt, commandId], map: "reminder_rule_commands_history_idx")
+  @@map("reminder_rule_commands")
+  @@schema("crm_sales")
+}
+
+model ReminderJob {
+  id             String @id @db.Uuid
+  periodKey      String @unique @map("period_key") @db.VarChar(160)
+  workspaceId    String? @map("workspace_id") @db.Uuid
+  taskId         String? @map("task_id") @db.Uuid
+  cursor         String? @db.Uuid
+  status         String @default("PENDING") @db.VarChar(16)
+  availableAt    DateTime @default(now()) @map("available_at")
+  leaseToken     String? @map("lease_token") @db.Uuid
+  leaseExpiresAt DateTime? @map("lease_expires_at")
+  attempts       Int @default(0)
+  createdAt      DateTime @default(now()) @map("created_at")
+  completedAt    DateTime? @map("completed_at")
+
+  @@index([status, availableAt])
+  @@map("reminder_jobs")
+  @@schema("crm_sales")
+}
+
+model ReminderDelivery {
+  id                    String @id @db.Uuid
+  deduplicationKey      String @unique @map("deduplication_key") @db.Char(64)
+  workspaceId           String @map("workspace_id") @db.Uuid
+  taskId                String @map("task_id") @db.Uuid
+  ruleId                String @map("rule_id") @db.Uuid
+  taskVersion           Int @map("task_version")
+  ruleVersion           Int @map("rule_version")
+  occurrenceIndex       Int @map("occurrence_index")
+  recipientSubject      String @map("recipient_subject") @db.VarChar(256)
+  recipientMembershipId String? @map("recipient_membership_id") @db.Uuid
+  channel               String @db.VarChar(16)
+  nominalAt             DateTime @map("nominal_at")
+  status                String @default("PENDING") @db.VarChar(16)
+  createdAt             DateTime @default(now()) @map("created_at")
+
+  @@index([workspaceId, taskId, status])
+  @@index([workspaceId, ruleId, status])
+  @@map("reminder_deliveries")
+  @@schema("crm_sales")
+}
+
+model ReminderOutbox {
+  id             String @id @db.Uuid
+  messageId      String @map("message_id") @db.Uuid
+  eventType      String @map("event_type") @db.VarChar(120)
+  payload        Json
+  availableAt    DateTime @default(now()) @map("available_at")
+  status         String @default("PENDING") @db.VarChar(16)
+  leaseToken     String? @map("lease_token") @db.Uuid
+  leaseExpiresAt DateTime? @map("lease_expires_at")
+  attempts       Int @default(0)
+  createdAt      DateTime @default(now()) @map("created_at")
+  publishedAt    DateTime? @map("published_at")
+
+  @@index([status, availableAt, createdAt])
+  @@map("reminder_outbox")
+  @@schema("crm_sales")
+}
+
+model ReminderRuntime {
+  id          String @id @db.VarChar(32)
+  revision    String @db.VarChar(64)
+  ready       Boolean
+  lastSeenAt  DateTime @map("last_seen_at")
+
+  @@map("reminder_runtime")
+  @@schema("crm_sales")
+}
+
 model DealTimeline {
   id           String   @id @default(uuid()) @db.Uuid
   workspaceId  String   @map("workspace_id") @db.Uuid

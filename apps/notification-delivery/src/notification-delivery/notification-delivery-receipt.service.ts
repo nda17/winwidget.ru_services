@@ -21,6 +21,7 @@ import { NotificationDeliveryMessageMetadataService } from './notification-deliv
 import { NotificationDeliveryOutcomeService } from './notification-delivery-outcome.service';
 import { NotificationDeliveryPrismaService } from './prisma/notification-delivery-prisma.service';
 import type { NotificationDeliverySkipReason } from './notification-delivery-adapter.service';
+import { WINCRM_TASK_REMINDER_KINDS } from '../messaging/messaging.constants';
 
 const DELIVERY_RECEIPT_LEASE_MS = 10 * 60 * 1000;
 const DELIVERY_RECOVERY_GRACE_MS = 5_000;
@@ -190,8 +191,14 @@ export class NotificationDeliveryReceiptService {
 		reason: NotificationDeliverySkipReason
 	): Promise<void> {
 		if (
-			consumer !== 'wincrm-invitation-email' ||
-			!['INVITATION_EXPIRED', 'INVITATION_UNAVAILABLE'].includes(reason)
+			!(
+				(consumer === 'wincrm-invitation-email' &&
+					['INVITATION_EXPIRED', 'INVITATION_UNAVAILABLE'].includes(
+						reason
+					)) ||
+				(WINCRM_TASK_REMINDER_KINDS.some(kind => kind === consumer) &&
+					reason === 'TASK_REMINDER_UNAVAILABLE')
+			)
 		)
 			throw new Error('Unsupported notification skip');
 		await this.prisma.$transaction(async transaction => {
@@ -291,6 +298,66 @@ export class NotificationDeliveryReceiptService {
 				payload,
 				status: 'DELIVERED',
 				failure: null
+			});
+		});
+	}
+
+	async deferReminderDelivery(input: {
+		kind: NotificationDeliveryKind;
+		eventId: string;
+		eventType: string;
+		payload: NotificationDeliveryEventPayload;
+		lockToken: string;
+		retryAttempt: number;
+		firstFailedAt: Date;
+		retryAt: string;
+		message: ConsumeMessage;
+	}): Promise<void> {
+		const now = Date.now();
+		const requested = Date.parse(input.retryAt);
+		if (
+			!WINCRM_TASK_REMINDER_KINDS.some(kind => kind === input.kind) ||
+			!Number.isFinite(requested) ||
+			requested > now + 72 * 60 * 60 * 1000
+		)
+			throw new Error('Invalid task reminder deferral');
+		const availableAt = new Date(Math.max(now + 1000, requested));
+		const retryToken = randomUUID();
+		// Quiet time is not an error: preserve attempt count and exclude this wait from its retry window.
+		const headers = createMessagingHeaders({
+			messageId: input.eventId,
+			causationId: input.eventId,
+			headers: {
+				...this.metadata.filterSafeHeaders(
+					getScalarMessageHeaders(input.message)
+				),
+				'x-retry-attempt': input.retryAttempt,
+				'x-first-failed-at': new Date(
+					input.firstFailedAt.getTime() + availableAt.getTime() - now
+				).toISOString(),
+				'x-delivery-token': retryToken
+			}
+		}) as Prisma.InputJsonObject;
+		await this.prisma.$transaction(async transaction => {
+			await this.markRetryScheduled(transaction, {
+				eventId: input.eventId,
+				kind: input.kind,
+				lockToken: input.lockToken,
+				attempt: input.retryAttempt,
+				availableAt,
+				retryToken
+			});
+			await transaction.notificationDeliveryOutboxEvent.create({
+				data: {
+					messageId: input.eventId,
+					deduplicationKey: `notification:${input.eventId}:${input.kind}:quiet:${retryToken}`,
+					exchange: NotificationDeliveryExchange.EVENTS,
+					eventType: input.eventType,
+					routingKey: getManualRetryRoutingKey(input.kind),
+					payload: input.payload as unknown as Prisma.InputJsonValue,
+					headers,
+					availableAt
+				}
 			});
 		});
 	}

@@ -18,6 +18,11 @@ import { TelegramInfoTransportModule } from '../telegram/telegram-info-transport
 import { Module, OnApplicationShutdown } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { WincrmInvitationContextService } from './wincrm-invitation-context.service';
+import { WincrmTaskReminderContextService } from './wincrm-task-reminder-context.service';
+import {
+	WincrmTaskReminderReadinessController,
+	WincrmTaskReminderReadinessGuard
+} from './wincrm-task-reminder-readiness.controller';
 
 @Module({
 	imports: [
@@ -28,9 +33,14 @@ import { WincrmInvitationContextService } from './wincrm-invitation-context.serv
 		EmailModule,
 		TelegramInfoTransportModule
 	],
-	controllers: [NotificationDeliveryHealthController],
+	controllers: [
+		NotificationDeliveryHealthController,
+		WincrmTaskReminderReadinessController
+	],
 	providers: [
 		WincrmInvitationContextService,
+		WincrmTaskReminderContextService,
+		WincrmTaskReminderReadinessGuard,
 		NotificationDeliveryAdapterService,
 		NotificationDeliveryHeartbeatService,
 		NotificationDeliveryMessageMetadataService,

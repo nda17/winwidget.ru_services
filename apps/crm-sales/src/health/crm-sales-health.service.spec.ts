@@ -37,6 +37,14 @@ describe('CrmSalesHealthService', () => {
 			salesTask: { findFirst: jest.fn().mockResolvedValue(null) },
 			taskCommandReceipt: { findFirst: jest.fn().mockResolvedValue(null) },
 			taskTimeline: { findFirst: jest.fn().mockResolvedValue(null) },
+			reminderRule: { findFirst: jest.fn().mockResolvedValue(null) },
+			reminderRuleCommand: {
+				findFirst: jest.fn().mockResolvedValue(null)
+			},
+			reminderJob: { findFirst: jest.fn().mockResolvedValue(null) },
+			reminderDelivery: { findFirst: jest.fn().mockResolvedValue(null) },
+			reminderOutbox: { findFirst: jest.fn().mockResolvedValue(null) },
+			reminderRuntime: { findFirst: jest.fn().mockResolvedValue(null) },
 			dealTimeline: { findFirst: jest.fn().mockResolvedValue(null) },
 			salesCommandReceipt: {
 				findFirst: jest.fn().mockResolvedValue(null)
@@ -108,7 +116,12 @@ describe('CrmSalesHealthService', () => {
 		).toHaveBeenCalledWith({ select: { commandId: true } });
 	});
 
-	it.each(['taskCommandReceipt', 'taskTimeline'] as const)(
+	it.each([
+		'taskCommandReceipt',
+		'taskTimeline',
+		'reminderRule',
+		'reminderRuleCommand'
+	] as const)(
 		'refuses readiness without %s permissions/schema',
 		async table => {
 			const prisma = createPrisma();

@@ -4,6 +4,8 @@ import LimitReachedEmail from '../../emails/limit-reached.email';
 import PaymentSucceededEmail from '../../emails/payment-succeeded.email';
 import SubscriptionExpiryReminderEmail from '../../emails/subscription-expiry-reminder.email';
 import WincrmInvitationEmail from '../../emails/wincrm-invitation.email';
+import WincrmTaskReminderEmail from '../../emails/wincrm-task-reminder.email';
+import type { ReminderContent } from '../messaging/wincrm-task-reminder.contract';
 import { EMAIL_TRANSPORTER } from '../config/mailer.config';
 import { Inject, Injectable } from '@nestjs/common';
 import { render } from '@react-email/render';
@@ -184,5 +186,23 @@ export class EmailService {
 			return `${days} дня`;
 		}
 		return `${days} дней`;
+	}
+
+	sendWincrmTaskReminder(
+		to: string,
+		content: ReminderContent,
+		eventId: string
+	) {
+		const html = render(
+			WincrmTaskReminderEmail({
+				...content,
+				dueAtLabel: new Date(content.dueAt).toLocaleString('ru-RU', {
+					timeZone: content.timeZone
+				})
+			})
+		);
+		return this.sendEmail(to, 'Напоминание о задаче WinCRM', html, {
+			messageId: `<${eventId}.wincrm-task-reminder@winwidget.ru>`
+		});
 	}
 }

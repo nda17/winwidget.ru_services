@@ -11,6 +11,7 @@
 	"scripts": {
 		"build": "tsc -p tsconfig.build.json",
 		"start": "node dist/src/main.js",
+		"start:reminders": "node dist/src/main-reminders.js",
 		"lint": "eslint \"src/**/*.ts\" --max-warnings=0",
 		"test": "jest --runInBand",
 		"test:integration:export": "node test/integration/export-postgres18.integration.mjs",
@@ -28,6 +29,8 @@
 		"@nestjs/core": "11.1.18",
 		"@nestjs/platform-express": "11.1.18",
 		"@prisma/client": "5.22.0",
+		"amqp-connection-manager": "5.0.0",
+		"amqplib": "0.10.9",
 		"class-transformer": "^0.5.1",
 		"class-validator": "^0.14.1",
 		"express": "5.2.1",
@@ -37,6 +40,7 @@
 	},
 	"devDependencies": {
 		"@nestjs/testing": "11.1.18",
+		"@types/amqplib": "0.10.8",
 		"@types/express": "5.0.6",
 		"@types/jest": "^29.5.14",
 		"@types/node": "^20.17.12",

@@ -1154,8 +1154,8 @@ jobs:
               docker exec "$POSTGRES_CONTAINER_ID" psql -U crm_domain_bootstrap_ci -d "$DOMAIN_DATABASE" -v ON_ERROR_STOP=1 -c 'GRANT SELECT, INSERT, UPDATE, DELETE ON crm_intake.ingestion_rate_buckets TO crm_domain_runtime_ci'
               ;;
             crm-sales)
-              mutable_tables='crm_sales.deals, crm_sales.tasks'
-              receipt_tables='crm_sales.deal_timeline, crm_sales.command_receipts, crm_sales.task_command_receipts, crm_sales.task_timeline, crm_sales.pipeline_template_installations, crm_sales.pipeline_template_installation_commands, crm_sales.intake_operation_slots, crm_sales.intake_operation_commands, crm_sales.export_audit'
+              mutable_tables='crm_sales.deals, crm_sales.tasks, crm_sales.reminder_rules, crm_sales.reminder_jobs, crm_sales.reminder_deliveries, crm_sales.reminder_outbox, crm_sales.reminder_runtime'
+              receipt_tables='crm_sales.deal_timeline, crm_sales.command_receipts, crm_sales.task_command_receipts, crm_sales.task_timeline, crm_sales.pipeline_template_installations, crm_sales.pipeline_template_installation_commands, crm_sales.intake_operation_slots, crm_sales.intake_operation_commands, crm_sales.export_audit, crm_sales.reminder_rule_commands'
               docker exec "$POSTGRES_CONTAINER_ID" psql -U crm_domain_bootstrap_ci -d "$DOMAIN_DATABASE" -v ON_ERROR_STOP=1 -c 'GRANT SELECT, INSERT, UPDATE, DELETE ON crm_sales.pipelines, crm_sales.pipeline_stages TO crm_domain_runtime_ci'
               ;;
             notification-delivery)

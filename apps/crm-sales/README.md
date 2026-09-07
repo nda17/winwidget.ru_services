@@ -32,6 +32,111 @@ RabbitMQ, restart policy и восстановления очередей пер
   приложений запрещён;
 - общих runtime-модулей и общей БД у CRM-сервисов нет.
 
+## Правила и доставка напоминаний
+
+`/api/v1/crm/sales/reminder-rules` хранит правила отдельно от задач. Отправка
+по умолчанию выключена. `enabled: true` допускается только при явном
+`CRM_TASK_REMINDERS_ENABLED=true`, свежем heartbeat процесса Sales reminders
+той же revision и свежем private readiness-подтверждении обоих ND consumers
+и транспортов. Иначе — `503 crm_reminders_not_ready`; выключенный draft
+сохраняется, но не подтверждает доступность выбранных получателей/каналов.
+`deliveryReady` отражает эту проверку. Повтор уже выполненной команды возвращает
+её прежний receipt и после временной недоступности транспорта.
+
+Новый отдельный entrypoint `node dist/src/main-reminders.js` запускается только
+с `CRM_SALES_PROCESS_ROLE=reminders`, `CRM_SALES_REMINDERS_PORT=5331` и явным
+включением доставки. HTTP health слушает только `127.0.0.1:5331`; API не
+запускает scheduler, publisher или consumer. Процесс использует собственный
+Sales Prisma context и runtime-принципал, без чужих таблиц.
+
+Scheduler атомарно создаёт уникальное задание минуты и Outbox. PostgreSQL
+triggers на изменении задач/правил отменяют старые generations и создают
+wake-up Outbox в той же транзакции, включая прежние v1 writers. Push consumer
+обрабатывает страницы по пять задач с возобновляемым 60-секундным CAS-lease,
+heartbeat каждые 15 секунд и durable cursor/continuation перед ACK. Повтор при
+занятом lease сохраняет отложенный Outbox с новым receipt ID; ошибка БД не
+подтверждается. Publisher использует confirm/mandatory, lease/CAS и бессрочный
+ограниченный backoff для временной недоступности брокера.
+
+После простоя выбирается только последний актуальный индекс повтора, без
+серии накопившихся уведомлений. Тихие часы вычисляются в IANA timezone правила;
+BEFORE_DUE не отправляется после наступления самого дедлайна. Генерация имеет
+unique key task/rule/version/index/exact recipient/channel. Access получает
+текущую задачу и её deal scope; получатели проверяются страницами до 100,
+контакты не сохраняются в Sales и не передаются через RabbitMQ.
+
+ND получает только opaque reference по новым opt-in events
+`notification.wincrm.task-reminder.email.requested.v1` и
+`notification.wincrm.task-reminder.telegram.requested.v1`. После собственного
+receipt claim ND вызывает private
+`POST /internal/v1/notification-delivery/task-reminders/:id/delivery-context`.
+Sales повторно проверяет текущие задачу/сделку/правило, active exact membership,
+видимость, ACTIVE/GRACE и подтверждённый email/подключённый Telegram. READ_ONLY,
+отзыв доступа и устаревшая generation дают suppression; сбой authority — ошибку,
+не фиктивный пустой успех. Quiet-hours boundary даёт `retryAt` без контактов;
+ND сохраняет durable defer перед ACK без расходования error-retry budget.
+
+Новые private env пары: `CRM_SALES_NOTIFICATION_DELIVERY_TOKEN` (ND → Sales),
+`NOTIFICATION_DELIVERY_CRM_SALES_TOKEN` (Sales → ND readiness),
+`NOTIFICATION_DELIVERY_INTERNAL_BASE_URL`. Токены не совпадают с другими
+owner-парами. Брокерный процесс требует `RABBITMQ_CONNECTION_NAME=
+winwidget-crm-sales-reminders`; controller заранее создаёт durable очередь
+`winwidget.crm.sales.reminders` и binding `crm.sales.reminder.tick.v1` на
+`winwidget.events`, её DLX `winwidget.dead-letter` / route
+`crm-sales-reminders.dead-letter` / queue
+`winwidget.crm.sales.reminders.dead-letter`. Runtime не объявляет topology.
+Write ACL ограничен tick и двумя notification event routes; read ACL — одной
+рабочей очередью. Временный job retry идёт через Sales Outbox `availableAt`,
+не polling consumer и не sleep в обработчике.
+
+До production включения нужны обе Sales additive migrations, точные runtime
+grants шести новых таблиц, совместимые Access/Identity/ND reader, ND CHECK
+migration, scoped broker ACL, отдельный Sales процесс и согласованные
+тестовые получатели. Наличие исходного кода или unit PASS не доказывает rollout.
+SMTP/Telegram остаются at-least-once: принятие провайдером перед аварией до
+фиксации receipt может дать редкий дубль; отозвать принятое сообщение нельзя.
+
+- `GET /` — серверный список: `workspaceId`, `scope=PERSONAL|WORKSPACE`,
+  `archived=false|true`, `page`, `pageSize` (1–100).
+- `GET /:id` и `GET /:id/history` — карточка и серверная история команд.
+- `POST /`, `POST /:id/edit`, `POST /:id/archive` — создание, полная замена
+  настроек и мягкое архивирование. Все команды: `schemaVersion: 1`,
+  `workspaceId`, UUIDv4 `commandId`, равный `Idempotency-Key`,
+  `actorMembershipId` (UUID действующего сотрудника либо `null` для OWNER).
+  Изменение/архивирование требуют `expectedVersion`; создание/изменение —
+  `rule` по строгому контракту `reminders/reminder-rule.ts`. На создании
+  отсутствие `enabled` означает `false`.
+
+В GET `actorMembershipId` обязателен для сотрудника и отсутствует у OWNER.
+Это только заявленная точная привязка: Sales проверяет её через существующий
+read-only `POST /api/v1/crm/access/team/assignee-labels` с единственной self-парой
+и исходным Bearer. Нулевой binding допустим только после подтверждения OWNER
+контекстом и employee-ответом Access. Имена/email из ответа не сохраняются.
+Повторная авторизация сравнивает actor/workspace, роль, состояние, scope,
+команды и permissions; чтение не использует write-only authorize-assignee.
+
+OWNER/CRM_ADMIN изменяют общие правила. Личные правила читает/меняет только
+тот же subject с тем же membership; другой администратор и повторное вступление
+не дают доступа к старому личному правилу. ANALYST не получает новых прав к
+задачам. ACTIVE/GRACE допускают запись, READ_ONLY — только чтение. ID, scope и
+создатель правила неизменяемы; общую конфигурацию может редактировать другой
+действующий OWNER/CRM_ADMIN без перепривязки создателя.
+
+Лимиты MVP: 20 неархивных общих правил и 10 личных на точную self-привязку.
+Это ограничение будущего fan-out расписания, не количества задач. Короткий
+advisory-lock только workspace правил сериализует квоту и CAS; отдельный
+command-lock и serializable retry защищают повтор. Receipt и before/result
+история пишутся в одной транзакции с правилом и перепроверкой прав до коммита.
+Архив освобождает квоту, но не удаляет историю; runtime имеет SELECT/INSERT на
+receipts без UPDATE/DELETE, также действуют append-only и no-truncate триггеры.
+
+Перед отдельным release необходимы миграция
+`20260907220000_add_reminder_rules`, обновлённый `database-access.json` и
+runtime grants. В статическом CRM workflow CI нужны `crm_sales.reminder_rules`
+в `mutable_tables`, `crm_sales.reminder_rule_commands` в `receipt_tables`.
+PG18 fixture расширен в `sales-workflow-postgres18.integration.mjs`; локальные
+unit/contract проверки не заменяют его успешный CI-прогон и production rollout.
+
 ## HTTP
 
 - `GET /health/live` — liveness и текущая ревизия;

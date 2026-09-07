@@ -118,6 +118,13 @@ export class NotificationDeliveryWorkerService
 		return this.ready && !this.shuttingDown;
 	}
 
+	isReadyForKinds(kinds: readonly NotificationDeliveryKind[]): boolean {
+		return (
+			this.isReady() &&
+			kinds.every(kind => this.effectiveKinds.includes(kind))
+		);
+	}
+
 	beforeApplicationShutdown(): Promise<void> {
 		this.shutdownPromise ??= this.shutdown();
 		return this.shutdownPromise;
@@ -285,6 +292,21 @@ export class NotificationDeliveryWorkerService
 		}
 
 		try {
+			if (deliveryResult?.status === 'DEFERRED') {
+				await this.receipts.deferReminderDelivery({
+					kind,
+					message,
+					eventId,
+					eventType,
+					payload,
+					retryAttempt,
+					firstFailedAt,
+					lockToken: claim.lockToken,
+					retryAt: deliveryResult.retryAt
+				});
+				this.ackMessage(message);
+				return;
+			}
 			if (deliveryResult?.status === 'SKIPPED') {
 				await this.receipts.markSkipped(
 					eventId,

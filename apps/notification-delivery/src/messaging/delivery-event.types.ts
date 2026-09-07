@@ -13,7 +13,9 @@ import {
 	SUBSCRIPTION_EXPIRY_EMAIL_NOTIFICATION_EVENT_TYPE,
 	SUBSCRIPTION_EXPIRY_TELEGRAM_NOTIFICATION_EVENT_TYPE,
 	TELEGRAM_DESTINATION_UNAVAILABLE_EVENT_TYPE,
-	WINCRM_INVITATION_EMAIL_EVENT_TYPE
+	WINCRM_INVITATION_EMAIL_EVENT_TYPE,
+	WINCRM_TASK_REMINDER_EMAIL_EVENT_TYPE,
+	WINCRM_TASK_REMINDER_TELEGRAM_EVENT_TYPE
 } from './messaging.constants';
 
 export const PLAN_VALUES = ['TRIAL', 'EASY', 'HARD'] as const;
@@ -328,6 +330,7 @@ export interface WincrmInvitationEmailRequestedEventPayload {
 }
 
 export type NotificationDeliveryEventPayload =
+	| WincrmTaskReminderEventPayload
 	| WincrmInvitationEmailRequestedEventPayload
 	| LeadIntegrationEventPayloadV2
 	| PaymentSucceededEventPayload
@@ -340,3 +343,17 @@ export type NotificationDeliveryEventPayload =
 	| SubscriptionExpiryEmailNotificationRequestedEventPayload
 	| SubscriptionExpiryTelegramNotificationRequestedEventPayload
 	| TelegramDestinationUnavailableEventPayload;
+
+export interface WincrmTaskReminderEventPayload {
+	schemaVersion: 1;
+	eventId: string;
+	eventType:
+		| typeof WINCRM_TASK_REMINDER_EMAIL_EVENT_TYPE
+		| typeof WINCRM_TASK_REMINDER_TELEGRAM_EVENT_TYPE;
+	occurredAt: string;
+	reference: {
+		type: 'wincrm-task-reminder';
+		id: string;
+		workspaceId: string;
+	};
+}

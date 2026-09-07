@@ -11,6 +11,22 @@ const {
 } = require('../../dist/src/workday/workday.service.js');
 const { WorkdayQuery } = require('../../dist/src/workday/workday.dto.js');
 const {
+	ReminderRulesService
+} = require('../../dist/src/reminders/reminder-rules.service.js');
+const {
+	ReminderDeliveryService
+} = require('../../dist/src/reminders/reminder-delivery.service.js');
+const {
+	ReminderRuntimeService
+} = require('../../dist/src/reminders/reminder-runtime.service.js');
+const {
+	REMINDER_TICK
+} = require('../../dist/src/reminders/reminder-delivery.contract.js');
+const {
+	ReminderRulesQuery,
+	ReminderPageQuery
+} = require('../../dist/src/reminders/reminder-rules.dto.js');
+const {
 	PipelineTemplateCatalogService
 } = require('../../dist/src/templates/pipeline-template-catalog.service.js');
 const {
@@ -1178,6 +1194,512 @@ try {
 				),
 				error => error?.meta?.code === '42501'
 			);
+		}
+	}
+	// Reminder configuration is independent of task state and sends nothing.
+	// Runtime ACL is provisioned by the existing workflow's explicit table lists.
+	{
+		const originalTasks = await prisma.salesTask.findMany({
+			orderBy: { id: 'asc' }
+		});
+		const workspaceId = randomUUID();
+		const owner = {
+			...access,
+			workspaceId,
+			subject: 'reminder-workflow-owner'
+		};
+		let currentActor = owner,
+			membershipAllowed = true,
+			proofCalls = 0,
+			rejectProofCall = 0;
+		const actorClient = {
+			verify: async (_token, current, membershipId) => {
+				proofCalls += 1;
+				if (!membershipAllowed || proofCalls === rejectProofCall) {
+					const error = new Error('CRM membership unavailable');
+					error.status = 403;
+					throw error;
+				}
+				assert.equal(current.subject, currentActor.subject);
+				return { subject: current.subject, membershipId };
+			}
+		};
+		const reminders = new ReminderRulesService(
+			prisma,
+			{ authorize: async () => currentActor },
+			actorClient
+		);
+		const draft = (scope = 'PERSONAL') => ({
+			schemaVersion: 1,
+			id: randomUUID(),
+			scope,
+			ownerBinding: { subject: owner.subject, membershipId: null },
+			title: 'Напомнить о сроке',
+			channels: [],
+			trigger: { kind: 'AT_DUE', offsetMinutes: 0 },
+			repeats: null,
+			timeZone: 'Europe/Moscow',
+			quietHours: null,
+			recipients: { kind: scope === 'PERSONAL' ? 'SELF' : 'ASSIGNEE' }
+		});
+		const command = rule => ({
+			schemaVersion: 1,
+			workspaceId,
+			commandId: randomUUID(),
+			actorMembershipId: null,
+			rule
+		});
+		const dto = command(draft());
+		const created = await Promise.all([
+			reminders.create(owner, dto, 'Bearer test'),
+			reminders.create(owner, dto, 'Bearer test')
+		]);
+		assert.deepEqual(created[0], created[1]);
+		assert.equal(created[0].deliveryReady, false);
+		assert.equal(created[0].item.rule.enabled, false);
+		assert.equal(
+			await prisma.reminderRule.count({ where: { workspaceId } }),
+			1
+		);
+		assert.equal(
+			await prisma.reminderRuleCommand.count({ where: { workspaceId } }),
+			1
+		);
+		const edits = await Promise.allSettled(
+			['Первое изменение', 'Второе изменение'].map(title =>
+				reminders.edit(
+					owner,
+					dto.rule.id,
+					{
+						...command({ ...created[0].item.rule, title }),
+						expectedVersion: 1
+					},
+					'Bearer test'
+				)
+			)
+		);
+		assert.equal(
+			edits.filter(item => item.status === 'fulfilled').length,
+			1
+		);
+		assert.equal(
+			edits.filter(
+				item => item.status === 'rejected' && item.reason.status === 409
+			).length,
+			1
+		);
+		assert.equal(
+			(
+				await prisma.reminderRule.findUniqueOrThrow({
+					where: { id: dto.rule.id }
+				})
+			).version,
+			2
+		);
+		assert.deepEqual(
+			await reminders.create(owner, dto, 'Bearer test'),
+			created[0]
+		);
+		await assert.rejects(
+			reminders.create(
+				owner,
+				{ ...dto, rule: { ...dto.rule, title: 'Другая команда' } },
+				'Bearer test'
+			),
+			error => error.status === 409
+		);
+		await assert.rejects(
+			reminders.create(
+				owner,
+				command({ ...draft(), enabled: true, channels: ['EMAIL'] }),
+				'Bearer test'
+			),
+			error => error.status === 503
+		);
+		const shared = await reminders.create(
+			owner,
+			command(draft('WORKSPACE')),
+			'Bearer test'
+		);
+		currentActor = {
+			...owner,
+			subject: 'reminder-admin',
+			role: 'CRM_ADMIN'
+		};
+		const adminMembership = randomUUID();
+		await reminders.edit(
+			currentActor,
+			shared.item.rule.id,
+			{
+				...command({
+					...shared.item.rule,
+					title: 'Общее правило администратора'
+				}),
+				actorMembershipId: adminMembership,
+				expectedVersion: 1
+			},
+			'Bearer test'
+		);
+		assert.deepEqual(
+			(
+				await prisma.reminderRule.findUniqueOrThrow({
+					where: { id: shared.item.rule.id }
+				})
+			).configuration.ownerBinding,
+			shared.item.rule.ownerBinding
+		);
+		await assert.rejects(
+			reminders.detail(
+				currentActor,
+				dto.rule.id,
+				{ workspaceId, actorMembershipId: adminMembership },
+				'Bearer test'
+			),
+			error => error.status === 404
+		);
+		currentActor = { ...owner, state: 'READ_ONLY' };
+		const query = Object.assign(new ReminderRulesQuery(), {
+			workspaceId,
+			pageSize: 1
+		});
+		assert.equal(
+			(await reminders.list(currentActor, query, 'Bearer test')).total,
+			1
+		);
+		assert.equal(
+			(
+				await reminders.history(
+					currentActor,
+					dto.rule.id,
+					Object.assign(new ReminderPageQuery(), {
+						workspaceId,
+						pageSize: 1
+					}),
+					'Bearer test'
+				)
+			).items.length,
+			1
+		);
+		await assert.rejects(
+			reminders.create(currentActor, command(draft()), 'Bearer test'),
+			error => error.status === 403
+		);
+		currentActor = owner;
+		const archived = {
+			schemaVersion: 1,
+			workspaceId,
+			commandId: randomUUID(),
+			actorMembershipId: null,
+			expectedVersion: 2
+		};
+		const archivedResult = await reminders.archive(
+			owner,
+			dto.rule.id,
+			archived,
+			'Bearer test'
+		);
+		assert.equal(archivedResult.item.version, 3);
+		assert.deepEqual(
+			await reminders.archive(owner, dto.rule.id, archived, 'Bearer test'),
+			archivedResult
+		);
+		assert.equal(
+			(await reminders.list(owner, query, 'Bearer test')).total,
+			0
+		);
+		assert.equal(
+			(
+				await reminders.list(
+					owner,
+					{ ...query, archived: 'true' },
+					'Bearer test'
+				)
+			).total,
+			1
+		);
+		const revoked = command(draft());
+		rejectProofCall = proofCalls + 2;
+		await assert.rejects(
+			reminders.create(owner, revoked, 'Bearer test'),
+			error => error.status === 403
+		);
+		rejectProofCall = 0;
+		assert.equal(
+			await prisma.reminderRule.count({ where: { id: revoked.rule.id } }),
+			0
+		);
+		assert.equal(
+			await prisma.reminderRuleCommand.count({
+				where: { commandId: revoked.commandId }
+			}),
+			0
+		);
+		for (let index = 0; index < 9; index += 1)
+			await reminders.create(owner, command(draft()), 'Bearer test');
+		const quota = await Promise.allSettled([
+			reminders.create(owner, command(draft()), 'Bearer test'),
+			reminders.create(owner, command(draft()), 'Bearer test')
+		]);
+		assert.equal(
+			quota.filter(item => item.status === 'fulfilled').length,
+			1
+		);
+		assert.equal(
+			quota.filter(
+				item => item.status === 'rejected' && item.reason.status === 409
+			).length,
+			1
+		);
+		assert.equal(
+			await prisma.reminderRule.count({
+				where: { workspaceId, scope: 'PERSONAL', archivedAt: null }
+			}),
+			10
+		);
+		membershipAllowed = false;
+		await assert.rejects(
+			reminders.list(owner, query, 'Bearer test'),
+			error => error.status === 403
+		);
+		for (const sql of [
+			'UPDATE crm_sales.reminder_rule_commands SET actor_subject=actor_subject WHERE FALSE',
+			'DELETE FROM crm_sales.reminder_rule_commands WHERE FALSE',
+			'TRUNCATE crm_sales.reminder_rule_commands',
+			'DELETE FROM crm_sales.reminder_rules WHERE FALSE'
+		]) {
+			await assert.rejects(
+				prisma.$executeRawUnsafe(sql),
+				error => error?.meta?.code === '42501'
+			);
+		}
+		const foreignCommand = {
+			commandId: randomUUID(),
+			workspaceId: randomUUID(),
+			actorSubject: owner.subject,
+			actorMembershipId: null,
+			commandType: 'CREATED',
+			requestHash: 'a'.repeat(64),
+			ruleId: dto.rule.id,
+			result: {}
+		};
+		await assert.rejects(
+			prisma.reminderRuleCommand.create({ data: foreignCommand }),
+			error => error.code === 'P2003'
+		);
+		for (const invalidConfiguration of [
+			{ ...draft(), enabled: false },
+			{}
+		]) {
+			await assert.rejects(
+				prisma.$executeRaw`INSERT INTO crm_sales.reminder_rules (id,workspace_id,scope,owner_subject,owner_membership_id,configuration,updated_at)
+				VALUES (${randomUUID()}::uuid,${workspaceId}::uuid,'PERSONAL',${owner.subject},NULL,${JSON.stringify(invalidConfiguration)}::jsonb,CURRENT_TIMESTAMP)`,
+				error => error?.meta?.code === '23514'
+			);
+		}
+		assert.deepEqual(
+			await prisma.salesTask.findMany({ orderBy: { id: 'asc' } }),
+			originalTasks
+		);
+	}
+	// Real owned PostgreSQL triggers, generation/Outbox and push-job lease.
+	// Authority and broker are mocks: this fixture never calls a recipient/provider.
+	{
+		const previousEnabled = process.env.CRM_TASK_REMINDERS_ENABLED;
+		process.env.CRM_TASK_REMINDERS_ENABLED = 'true';
+		try {
+			const workspaceId = randomUUID(),
+				ruleId = randomUUID(),
+				taskId = randomUUID();
+			const rule = {
+				schemaVersion: 1,
+				id: ruleId,
+				scope: 'PERSONAL',
+				ownerBinding: { subject: 'reminder-owner', membershipId: null },
+				title: 'Integration reminder',
+				enabled: true,
+				channels: ['EMAIL', 'TELEGRAM'],
+				trigger: { kind: 'AT_DUE', offsetMinutes: 0 },
+				repeats: null,
+				timeZone: 'Europe/Moscow',
+				quietHours: null,
+				recipients: { kind: 'SELF' }
+			};
+			await prisma.reminderRule.create({
+				data: {
+					id: ruleId,
+					workspaceId,
+					scope: 'PERSONAL',
+					ownerSubject: 'reminder-owner',
+					ownerMembershipId: null,
+					configuration: rule
+				}
+			});
+			await prisma.salesTask.create({
+				data: {
+					id: taskId,
+					workspaceId,
+					title: 'Reminder integration',
+					dueAt: new Date(Date.now() - 1000),
+					assignedToSubject: 'reminder-owner'
+				}
+			});
+			const job = await prisma.reminderJob.findFirstOrThrow({
+				where: { workspaceId, taskId }
+			});
+			const wake = await prisma.reminderOutbox.findFirstOrThrow({
+				where: {
+					eventType: REMINDER_TICK,
+					payload: { path: ['jobId'], equals: job.id }
+				}
+			});
+			assert.equal(wake.payload.eventId, wake.messageId);
+			let acknowledgements = 0,
+				calls = 0;
+			const recipients = {
+				read: async () => ({
+					allowed: true,
+					items: [
+						{
+							binding: { subject: 'reminder-owner', membershipId: null },
+							email: 'reminder@example.test',
+							telegramChatId: '12345'
+						}
+					],
+					nextCursor: null
+				})
+			};
+			const delivery = new ReminderDeliveryService(prisma, recipients);
+			const runtime = new ReminderRuntimeService(
+				prisma,
+				{
+					ack: () => {
+						acknowledgements++;
+					},
+					nack: () => {
+						throw new Error('Unexpected reminder NACK');
+					}
+				},
+				{
+					processPage: async (...args) => {
+						calls++;
+						return delivery.processPage(...args);
+					}
+				},
+				{}
+			);
+			const message = {
+				content: Buffer.from(JSON.stringify(wake.payload)),
+				properties: { messageId: wake.messageId, type: REMINDER_TICK },
+				fields: { routingKey: REMINDER_TICK }
+			};
+			await runtime.handle(message);
+			await runtime.handle(message);
+			assert.equal(calls, 1);
+			assert.equal(acknowledgements, 2);
+			assert.equal(
+				(
+					await prisma.reminderJob.findUniqueOrThrow({
+						where: { id: job.id }
+					})
+				).status,
+				'COMPLETED'
+			);
+			const generated = await prisma.reminderDelivery.findMany({
+				where: { workspaceId, taskId }
+			});
+			assert.equal(generated.length, 2);
+			const events = await prisma.reminderOutbox.findMany({
+				where: { messageId: { in: generated.map(item => item.id) } }
+			});
+			assert.equal(events.length, 2);
+			for (const event of events) {
+				assert.deepEqual(Object.keys(event.payload).sort(), [
+					'eventId',
+					'eventType',
+					'occurredAt',
+					'reference',
+					'schemaVersion'
+				]);
+				assert.equal(
+					JSON.stringify(event.payload).includes('reminder@example.test'),
+					false
+				);
+			}
+			const email = generated.find(item => item.channel === 'EMAIL');
+			assert.equal(
+				(
+					await delivery.context(email.id, {
+						eventId: email.id,
+						workspaceId,
+						channel: 'EMAIL'
+					})
+				).deliver,
+				true
+			);
+			const beforeJobs = await prisma.reminderJob.count({
+				where: { workspaceId }
+			});
+			await assert.rejects(
+				prisma.$transaction(async tx => {
+					await tx.salesTask.update({
+						where: { id: taskId },
+						data: { version: { increment: 1 }, status: 'COMPLETED' }
+					});
+					throw new Error('ROLLBACK_REMINDER_TASK');
+				}),
+				/ROLLBACK_REMINDER_TASK/
+			);
+			assert.equal(
+				await prisma.reminderJob.count({ where: { workspaceId } }),
+				beforeJobs
+			);
+			assert.equal(
+				await prisma.reminderDelivery.count({
+					where: { workspaceId, status: 'PENDING' }
+				}),
+				2
+			);
+			await prisma.salesTask.update({
+				where: { id: taskId },
+				data: { version: { increment: 1 }, status: 'COMPLETED' }
+			});
+			assert.equal(
+				await prisma.reminderDelivery.count({
+					where: { workspaceId, status: 'CANCELLED' }
+				}),
+				2
+			);
+			assert.equal(
+				(
+					await delivery.context(email.id, {
+						eventId: email.id,
+						workspaceId,
+						channel: 'EMAIL'
+					})
+				).deliver,
+				false
+			);
+			assert.equal(
+				await prisma.reminderJob.count({ where: { workspaceId } }),
+				beforeJobs + 1
+			);
+			for (const table of [
+				'reminder_jobs',
+				'reminder_deliveries',
+				'reminder_outbox',
+				'reminder_runtime'
+			]) {
+				await assert.rejects(
+					prisma.$executeRawUnsafe(
+						`DELETE FROM crm_sales.${table} WHERE FALSE`
+					),
+					error => error?.meta?.code === '42501'
+				);
+			}
+		} finally {
+			if (previousEnabled === undefined)
+				delete process.env.CRM_TASK_REMINDERS_ENABLED;
+			else process.env.CRM_TASK_REMINDERS_ENABLED = previousEnabled;
 		}
 	}
 	console.log(

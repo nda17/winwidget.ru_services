@@ -2,7 +2,7 @@
 	"schemaVersion": 1,
 	"targets": {
 		"notification-delivery": {
-			"manifestSha256": "8dd527d4133c9978e6e426d54225c0bb8019355faf82922aa6d925e012b123c7",
+			"manifestSha256": "6c5bf79e6daeb866f24052f060dd71553cbcbaf8f2fc0edeec139b41769afcd3",
 			"migrations": [
 				{
 					"name": "20260727000000_init_notification_delivery",
@@ -39,6 +39,10 @@
 				{
 					"name": "20260907000000_add_wincrm_invitation_email",
 					"checksum": "dcbb2dded41b89ed178384893e03952ca8566f5556ce7a9d44ec5a4d67901983"
+				},
+				{
+					"name": "20260907230000_add_wincrm_task_reminders",
+					"checksum": "ecd2b1677dccc6c0515ef38baf28a4407c0ae4882c68bbcf4d60da11fd807b27"
 				}
 			]
 		},
@@ -320,7 +324,7 @@
 			]
 		},
 		"crm-sales": {
-			"manifestSha256": "0c35faa3ad9c05042661751a1a36aeda03f4dd372c5decfcdff2dd03ba014d97",
+			"manifestSha256": "a73642c048011e1ba1b13331c915b4a2e5c3733ed272d996ed345bd6e51bf6c0",
 			"migrations": [
 				{
 					"name": "20260902012000_init_crm_sales",
@@ -357,6 +361,14 @@
 				{
 					"name": "20260907140000_add_workday_commands",
 					"checksum": "3af100250b2046060f9ab3a368d37dd88065dac222247a5f16108390a003a87e"
+				},
+				{
+					"name": "20260907220000_add_reminder_rules",
+					"checksum": "d207e844a7f74b858745d598ebfb9a76cb910f83847931dfb087ad86e9794ddf"
+				},
+				{
+					"name": "20260907230000_add_reminder_delivery",
+					"checksum": "eb1a5084cc03f81ed0e13d542d15ed7c4bc173dbd028059ae7e38f919b651606"
 				}
 			]
 		}

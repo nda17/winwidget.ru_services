@@ -302,6 +302,147 @@ describe('NotificationDeliveryWorkerService', () => {
 		return message;
 	};
 
+	const createReminderMessage = (): ConsumeMessage => {
+		const message = createInvitationMessage();
+		const payload = JSON.parse(message.content.toString());
+		payload.eventType =
+			'notification.wincrm.task-reminder.email.requested.v1';
+		payload.reference.type = 'wincrm-task-reminder';
+		delete payload.destination;
+		delete payload.content;
+		message.properties.type = payload.eventType;
+		message.properties.headers = { 'x-retry-attempt': 3 };
+		message.fields.routingKey = payload.eventType;
+		message.content = Buffer.from(JSON.stringify(payload));
+		return message;
+	};
+	it('defers quiet hours atomically without creating a failure or consuming a retry attempt, before ACK', async () => {
+		const { service, rabbitMq, adapter, transaction } = createService(
+			'wincrm-task-reminder-email'
+		);
+		const retryAt = new Date(Date.now() + 3600_000).toISOString();
+		jest
+			.mocked(adapter.deliver)
+			.mockResolvedValue({ status: 'DEFERRED', retryAt });
+		await (service as any).handle(
+			'wincrm-task-reminder-email',
+			createReminderMessage()
+		);
+		expect(
+			transaction.notificationDeliveryReceipt.updateMany
+		).toHaveBeenCalledWith(
+			expect.objectContaining({
+				where: expect.objectContaining({
+					eventId,
+					consumer: 'wincrm-task-reminder-email',
+					status: 'PROCESSING',
+					lockToken: expect.any(String)
+				}),
+				data: expect.objectContaining({
+					status: 'RETRY_SCHEDULED',
+					retryAttempt: 3,
+					retryToken: expect.any(String),
+					retryAvailableAt: new Date(retryAt)
+				})
+			})
+		);
+		const outbox =
+			transaction.notificationDeliveryOutboxEvent.create.mock.calls[0][0]
+				.data;
+		expect(outbox).toMatchObject({
+			messageId: eventId,
+			exchange: 'EVENTS',
+			routingKey: 'manual.wincrm-task-reminder-email',
+			availableAt: new Date(retryAt),
+			headers: {
+				'x-retry-attempt': 3,
+				'x-delivery-token': expect.any(String)
+			}
+		});
+		expect(outbox.payload).not.toHaveProperty('destination');
+		expect(outbox.payload).not.toHaveProperty('content');
+		expect(
+			transaction.notificationDeliveryFailure.upsert
+		).not.toHaveBeenCalled();
+		expect(
+			jest.mocked(rabbitMq.ack).mock.invocationCallOrder[0]
+		).toBeGreaterThan(
+			transaction.notificationDeliveryOutboxEvent.create.mock
+				.invocationCallOrder[0]
+		);
+	});
+	it.each(['claim', 'outbox'])(
+		'does not ACK an uncommitted quiet-hours defer after %s failure',
+		async failure => {
+			const { service, rabbitMq, adapter, transaction } = createService(
+				'wincrm-task-reminder-email'
+			);
+			jest.mocked(adapter.deliver).mockResolvedValue({
+				status: 'DEFERRED',
+				retryAt: new Date(Date.now() + 3600_000).toISOString()
+			});
+			if (failure === 'claim')
+				transaction.notificationDeliveryReceipt.updateMany.mockResolvedValue(
+					{ count: 0 }
+				);
+			else
+				transaction.notificationDeliveryOutboxEvent.create.mockRejectedValue(
+					new Error('commit unavailable')
+				);
+			await (service as any).handle(
+				'wincrm-task-reminder-email',
+				createReminderMessage()
+			);
+			expect(rabbitMq.ack).not.toHaveBeenCalled();
+			expect(rabbitMq.nack).toHaveBeenCalledWith(expect.anything(), true);
+			expect(
+				transaction.notificationDeliveryFailure.upsert
+			).not.toHaveBeenCalled();
+		}
+	);
+	it('terminal task reminder no-send is closed, not delivered', async () => {
+		const { service, adapter, transaction } = createService(
+			'wincrm-task-reminder-email'
+		);
+		jest.mocked(adapter.deliver).mockResolvedValue({
+			status: 'SKIPPED',
+			reason: 'TASK_REMINDER_UNAVAILABLE'
+		});
+		await (service as any).handle(
+			'wincrm-task-reminder-email',
+			createReminderMessage()
+		);
+		expect(
+			transaction.notificationDeliveryReceipt.updateMany
+		).toHaveBeenCalledWith(
+			expect.objectContaining({
+				data: expect.objectContaining({
+					status: 'CLOSED_NO_RETRY',
+					deliveredAt: null,
+					checkpoint: expect.objectContaining({
+						reason: 'TASK_REMINDER_UNAVAILABLE'
+					})
+				})
+			})
+		);
+	});
+	it('reports actual opted-in consumer kinds rather than configuration alone', async () => {
+		const { service } = createService('wincrm-task-reminder-email');
+		expect(service.isReadyForKinds(['wincrm-task-reminder-email'])).toBe(
+			false
+		);
+		await service.onModuleInit();
+		expect(service.isReadyForKinds(['wincrm-task-reminder-email'])).toBe(
+			true
+		);
+		expect(
+			service.isReadyForKinds([
+				'wincrm-task-reminder-email',
+				'wincrm-task-reminder-telegram'
+			])
+		).toBe(false);
+	});
+
 	it.each(['INVITATION_EXPIRED', 'INVITATION_UNAVAILABLE'])(
 		'records %s as a terminal skip, not provider delivery, before ack',
 		async reason => {

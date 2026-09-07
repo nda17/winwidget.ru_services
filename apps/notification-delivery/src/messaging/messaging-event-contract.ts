@@ -23,9 +23,12 @@ import {
 	SUBSCRIPTION_EXPIRY_EMAIL_NOTIFICATION_EVENT_TYPE,
 	SUBSCRIPTION_EXPIRY_TELEGRAM_NOTIFICATION_EVENT_TYPE,
 	TELEGRAM_DESTINATION_UNAVAILABLE_EVENT_TYPE,
-	WINCRM_INVITATION_EMAIL_EVENT_TYPE
+	WINCRM_INVITATION_EMAIL_EVENT_TYPE,
+	WINCRM_TASK_REMINDER_EMAIL_EVENT_TYPE,
+	WINCRM_TASK_REMINDER_TELEGRAM_EVENT_TYPE
 } from './messaging.constants';
 import { assertWincrmInvitationEvent } from './wincrm-invitation.contract';
+import { assertWincrmTaskReminderEvent } from './wincrm-task-reminder.contract';
 
 const UUID_PATTERN =
 	/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -873,6 +876,12 @@ const resolveExpectedKind = (
 	payload: JsonRecord
 ): ResolvedContractKind => {
 	switch (payload.eventType) {
+		case WINCRM_TASK_REMINDER_EMAIL_EVENT_TYPE:
+		case WINCRM_TASK_REMINDER_TELEGRAM_EVENT_TYPE:
+			assertWincrmTaskReminderEvent(payload);
+			return payload.eventType === WINCRM_TASK_REMINDER_EMAIL_EVENT_TYPE
+				? 'wincrm-task-reminder-email'
+				: 'wincrm-task-reminder-telegram';
 		case WINCRM_INVITATION_EMAIL_EVENT_TYPE:
 			assertWincrmInvitationEvent(payload);
 			return 'wincrm-invitation-email';
@@ -925,12 +934,12 @@ export function assertMessagingEventContract(
 
 	const expectedKind = resolveExpectedKind(payload);
 	if (
-		expectedKind === 'wincrm-invitation-email' &&
+		(expectedKind === 'wincrm-invitation-email' ||
+			expectedKind === 'wincrm-task-reminder-email' ||
+			expectedKind === 'wincrm-task-reminder-telegram') &&
 		payload.eventId !== metadata.messageId
 	) {
-		throw new Error(
-			'WinCRM invitation eventId must match the AMQP messageId'
-		);
+		throw new Error('WinCRM eventId must match the AMQP messageId');
 	}
 	if (expectedKind === 'telegram-destination-unavailable-outcome') {
 		if (metadata.kind) {

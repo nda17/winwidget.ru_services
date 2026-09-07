@@ -1,5 +1,6 @@
 import { NotificationDeliveryAdapterService } from './notification-delivery-adapter.service';
 import type { WincrmInvitationContextService } from './wincrm-invitation-context.service';
+import type { WincrmTaskReminderContextService } from './wincrm-task-reminder-context.service';
 import type { NotificationDeliveryPrismaService } from './prisma/notification-delivery-prisma.service';
 import type { TelegramInfoTransportService } from '../telegram/telegram-info-transport.service';
 import { EmailService } from '../email/email.service';
@@ -32,7 +33,8 @@ function setup() {
 			new EmailService({ sendMail } as unknown as Transporter),
 			{} as TelegramInfoTransportService,
 			{} as NotificationDeliveryPrismaService,
-			{ canDeliver } as unknown as WincrmInvitationContextService
+			{ canDeliver } as unknown as WincrmInvitationContextService,
+			{} as WincrmTaskReminderContextService
 		)
 	};
 }

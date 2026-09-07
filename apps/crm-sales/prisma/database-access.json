@@ -14,11 +14,22 @@
 		"command_receipts": ["SELECT", "INSERT"],
 		"task_command_receipts": ["SELECT", "INSERT"],
 		"task_timeline": ["SELECT", "INSERT"],
+		"reminder_rules": ["SELECT", "INSERT", "UPDATE"],
+		"reminder_rule_commands": ["SELECT", "INSERT"],
+		"reminder_jobs": ["SELECT", "INSERT", "UPDATE"],
+		"reminder_deliveries": ["SELECT", "INSERT", "UPDATE"],
+		"reminder_outbox": ["SELECT", "INSERT", "UPDATE"],
+		"reminder_runtime": ["SELECT", "INSERT", "UPDATE"],
 		"intake_operation_slots": ["SELECT", "INSERT"],
 		"intake_operation_commands": ["SELECT", "INSERT"],
 		"export_audit": ["SELECT", "INSERT"]
 	},
 	"sequences": {},
 	"types": ["CrmPipelineStageState", "SalesTaskStatus"],
-	"routines": ["check_sales_next_action", "reject_intake_proof_mutation"]
+	"routines": [
+		"check_sales_next_action",
+		"reject_intake_proof_mutation",
+		"reject_reminder_command_mutation",
+		"wake_task_reminders"
+	]
 }

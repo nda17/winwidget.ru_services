@@ -21,6 +21,16 @@ import { IntakeOperationService } from './intake-operations/intake-operation.ser
 import { WorkdayController } from './workday/workday.controller';
 import { WorkdayService } from './workday/workday.service';
 import { SalesAssigneeClient } from './workday/sales-assignee.client';
+import { ReminderRulesController } from './reminders/reminder-rules.controller';
+import { ReminderRulesService } from './reminders/reminder-rules.service';
+import { ReminderActorClient } from './reminders/reminder-actor.client';
+import {
+	ReminderDeliveryController,
+	ReminderDeliveryGuard
+} from './reminders/reminder-delivery.controller';
+import { ReminderDeliveryService } from './reminders/reminder-delivery.service';
+import { ReminderRecipientsClient } from './reminders/reminder-recipients.client';
+import { ReminderReadinessService } from './reminders/reminder-readiness.service';
 
 @Module({
 	imports: [
@@ -33,6 +43,8 @@ import { SalesAssigneeClient } from './workday/sales-assignee.client';
 		PipelineTemplateInstallationController,
 		SalesController,
 		WorkdayController,
+		ReminderRulesController,
+		ReminderDeliveryController,
 		SalesExportController,
 		IntakeOperationController
 	],
@@ -43,6 +55,12 @@ import { SalesAssigneeClient } from './workday/sales-assignee.client';
 		PipelineTemplateInstallationService,
 		SalesService,
 		WorkdayService,
+		ReminderRulesService,
+		ReminderActorClient,
+		ReminderDeliveryGuard,
+		ReminderDeliveryService,
+		ReminderRecipientsClient,
+		ReminderReadinessService,
 		SalesAssigneeClient,
 		SalesExportService,
 		SalesAccessClient,

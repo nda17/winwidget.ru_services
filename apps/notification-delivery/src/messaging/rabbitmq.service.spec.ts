@@ -2,6 +2,41 @@ import type { ConfigService } from '@nestjs/config';
 import { RabbitMqService } from './rabbitmq.service';
 
 describe('RabbitMqService invitation topology opt-in', () => {
+	it.each([
+		undefined,
+		'email',
+		'wincrm-task-reminder-email',
+		'wincrm-task-reminder-telegram'
+	])(
+		'adds reminder topology only for its opted-in channel %s',
+		async configuredKinds => {
+			const service = new RabbitMqService({
+				get: (key: string) =>
+					key === 'NOTIFICATION_DELIVERY_KINDS'
+						? configuredKinds
+						: undefined
+			} as ConfigService);
+			const channel = {
+				assertExchange: jest.fn(),
+				assertQueue: jest.fn(),
+				bindQueue: jest.fn()
+			};
+			await (
+				service as unknown as {
+					assertTopology(channel: unknown): Promise<void>;
+				}
+			).assertTopology(channel);
+			const queues = channel.assertQueue.mock.calls.map(
+				call => call[0] as string
+			);
+			for (const suffix of ['email', 'telegram'])
+				expect(
+					queues.includes(
+						`winwidget.notification.wincrm.task-reminder.${suffix}`
+					)
+				).toBe(configuredKinds === `wincrm-task-reminder-${suffix}`);
+		}
+	);
 	it.each([undefined, 'email', 'email,wincrm-invitation-email'])(
 		'asserts invitation queues only for explicit opt-in %s',
 		async configuredKinds => {

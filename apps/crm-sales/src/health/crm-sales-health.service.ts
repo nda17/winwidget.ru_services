@@ -63,6 +63,50 @@ export class CrmSalesHealthService {
 					select: { commandId: true }
 				}),
 				this.prisma.taskTimeline.findFirst({ select: { id: true } }),
+				this.prisma.reminderRule.findFirst({
+					select: {
+						id: true,
+						version: true,
+						configuration: true,
+						ownerMembershipId: true,
+						archivedAt: true
+					}
+				}),
+				this.prisma.reminderRuleCommand.findFirst({
+					select: {
+						commandId: true,
+						actorMembershipId: true,
+						before: true,
+						result: true
+					}
+				}),
+				this.prisma.reminderJob.findFirst({
+					select: {
+						id: true,
+						leaseToken: true,
+						leaseExpiresAt: true,
+						cursor: true
+					}
+				}),
+				this.prisma.reminderDelivery.findFirst({
+					select: {
+						id: true,
+						taskVersion: true,
+						ruleVersion: true,
+						recipientMembershipId: true
+					}
+				}),
+				this.prisma.reminderOutbox.findFirst({
+					select: {
+						id: true,
+						status: true,
+						availableAt: true,
+						leaseToken: true
+					}
+				}),
+				this.prisma.reminderRuntime.findFirst({
+					select: { id: true, ready: true, lastSeenAt: true }
+				}),
 				this.prisma.dealTimeline.findFirst({ select: { id: true } }),
 				this.prisma.salesCommandReceipt.findFirst({
 					select: { commandId: true }

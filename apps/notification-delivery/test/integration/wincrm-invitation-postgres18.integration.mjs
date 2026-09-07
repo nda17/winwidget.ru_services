@@ -255,6 +255,7 @@ try {
 		(await receipts.claimDelivery(cas.eventId, kind, 0, null)).state,
 		'closed'
 	);
+	await taskReminderProof();
 
 	await assert.rejects(
 		runtime.notificationDeliveryReceipt.create({
@@ -353,4 +354,155 @@ function receipt(payload) {
 			eventId_consumer: { eventId: payload.eventId, consumer: kind }
 		}
 	});
+}
+
+async function taskReminderProof() {
+	for (const channel of ['EMAIL', 'TELEGRAM']) {
+		const reminderKind = `wincrm-task-reminder-${channel.toLowerCase()}`;
+		const reminderType = `notification.wincrm.task-reminder.${channel.toLowerCase()}.requested.v1`;
+		const reminder = {
+			schemaVersion: 1,
+			eventId: randomUUID(),
+			eventType: reminderType,
+			occurredAt: new Date().toISOString(),
+			reference: {
+				type: 'wincrm-task-reminder',
+				id: randomUUID(),
+				workspaceId: randomUUID()
+			}
+		};
+		eventIds.push(reminder.eventId);
+		let deferred = true;
+		let reminderSends = 0;
+		const send = async () => {
+			reminderSends++;
+		};
+		const reminderAdapter = new NotificationDeliveryAdapterService(
+			new EmailService({ sendMail: send }),
+			{ sendMessage: send },
+			runtime,
+			{},
+			{
+				resolve: async () => ({
+					schemaVersion: 1,
+					eventId: reminder.eventId,
+					reminderId: reminder.reference.id,
+					workspaceId: reminder.reference.workspaceId,
+					channel,
+					deliver: !deferred,
+					retryAt: deferred
+						? new Date(Date.now() + 3600_000).toISOString()
+						: null,
+					destination: deferred
+						? null
+						: {
+								email:
+									channel === 'EMAIL' ? 'reminder@example.test' : null,
+								telegramChatId: channel === 'TELEGRAM' ? '123' : null
+							},
+					content: deferred
+						? null
+						: {
+								taskId: randomUUID(),
+								title: 'Isolated task reminder',
+								dueAt: '2026-09-07T12:00:00.000Z',
+								timeZone: 'Europe/Moscow'
+							}
+				})
+			}
+		);
+		const makeWorker = () =>
+			new NotificationDeliveryWorkerService(
+				{ ack: () => acks++, nack: () => nacks++ },
+				reminderAdapter,
+				{ get: () => undefined },
+				{ markSuccessfulConsume: () => undefined },
+				new NotificationDeliveryReceiptService(
+					runtime,
+					metadata,
+					outcomes
+				),
+				failures
+			);
+		const envelope = (headers = {}, routingKey = reminderType) => ({
+			content: Buffer.from(JSON.stringify(reminder)),
+			fields: { routingKey, exchange: 'winwidget.events' },
+			properties: {
+				messageId: reminder.eventId,
+				type: reminderType,
+				headers
+			}
+		});
+		const where = {
+			eventId_consumer: {
+				eventId: reminder.eventId,
+				consumer: reminderKind
+			}
+		};
+		const nackBaseline = nacks;
+		await makeWorker().handle(
+			reminderKind,
+			envelope({ 'x-retry-attempt': 3 })
+		);
+		const scheduled =
+			await runtime.notificationDeliveryReceipt.findUniqueOrThrow({
+				where
+			});
+		assert.equal(scheduled.status, 'RETRY_SCHEDULED');
+		assert.equal(scheduled.retryAttempt, 3);
+		assert.equal(
+			await runtime.notificationDeliveryFailure.count({
+				where: { eventId: reminder.eventId }
+			}),
+			0
+		);
+		const pending =
+			await runtime.notificationDeliveryOutboxEvent.findFirstOrThrow({
+				where: {
+					messageId: reminder.eventId,
+					routingKey: `manual.${reminderKind}`
+				}
+			});
+		assert.deepEqual(pending.payload, reminder);
+		assert.equal(
+			pending.headers['x-delivery-token'],
+			scheduled.retryToken
+		);
+		assert.equal(pending.headers['x-retry-attempt'], 3);
+		// A recreated receipt service models restart; early/missing-token redelivery cannot send.
+		await makeWorker().handle(reminderKind, envelope());
+		assert.equal(reminderSends, 0);
+		await runtime.notificationDeliveryReceipt.update({
+			where,
+			data: { retryAvailableAt: new Date(Date.now() - 1000) }
+		});
+		deferred = false;
+		await makeWorker().handle(
+			reminderKind,
+			envelope(pending.headers, pending.routingKey)
+		);
+		assert.equal(
+			(
+				await runtime.notificationDeliveryReceipt.findUniqueOrThrow({
+					where
+				})
+			).status,
+			'DELIVERED'
+		);
+		await makeWorker().handle(
+			reminderKind,
+			envelope(pending.headers, pending.routingKey)
+		);
+		assert.equal(reminderSends, 1);
+		assert.equal(nacks, nackBaseline);
+		await assert.rejects(
+			runtime.$executeRawUnsafe(
+				"INSERT INTO notification_delivery.outbox_events (id, message_id, exchange, event_type, routing_key, payload, headers, updated_at) VALUES ($1::uuid, $2::uuid, 'EVENTS', 'payment.succeeded.v1', $3, '{}', '{}', CURRENT_TIMESTAMP)",
+				randomUUID(),
+				reminder.eventId,
+				`manual.${reminderKind}`
+			),
+			sqlState('23514')
+		);
+	}
 }
