@@ -6,6 +6,7 @@
 		"_prisma_migrations": [],
 		"crm_workspace_access": ["SELECT", "INSERT", "UPDATE"],
 		"crm_workspace_members": ["SELECT", "INSERT", "UPDATE"],
+		"crm_employee_profiles": ["SELECT", "INSERT", "UPDATE"],
 		"crm_teams": ["SELECT", "INSERT", "UPDATE"],
 		"crm_member_teams": ["SELECT", "INSERT", "DELETE"],
 		"crm_invitation_intents": ["SELECT", "INSERT", "UPDATE"],
