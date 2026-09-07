@@ -142,6 +142,8 @@ export class CrmEmployeeProfileService {
 				throw new NotFoundException('Active CRM employee was not found');
 			throw error;
 		}
+		if (write && target.state === 'READ_ONLY')
+			throw new ForbiddenException('Employee profile is read-only');
 		if (
 			write &&
 			actor.role !== 'OWNER' &&

@@ -213,6 +213,22 @@ describe('workspace-local CRM employee profiles', () => {
 			service.update('Bearer test', command({ subject: 'administrator' }))
 		).resolves.toMatchObject({ profile: names });
 	});
+	it('rejects writes if the newer target authorization observes READ_ONLY', async () => {
+		const { service, prisma, auth, actor, command } = setup();
+		auth.authorizeSubject.mockResolvedValue({
+			...actor,
+			subject: 'employee',
+			role: 'MANAGER',
+			state: 'READ_ONLY'
+		});
+		await expect(
+			service.update('Bearer test', command({ subject: 'employee' }))
+		).rejects.toBeInstanceOf(ForbiddenException);
+		expect(prisma.$transaction).not.toHaveBeenCalled();
+		await expect(
+			service.get('Bearer test', { workspaceId, subject: 'employee' })
+		).resolves.toMatchObject({ profile: null });
+	});
 	it('does not confuse revoked/pending targets with Identity outages', async () => {
 		const { service, auth, prisma, command } = setup();
 		auth.authorizeSubject.mockRejectedValueOnce(new ForbiddenException());
