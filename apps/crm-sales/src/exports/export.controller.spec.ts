@@ -28,10 +28,40 @@ describe('Sales export actual HTTP contract', () => {
 		actorHash: exportActorHash('owner'),
 		body
 	});
+	const tasksBody = Buffer.from(
+		JSON.stringify({
+			schemaVersion: 2,
+			workspaceId,
+			entity: 'tasks',
+			snapshotAt: '2026-09-05T00:00:00.000Z',
+			rowCount: 0,
+			items: []
+		})
+	);
+	const prepareTasksV2 = jest
+		.fn()
+		.mockImplementation(async (_bearer, _workspace, format) => ({
+			schemaVersion: 2,
+			workspaceId,
+			entity: 'tasks',
+			format,
+			snapshotAt: '2026-09-05T00:00:00.000Z',
+			rowCount: 0,
+			actorHash: exportActorHash('owner'),
+			body:
+				format === 'json'
+					? tasksBody
+					: Buffer.from('\uFEFF"id","workspaceId"\r\n')
+		}));
 	beforeAll(async () => {
 		const module = await Test.createTestingModule({
 			controllers: [SalesExportController],
-			providers: [{ provide: SalesExportService, useValue: { prepare } }]
+			providers: [
+				{
+					provide: SalesExportService,
+					useValue: { prepare, prepareTasksV2 }
+				}
+			]
 		}).compile();
 		app = module.createNestApplication<NestExpressApplication>({
 			logger: false
@@ -110,5 +140,77 @@ describe('Sales export actual HTTP contract', () => {
 		const anonymous = await fetch(url());
 		expect(anonymous.status).toBe(401);
 		await anonymous.body?.cancel();
+	});
+	test.each(['json', 'csv'])(
+		'serves v2 tasks with distinct %s headers and no v1 routing',
+		async format => {
+			const previous = prepare.mock.calls.length;
+			const response = await fetch(
+				url('v2/tasks', `workspaceId=${workspaceId}&format=${format}`),
+				{
+					headers: {
+						authorization: 'Bearer user',
+						origin: 'http://127.0.0.1:3001'
+					}
+				}
+			);
+			expect(response.status).toBe(200);
+			expect(response.headers.get('content-disposition')).toBe(
+				`attachment; filename="wincrm-tasks-v2.${format}"`
+			);
+			expect(response.headers.get('x-wincrm-export-schema')).toBe('2');
+			expect(response.headers.get('x-wincrm-export-entity')).toBe('tasks');
+			expect(response.headers.get('x-wincrm-workspace-id')).toBe(
+				workspaceId
+			);
+			expect(response.headers.get('x-wincrm-export-actor-sha256')).toBe(
+				exportActorHash('owner')
+			);
+			expect(response.headers.get('cache-control')).toBe('no-store');
+			expect(response.headers.get('x-content-type-options')).toBe(
+				'nosniff'
+			);
+			expect(
+				response.headers.get('access-control-expose-headers')
+			).toContain('x-wincrm-export-schema');
+			const bytes = Buffer.from(await response.arrayBuffer());
+			expect(response.headers.get('x-wincrm-export-bytes')).toBe(
+				String(bytes.byteLength)
+			);
+			if (format === 'json') expect(bytes).toEqual(tasksBody);
+			expect(prepare.mock.calls.length).toBe(previous);
+			expect(prepareTasksV2).toHaveBeenLastCalledWith(
+				'Bearer user',
+				workspaceId,
+				format,
+				expect.any(AbortSignal)
+			);
+		}
+	);
+	test('v2 rejects period/scope/status/body-binding overrides, invalid route and anonymous sessions', async () => {
+		const before = prepareTasksV2.mock.calls.length;
+		for (const suffix of [
+			'&period=TODAY',
+			'&scope=ALL',
+			'&status=OPEN',
+			'&actor=secret',
+			'&teamId=bad'
+		]) {
+			const response = await fetch(
+				url('v2/tasks', `workspaceId=${workspaceId}&format=json${suffix}`),
+				{ headers: { authorization: 'Bearer user' } }
+			);
+			expect(response.status).toBe(400);
+			expect(await response.text()).not.toContain('secret');
+		}
+		const anonymous = await fetch(url('v2/tasks'));
+		expect(anonymous.status).toBe(401);
+		await anonymous.body?.cancel();
+		const other = await fetch(url('v2/deals'), {
+			headers: { authorization: 'Bearer user' }
+		});
+		expect(other.status).toBe(404);
+		await other.body?.cancel();
+		expect(prepareTasksV2.mock.calls.length).toBe(before);
 	});
 });

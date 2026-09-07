@@ -283,6 +283,54 @@ pnpm build
 
 ## Bounded owner export
 
+### Workday tasks, additive schema 2
+
+`GET /api/v1/crm/sales/exports/v2/tasks?workspaceId={uuid-v4}&format=json|csv`
+exports **all tasks currently visible in Workday**, independently of the
+selected UI day/period, status, assignee and list/board view. The UI action
+must say «Экспорт всех задач», not imply export of the selected day. Unknown
+query fields (including `period`, `scope` and `status`) are rejected.
+Only the same current `OWNER` + `sales:read` + `sales:export` can use this
+route, including `GRACE`/`READ_ONLY`; other CRM/global roles gain no permission.
+
+The JSON envelope is exactly
+`{schemaVersion:2,workspaceId,entity:"tasks",snapshotAt,rowCount,items}`.
+Items and CSV columns, in order:
+`id, workspaceId, dealId, version, title, dueAt, status, assignedToSubject,
+assignedToMembershipId, teamId, completedAt, createdAt, updatedAt`.
+`dealId`, `assignedToMembershipId`, `teamId` and `completedAt` are explicitly
+nullable; unknown historical membership remains null. Status is one of
+`OPEN`, `IN_PROGRESS`, `COMPLETED`, `CANCELLED` without conversion. Dates
+remain canonical UTC ISO strings. No timeline, previous assignments,
+command receipts, parent snapshots or employee-directory data are exported.
+
+Selection reuses the exact service-owned `workdayScope`: standalone tasks
+use their own current assignee/team; linked tasks require their **current,
+non-archived parent deal** in the same workspace and its current OWN/TEAM/ALL
+scope. A task's former team or assignee never bypasses parent visibility.
+The exported effective `teamId` is the current parent deal's team for linked
+tasks (including an actual null), or the standalone task's team. This is a
+single database snapshot, not assignment history or a filtered current UI page.
+The old schema-1 export below still includes tasks from archived deals and
+still excludes standalone tasks; its route, projection and semantics do not change.
+
+Schema 2 retains the same bounded REPEATABLE READ/READ ONLY snapshot, pages,
+row/byte/time limits, disconnect checks, fresh authority check and PREPARED
+audit described below. Both versions share one concurrency guard; changing
+the route cannot bypass the actor/workspace or process preparation limits.
+The existing append-only audit records `entity:"tasks"` and counts, never
+file content or historical assignments. Existing receipts/audits are not rewritten;
+no new database, migration, Prisma pool, Outbox or broker operation is required.
+
+Headers remain unchanged except `X-WinCRM-Export-Schema: 2` and attachment
+filename `wincrm-tasks-v2.json` / `wincrm-tasks-v2.csv`; entity remains `tasks`.
+Actor/workspace binding, CORS exposure, UTF-8 byte accounting, CSV formula
+escaping, null encoding and error semantics remain the same. Deploy a compatible
+schema-2 reader before exposing this UI action; do not send nullable rows through
+the old strict reader or present the legacy export as all Workday tasks.
+
+### Legacy schema 1
+
 GET `/api/v1/crm/sales/exports/{entity}?workspaceId={uuid-v4}&format=json|csv`,
 where entity is `deals` or `tasks`. A current user Bearer session is required.
 Only OWNER with both `sales:read` and `sales:export` may export,

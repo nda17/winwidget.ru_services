@@ -54,6 +54,7 @@ let context = {
 let authHook = null;
 let authCalls = 0;
 let pageHook = null;
+let taskPageHook = null;
 const authorization = {
 	authorize: async (_bearer, workspaceId) => {
 		authCalls++;
@@ -70,14 +71,16 @@ const proxy = new Proxy(runtime, {
 						fn(
 							new Proxy(tx, {
 								get(current, property) {
-									if (property !== 'deal') return current[property];
+									if (!['deal', 'salesTask'].includes(property))
+										return current[property];
 									return new Proxy(current[property], {
 										get(model, method) {
 											if (method !== 'findMany') return model[method];
 											return async args => {
 												const result = await model.findMany(args);
-												if (pageHook)
-													await pageHook(current, args, result);
+												const hook =
+													property === 'deal' ? pageHook : taskPageHook;
+												if (hook) await hook(current, args, result);
 												return result;
 											};
 										}
@@ -330,6 +333,7 @@ try {
 		}),
 		0
 	);
+	await verifyTaskExportV2();
 	console.log(
 		'Sales export PG18: repeatable snapshot, fresh revoke, scope, archives, row/UTF8 caps, SQL deadline, audit and restricted ACL passed'
 	);
@@ -375,4 +379,284 @@ try {
 	}
 	await runtime.$disconnect();
 	await migrator.$disconnect();
+}
+
+async function verifyTaskExportV2() {
+	const savedContext = context;
+	const workspaceId = workspaces[4];
+	const otherTeamId = randomUUID();
+	const ownerSubject = context.subject;
+	context = {
+		...context,
+		workspaceId,
+		dataScope: 'ALL',
+		teamIds: [teamId]
+	};
+	try {
+		const parentIds = await seed(workspaceId, 4);
+		for (let index = 0; index < 3; index++) {
+			await runtime.deal.update({
+				where: { id: parentIds[index] },
+				data: {
+					archivedAt: null,
+					assignedToSubject: index === 0 ? ownerSubject : 'peer',
+					teamId: index === 2 ? otherTeamId : teamId
+				}
+			});
+		}
+		const date = new Date('2026-09-07T10:00:00.000Z');
+		const membershipId = randomUUID();
+		const task = data => ({
+			id: randomUUID(),
+			workspaceId,
+			dealId: null,
+			title: '=Встреча\n"😀"',
+			dueAt: date,
+			status: 'COMPLETED',
+			completedAt: date,
+			assignedToSubject: ownerSubject,
+			assignedToMembershipId: null,
+			teamId: null,
+			...data
+		});
+		const ownStandalone = task({ status: 'OPEN', completedAt: null });
+		const teamStandalone = task({
+			status: 'IN_PROGRESS',
+			completedAt: null,
+			assignedToSubject: 'peer',
+			assignedToMembershipId: membershipId,
+			teamId
+		});
+		const otherStandalone = task({
+			assignedToSubject: 'peer',
+			teamId: otherTeamId
+		});
+		const ownParent = task({
+			dealId: parentIds[0],
+			assignedToSubject: 'peer',
+			teamId: otherTeamId
+		});
+		const teamParent = task({
+			dealId: parentIds[1],
+			assignedToSubject: 'peer',
+			status: 'CANCELLED',
+			teamId: otherTeamId
+		});
+		// Its task assignment/team cannot reveal a currently hidden parent.
+		const hiddenParent = task({ dealId: parentIds[2], teamId });
+		const archivedParent = task({ dealId: parentIds[3], teamId });
+		const fixtures = [
+			ownStandalone,
+			teamStandalone,
+			otherStandalone,
+			ownParent,
+			teamParent,
+			hiddenParent,
+			archivedParent
+		];
+		await runtime.salesTask.createMany({ data: fixtures });
+		const foreignStandalone = task({
+			workspaceId: workspaces[1],
+			title: 'foreign-workspace'
+		});
+		await runtime.salesTask.create({ data: foreignStandalone });
+		await assert.rejects(
+			runtime.salesTask.create({
+				data: task({ workspaceId: workspaces[1], dealId: parentIds[0] })
+			})
+		);
+		const download = async (dataScope = 'ALL', format = 'json') => {
+			context = { ...context, dataScope };
+			return service.prepareTasksV2('Bearer test', workspaceId, format);
+		};
+		const idsFrom = file =>
+			JSON.parse(file.body)
+				.items.map(item => item.id)
+				.sort();
+		assert.deepEqual(
+			idsFrom(await download('OWN')),
+			[ownStandalone.id, ownParent.id].sort()
+		);
+		assert.deepEqual(
+			idsFrom(await download('TEAM')),
+			[
+				ownStandalone.id,
+				teamStandalone.id,
+				ownParent.id,
+				teamParent.id
+			].sort()
+		);
+		const allFile = await download();
+		const all = JSON.parse(allFile.body);
+		assert.equal(all.schemaVersion, 2);
+		assert.equal(all.entity, 'tasks');
+		assert.deepEqual(
+			idsFrom(allFile),
+			fixtures
+				.filter(item => item !== archivedParent)
+				.map(item => item.id)
+				.sort()
+		);
+		assert.ok(
+			all.items.every(
+				item =>
+					item.workspaceId === workspaceId &&
+					!('deal' in item) &&
+					!('timeline' in item)
+			)
+		);
+		assert.equal(
+			all.items.find(item => item.id === ownStandalone.id).dealId,
+			null
+		);
+		assert.equal(
+			all.items.find(item => item.id === ownStandalone.id)
+				.assignedToMembershipId,
+			null
+		);
+		assert.equal(
+			all.items.find(item => item.id === ownStandalone.id).teamId,
+			null
+		);
+		assert.equal(
+			all.items.find(item => item.id === teamStandalone.id)
+				.assignedToMembershipId,
+			membershipId
+		);
+		assert.equal(
+			all.items.find(item => item.id === ownParent.id).teamId,
+			teamId
+		);
+		assert.equal(
+			all.items.find(item => item.id === teamParent.id).teamId,
+			teamId
+		);
+		assert.deepEqual(
+			[...new Set(all.items.map(item => item.status))].sort(),
+			['CANCELLED', 'COMPLETED', 'IN_PROGRESS', 'OPEN']
+		);
+		const v1 = await service.prepare(
+			'Bearer test',
+			workspaceId,
+			'tasks',
+			'json'
+		);
+		assert.equal(JSON.parse(v1.body).schemaVersion, 1);
+		assert.deepEqual(
+			idsFrom(v1),
+			[
+				ownParent.id,
+				teamParent.id,
+				hiddenParent.id,
+				archivedParent.id
+			].sort()
+		);
+		assert.ok(
+			JSON.parse(v1.body).items.every(
+				item =>
+					item.dealId &&
+					!('teamId' in item) &&
+					!('assignedToMembershipId' in item)
+			)
+		);
+		const csv = await download('ALL', 'csv');
+		assert.ok(
+			csv.body
+				.toString()
+				.startsWith('\uFEFF"id","workspaceId","dealId","version"')
+		);
+		assert.ok(csv.body.toString().includes('"\'=Встреча\n""😀"""'));
+		const v2Audit = await runtime.exportAudit.findFirstOrThrow({
+			where: { workspaceId, entity: 'tasks', format: 'csv' },
+			orderBy: { preparedAt: 'desc' }
+		});
+		assert.equal(v2Audit.rowCount, 6);
+		assert.equal(v2Audit.byteCount, csv.body.byteLength);
+		assert.equal(v2Audit.actorSubject, ownerSubject);
+
+		// Changes between pages cannot splice current parent or standalone values
+		// into the earlier REPEATABLE READ snapshot.
+		const bulk = Array.from({ length: 501 }, () =>
+			task({
+				title: 'before-snapshot',
+				dueAt: new Date('2030-01-01T00:00:00.000Z')
+			})
+		);
+		await runtime.salesTask.createMany({ data: bulk });
+		const visible = await runtime.salesTask.findMany({
+			where: {
+				workspaceId,
+				OR: [{ dealId: null }, { deal: { is: { archivedAt: null } } }]
+			},
+			orderBy: { id: 'asc' },
+			select: { id: true }
+		});
+		const last = visible.at(-1).id;
+		await runtime.salesTask.update({
+			where: { id: last },
+			data: {
+				dealId: parentIds[0],
+				status: 'COMPLETED',
+				completedAt: date,
+				title: 'before-snapshot'
+			}
+		});
+		let modifiedTask = false;
+		taskPageHook = async (_tx, args, result) => {
+			if (!modifiedTask && result.length === 500) {
+				modifiedTask = true;
+				assert.equal(args.where.AND.length, 1);
+				assert.ok(result.every(row => row.id !== last));
+				await runtime.salesTask.update({
+					where: { id: last },
+					data: { title: 'after-snapshot' }
+				});
+				await runtime.deal.update({
+					where: { id: parentIds[0] },
+					data: { teamId: otherTeamId }
+				});
+			}
+		};
+		const frozen = JSON.parse((await download()).body);
+		taskPageHook = null;
+		assert.equal(modifiedTask, true);
+		assert.equal(frozen.rowCount, 507);
+		assert.equal(
+			frozen.items.find(row => row.id === last).title,
+			'before-snapshot'
+		);
+		assert.equal(frozen.items.find(row => row.id === last).teamId, teamId);
+		assert.equal(
+			(await runtime.salesTask.findUniqueOrThrow({ where: { id: last } }))
+				.title,
+			'after-snapshot'
+		);
+		const auditBefore = await runtime.exportAudit.count({
+			where: { workspaceId }
+		});
+		authCalls = 0;
+		authHook = () => {
+			if (authCalls === 2)
+				context = { ...context, subject: 'changed-session-actor' };
+		};
+		await assert.rejects(download(), http(403));
+		assert.equal(
+			await runtime.exportAudit.count({ where: { workspaceId } }),
+			auditBefore
+		);
+		authHook = null;
+		context = { ...context, subject: ownerSubject, role: 'CRM_ADMIN' };
+		await assert.rejects(download(), http(403));
+		assert.equal(
+			await runtime.exportAudit.count({ where: { workspaceId } }),
+			auditBefore
+		);
+		console.log(
+			'Sales task export v2 PG18: mixed standalone/live-parent OWN/TEAM/ALL, archived/foreign exclusion, effective team, nullable membership, all statuses/dates, v1 compatibility, page snapshot and fresh owner authority passed'
+		);
+	} finally {
+		context = savedContext;
+		taskPageHook = null;
+		authHook = null;
+	}
 }

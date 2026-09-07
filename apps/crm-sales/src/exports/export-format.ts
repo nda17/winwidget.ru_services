@@ -26,6 +26,7 @@ export interface ExportAuthority {
 }
 export type ExportItem = Record<string, string | number | null>;
 export interface ExportFile {
+	schemaVersion?: 1 | 2;
 	workspaceId: string;
 	entity: string;
 	format: ExportFormat;
@@ -125,6 +126,7 @@ export function exportCheckpoint(
 		});
 }
 export async function materializeExport(input: {
+	schemaVersion?: 1 | 2;
 	workspaceId: string;
 	entity: string;
 	format: ExportFormat;
@@ -144,7 +146,7 @@ export async function materializeExport(input: {
 	const jsonPrefix = (count: number) =>
 		Buffer.from(
 			JSON.stringify({
-				schemaVersion: 1,
+				schemaVersion: input.schemaVersion ?? 1,
 				workspaceId: input.workspaceId,
 				entity: input.entity,
 				snapshotAt: input.snapshotAt,
@@ -235,6 +237,7 @@ export function exportHeaders(file: ExportFile): Record<string, string> {
 		'Content-Disposition':
 			'attachment; filename="wincrm-' +
 			file.entity +
+			(file.schemaVersion === 2 ? '-v2' : '') +
 			'.' +
 			file.format +
 			'"',
@@ -243,7 +246,7 @@ export function exportHeaders(file: ExportFile): Record<string, string> {
 		'X-WinCRM-Export-Entity': file.entity,
 		'X-WinCRM-Export-Rows': String(file.rowCount),
 		'X-WinCRM-Export-Snapshot-At': file.snapshotAt,
-		'X-WinCRM-Export-Schema': '1',
+		'X-WinCRM-Export-Schema': String(file.schemaVersion ?? 1),
 		'X-WinCRM-Workspace-Id': file.workspaceId,
 		'X-WinCRM-Export-Actor-SHA256': file.actorHash,
 		'X-WinCRM-Export-Bytes': String(file.body.byteLength)

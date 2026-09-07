@@ -9,6 +9,7 @@ import { Prisma } from '@prisma/crm-sales-client';
 import { performance } from 'node:perf_hooks';
 import { CrmSalesPrismaService } from '../prisma/crm-sales-prisma.service';
 import { SalesAccessClient } from '../sales/sales-access';
+import { workdayScope } from '../workday/workday.service';
 import {
 	assertExportAuthority,
 	exportActorHash,
@@ -63,6 +64,21 @@ export const EXPORT_COLUMNS = {
 	]
 } as const;
 type Entity = 'deals' | 'tasks';
+export const TASK_EXPORT_V2_COLUMNS = [
+	'id',
+	'workspaceId',
+	'dealId',
+	'version',
+	'title',
+	'dueAt',
+	'status',
+	'assignedToSubject',
+	'assignedToMembershipId',
+	'teamId',
+	'completedAt',
+	'createdAt',
+	'updatedAt'
+] as const;
 
 @Injectable()
 export class SalesExportService {
@@ -78,6 +94,40 @@ export class SalesExportService {
 		format: ExportFormat,
 		signal?: AbortSignal
 	): Promise<ExportFile> {
+		return this.prepareVersion(
+			bearer,
+			workspaceId,
+			entity,
+			format,
+			1,
+			signal
+		);
+	}
+
+	async prepareTasksV2(
+		bearer: string,
+		workspaceId: string,
+		format: ExportFormat,
+		signal?: AbortSignal
+	): Promise<ExportFile> {
+		return this.prepareVersion(
+			bearer,
+			workspaceId,
+			'tasks',
+			format,
+			2,
+			signal
+		);
+	}
+
+	private async prepareVersion(
+		bearer: string,
+		workspaceId: string,
+		entity: Entity,
+		format: ExportFormat,
+		schemaVersion: 1 | 2,
+		signal?: AbortSignal
+	): Promise<ExportFile> {
 		if (
 			!Object.prototype.hasOwnProperty.call(EXPORT_COLUMNS, entity) ||
 			!['json', 'csv'].includes(format)
@@ -91,7 +141,10 @@ export class SalesExportService {
 		const release = this.concurrency.claim(context);
 		try {
 			const started = performance.now();
-			const columns = EXPORT_COLUMNS[entity];
+			const columns =
+				schemaVersion === 2
+					? TASK_EXPORT_V2_COLUMNS
+					: EXPORT_COLUMNS[entity];
 			const scope = exportScope(context, 'assignedToSubject');
 			const snapshot = await this.prisma.$transaction(
 				async tx => {
@@ -104,6 +157,7 @@ export class SalesExportService {
 					>`SELECT (clock_timestamp() AT TIME ZONE 'UTC') AS "snapshotAt"`;
 					const snapshotAt = clock.snapshotAt.toISOString();
 					const file = await materializeExport({
+						schemaVersion,
 						workspaceId,
 						entity,
 						format,
@@ -112,6 +166,43 @@ export class SalesExportService {
 						started,
 						signal,
 						fetchPage: async (after, take) => {
+							if (schemaVersion === 2) {
+								const tasks = await tx.salesTask.findMany({
+									where: {
+										AND: [
+											workdayScope(context),
+											...(after ? [{ id: { gt: after } }] : [])
+										]
+									},
+									orderBy: { id: 'asc' },
+									take,
+									select: {
+										id: true,
+										workspaceId: true,
+										dealId: true,
+										version: true,
+										title: true,
+										dueAt: true,
+										status: true,
+										assignedToSubject: true,
+										assignedToMembershipId: true,
+										teamId: true,
+										completedAt: true,
+										createdAt: true,
+										updatedAt: true,
+										deal: { select: { teamId: true } }
+									}
+								});
+								return tasks.map(row =>
+									exportItem(
+										{
+											...row,
+											teamId: row.deal ? row.deal.teamId : row.teamId
+										},
+										columns
+									)
+								);
+							}
 							const where = {
 								...scope,
 								...(after ? { id: { gt: after } } : {})
@@ -236,6 +327,7 @@ export class SalesExportService {
 					message: 'Export was cancelled'
 				});
 			return {
+				...(schemaVersion === 2 ? { schemaVersion } : {}),
 				workspaceId,
 				entity,
 				format,
