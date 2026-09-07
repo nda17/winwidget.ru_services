@@ -435,7 +435,7 @@ if (!servicesWorkflow.includes('node .github/scripts/test-crm-bootstrap-failure.
 	throw new Error('CRM bounded bootstrap process gate is missing');
 }
 const pinnedInfraRevision =
-	'd7186926fae0133ce4fa90a4ab4acc554df1ed6e';
+	'432e017a41b7b6a5a08baf786f20c0ad54ca04f3';
 for (const evidence of [
 	"cancel-in-progress: ${{ github.ref != 'refs/heads/prod' }}",
 	'operations-control-ledger:',
@@ -495,21 +495,22 @@ if (
 	infraReleaseReferences.length !== 1 ||
 	infraReleaseReferences.some(reference => reference[1] !== pinnedInfraRevision)
 ) {
-	throw new Error('Billing CRM ACL release must use one exact reviewed infra SHA');
+	throw new Error('CRM upgrade must use one exact reviewed infra SHA');
 }
 // CRM is already live. Never replay its initial closed-product provisioning
-// chain. This release changes only the exact Billing-owned evidence ACL.
-for (const [job, scope] of [['deploy-production', 'billing-crm-commerce-acl']]) {
+// chain. This release upgrades only the reviewed CRM and companion groups.
+for (const [job, scope] of [['deploy-production', 'crm-upgrade']]) {
 	const block = servicesWorkflow.match(new RegExp('^  ' + job + ':\\n([\\s\\S]*?)(?=^  [a-z][a-z0-9-]*:|$(?![\\s\\S]))', 'm'))?.[1];
 	if (!block || !block.includes('release_scope: ' + scope) ||
 		!block.includes('services_revision: ${{ github.sha }}') ||
-		!block.includes("expected_live_revision: '774db6490808cbaff4ff96033c589205cb3935f7'") ||
-		!block.includes("expected_service_env_sha256: 'a0ed9b243c69c882da78ebb8eb3926785a30d5b2615aa9e50c9ad3803d2a2fed'")) {
-		throw new Error('Billing ACL release must pin its live owner revision and env hash');
+		!block.includes("expected_live_revision: '837113b9f9f303bd6c043c2a2e37b0791369d7a3'") ||
+		!block.includes("expected_service_env_sha256: '667977d5260de85dcfbc17ccac618446168773f67af5735ab7003bdbe36b4be1'") ||
+		!block.includes("expected_crm_upgrade_baseline_sha256: 'd17fb6d18b56cc4f2f032838db21a1a989d99ad921e4db469c71b02431be948e'")) {
+		throw new Error('CRM upgrade must pin its live Gateway revision, CRM env and exact baseline');
 	}
 }
 if (/release_scope: (?:crm-prepare|crm-databases|crm-runtime|all)\b/.test(servicesWorkflow)) {
-	throw new Error('Initial CRM provisioning and broad rollout must not replay for this migration');
+	throw new Error('Initial CRM provisioning and broad rollout must not replay for this upgrade');
 }
 
 const rootReadme = readFileSync('README.md', 'utf8');
