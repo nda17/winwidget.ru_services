@@ -123,7 +123,15 @@ const mutableTables = {
 		'widget_transfer_outbox'
 	],
 	'crm-customers': ['contacts', 'companies'],
-	'crm-sales': ['deals', 'tasks']
+	'crm-sales': [
+		'deals',
+		'tasks',
+		'reminder_rules',
+		'reminder_jobs',
+		'reminder_deliveries',
+		'reminder_outbox',
+		'reminder_runtime'
+	]
 };
 const appendOnlyTables = {
 	'crm-access': ['crm_team_command_receipts', 'crm_team_audit'],
@@ -148,6 +156,7 @@ const appendOnlyTables = {
 		'command_receipts',
 		'task_command_receipts',
 		'task_timeline',
+		'reminder_rule_commands',
 		'pipeline_template_installations',
 		'pipeline_template_installation_commands',
 		'intake_operation_slots',

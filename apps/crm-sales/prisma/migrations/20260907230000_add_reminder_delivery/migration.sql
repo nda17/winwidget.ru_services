@@ -13,7 +13,7 @@ CREATE TABLE crm_sales.reminder_deliveries (
  workspace_id uuid NOT NULL, task_id uuid NOT NULL, rule_id uuid NOT NULL,
  task_version integer NOT NULL CHECK(task_version>=1), rule_version integer NOT NULL CHECK(rule_version>=1),
  occurrence_index integer NOT NULL CHECK(occurrence_index BETWEEN 0 AND 999),
- recipient_subject varchar(256) NOT NULL CHECK(recipient_subject ~ '^[^[:space:][:cntrl:]]{1,256}$'),
+ recipient_subject varchar(256) NOT NULL CHECK(char_length(recipient_subject) BETWEEN 1 AND 256 AND recipient_subject !~ '[[:space:][:cntrl:]]'),
  recipient_membership_id uuid, channel varchar(16) NOT NULL CHECK(channel IN ('EMAIL','TELEGRAM')),
  nominal_at timestamp(3) NOT NULL, status varchar(16) NOT NULL DEFAULT 'PENDING' CHECK(status IN ('PENDING','CANCELLED')),
  created_at timestamp(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,

@@ -324,7 +324,7 @@
 			]
 		},
 		"crm-sales": {
-			"manifestSha256": "a73642c048011e1ba1b13331c915b4a2e5c3733ed272d996ed345bd6e51bf6c0",
+			"manifestSha256": "8b9cfcb0616b84ff686e240ccb37887a87943b45bde566322ad995b5eae60ffd",
 			"migrations": [
 				{
 					"name": "20260902012000_init_crm_sales",
@@ -368,7 +368,7 @@
 				},
 				{
 					"name": "20260907230000_add_reminder_delivery",
-					"checksum": "eb1a5084cc03f81ed0e13d542d15ed7c4bc173dbd028059ae7e38f919b651606"
+					"checksum": "d05634a4704c8947cb48a9bf379436e519417545d09ddec6833b1bb692491190"
 				}
 			]
 		}

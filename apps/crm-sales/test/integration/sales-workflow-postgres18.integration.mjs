@@ -1555,6 +1555,7 @@ try {
 			assert.equal(wake.payload.eventId, wake.messageId);
 			let acknowledgements = 0,
 				calls = 0;
+			let processingFailure = null;
 			const recipients = {
 				read: async () => ({
 					allowed: true,
@@ -1582,7 +1583,12 @@ try {
 				{
 					processPage: async (...args) => {
 						calls++;
-						return delivery.processPage(...args);
+						try {
+							return await delivery.processPage(...args);
+						} catch (error) {
+							processingFailure = error;
+							throw error;
+						}
 					}
 				},
 				{}
@@ -1593,6 +1599,7 @@ try {
 				fields: { routingKey: REMINDER_TICK }
 			};
 			await runtime.handle(message);
+			assert.ifError(processingFailure);
 			await runtime.handle(message);
 			assert.equal(calls, 1);
 			assert.equal(acknowledgements, 2);
@@ -1608,6 +1615,31 @@ try {
 				where: { workspaceId, taskId }
 			});
 			assert.equal(generated.length, 2);
+			// PostgreSQL ARE repetitions stop at 255; the SQL boundary must still
+			// accept the public 256-character subject without an invalid regexp.
+			await assert.rejects(
+				prisma.$transaction(async tx => {
+					const boundary = await tx.reminderDelivery.update({
+						where: { id: generated[0].id },
+						data: { recipientSubject: 'x'.repeat(256) }
+					});
+					assert.equal(boundary.recipientSubject.length, 256);
+					throw new Error('ROLLBACK_SUBJECT_BOUNDARY');
+				}),
+				/ROLLBACK_SUBJECT_BOUNDARY/
+			);
+			for (const recipientSubject of [
+				'',
+				'two words',
+				'line\nbreak',
+				'x'.repeat(257)
+			])
+				await assert.rejects(
+					prisma.reminderDelivery.update({
+						where: { id: generated[0].id },
+						data: { recipientSubject }
+					})
+				);
 			const events = await prisma.reminderOutbox.findMany({
 				where: { messageId: { in: generated.map(item => item.id) } }
 			});
@@ -1643,7 +1675,11 @@ try {
 				prisma.$transaction(async tx => {
 					await tx.salesTask.update({
 						where: { id: taskId },
-						data: { version: { increment: 1 }, status: 'COMPLETED' }
+						data: {
+							version: { increment: 1 },
+							status: 'COMPLETED',
+							completedAt: new Date()
+						}
 					});
 					throw new Error('ROLLBACK_REMINDER_TASK');
 				}),
@@ -1661,7 +1697,11 @@ try {
 			);
 			await prisma.salesTask.update({
 				where: { id: taskId },
-				data: { version: { increment: 1 }, status: 'COMPLETED' }
+				data: {
+					version: { increment: 1 },
+					status: 'COMPLETED',
+					completedAt: new Date()
+				}
 			});
 			assert.equal(
 				await prisma.reminderDelivery.count({
