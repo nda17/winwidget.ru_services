@@ -1369,7 +1369,7 @@ jobs:
       - service-integration
       - widgets-integration
     if: github.event_name == 'push' && github.ref == 'refs/heads/prod'
-    uses: nda17/winwidget.ru_infra/.github/workflows/deploy-production.yml@4fb755620a7c5c901c702f36f71b241720166955
+    uses: nda17/winwidget.ru_infra/.github/workflows/deploy-production.yml@d7186926fae0133ce4fa90a4ab4acc554df1ed6e
     with:
       services_revision: ${{ github.sha }}
       release_scope: billing-crm-commerce-acl
