@@ -91,6 +91,9 @@ async function main() {
 	const {
 		IdentityInternalService
 	} = require('../../dist/src/internal/internal.service.js');
+	const {
+		WorkspaceDirectoryController
+	} = require('../../dist/src/workspaces/workspace-directory.controller.js');
 	const client = url =>
 		new PrismaClient({
 			datasources: { db: { url } },
@@ -299,6 +302,77 @@ async function main() {
 			organization,
 			member,
 			'MEMBER'
+		);
+
+		stage = 'assignee-directory';
+		const directory = new WorkspaceDirectoryController(runtime);
+		const selection = {
+			schemaVersion: 1,
+			membershipIds: [personalMember, organizationMember, randomUUID()],
+			includeOwner: true
+		};
+		const initial = await directory.assignees(personal, selection);
+		assert.deepEqual(
+			initial.items.map(item => item.membershipId).sort(),
+			[personalOwner, personalMember].sort()
+		);
+		assert.equal(
+			initial.items.find(item => item.membershipId === personalOwner)
+				.workspaceRole,
+			'OWNER'
+		);
+		assert.equal(
+			initial.items.find(item => item.membershipId === personalMember)
+				.displayName,
+			'Local integration fixture'
+		);
+		for (const patch of [
+			{ status: 'DEACTIVATED' },
+			{ deletedAt: new Date() }
+		]) {
+			await runtime.user.update({ where: { id: member }, data: patch });
+			assert.deepEqual(
+				(await directory.assignees(personal, selection)).items.map(
+					item => item.membershipId
+				),
+				[personalOwner]
+			);
+			await runtime.user.update({
+				where: { id: member },
+				data: { status: 'ACTIVE', deletedAt: null }
+			});
+		}
+		await runtime.workspaceMember.update({
+			where: { id: personalMember },
+			data: { status: 'INACTIVE' }
+		});
+		assert.deepEqual(
+			(
+				await directory.assignees(personal, {
+					...selection,
+					includeOwner: false
+				})
+			).items,
+			[]
+		);
+		await runtime.workspaceMember.update({
+			where: { id: personalMember },
+			data: { status: 'ACTIVE' }
+		});
+		await runtime.workspace.update({
+			where: { id: personal },
+			data: { status: 'INACTIVE' }
+		});
+		await assert.rejects(
+			directory.assignees(personal, selection),
+			error => error.status === 404
+		);
+		await runtime.workspace.update({
+			where: { id: personal },
+			data: { status: 'ACTIVE' }
+		});
+		console.log(
+			'PASS Identity assignee directory: current owner, exact requested tenant bindings, inactive/deleted exclusion'
 		);
 
 		stage = 'owner-binding';

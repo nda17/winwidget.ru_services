@@ -187,6 +187,19 @@ Scoped `crm-access` internal APIs:
 workspace. Нет общих профилей, телефонов и provider IDs; missing/foreign ID
 закрывает весь запрос. Для неактивного/удалённого пользователя профиль null.
 
+Для отдельного Sales assignee picker:
+`POST /internal/v1/crm-access/workspaces/:workspaceId/assignee-directory` принимает
+`{schemaVersion:1,membershipIds:UUID[0..1000],includeOwner:boolean}`. Возвращает
+`{schemaVersion:1,workspaceId,items:[{membershipId,subject,workspaceRole,displayName,verifiedEmail}]}`.
+Включены только ACTIVE membership/user без deletedAt; отсутствующие и отозванные
+bindings опускаются, а `includeOwner` дополнительно разрешает текущий OWNER.
+Неоднозначные владельцы — отказ. Чтение проходит в read-only RepeatableRead
+с ограничением statement/transaction timeout. Список разрешённых кандидатов,
+CRM-роль/отделы и публичная пагинация принадлежат Access, не Identity.
+Endpoint защищён существующим `crm-access` service guard и исключён из публичного
+`api/v1` prefix; перед использованием нужен соответствующий private route.
+Старый `member-directory` и его exact-ID семантика не изменяются.
+
 Email доставки включаются отдельно `WINCRM_INVITATION_EMAIL_ENABLED=true`
 **только вместе** с Notification Delivery consumer `wincrm-invitation-email`.
 По умолчанию false сохраняет прежний runtime без нового обязательного токена.

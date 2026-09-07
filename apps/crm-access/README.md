@@ -303,6 +303,53 @@ CRM Access одной совместимой ревизии. Старый worker
 не включать новые приглашения при mixed Access revisions. Миграция не
 изменяет старые имена, membership и назначения задач.
 
+### Выбор ответственного
+
+`GET /api/v1/crm/access/team/assignees` — отдельный от административного списка
+read-only справочник для Sales. Query: `workspaceId`, `page` (от 1), `pageSize`
+(1–100), `search` (до 200 символов), необязательные `selectedSubject` и `teamId`.
+Ответ: `{schemaVersion:1,workspaceId,subject,page,pageSize,total,items,selected}`.
+Каждый элемент содержит только `subject,membershipId,displayName,verifiedEmail,role`.
+ФИО Access имеет приоритет над Identity name; поиск по отображаемому имени/email
+и сортировка выполняются на сервере до пагинации. `selected` использует тот же
+scope, независимо от поиска/страницы; недоступный сотрудник возвращает null.
+
+Матрица: MANAGER — только себя; TEAM_LEAD — себя и действующих CRM-сотрудников
+своих фактических отделов; OWNER/CRM_ADMIN — доступных сотрудников workspace,
+включая текущего владельца из Identity (отдельная CRM-member строка не нужна).
+ANALYST не читает справочник и не назначается на операционные задачи. READ_ONLY
+допускает только scoped чтение. `teamId` должен быть среди разрешённых отделов
+актора; для получателя допустим его фактический отдел либо ALL data scope.
+
+Access читает максимум 10000 локальных кандидатов; Identity проверяет текущие
+ACTIVE bindings пакетами до 1000, максимум два запроса одновременно и общий
+10-секундный timeout обогащения. Поддержка поиска по legacy Identity name требует
+ограниченного серверного объединения; весь набор не передаётся в браузер.
+Ответы имеют byte bounds. Перед выдачей повторно проверяются actor authority и
+локальные роли/назначения отделов. Недоступность Identity — ошибка, не нулевой
+список; inactive/deleted/missing binding исключается из списка и total.
+
+`POST /internal/v1/crm-access/authorize-assignee` доступен только pairwise caller
+`crm-sales` с исходным пользовательским Bearer. DTO:
+`{schemaVersion:1,purpose:"SALES_ASSIGNMENT",workspaceId,subject,membershipId,teamId?}`.
+Ответ: `{schemaVersion:1,workspaceId,subject,assignee:{subject,membershipId,role,dataScope,teamIds}}`.
+Проверяются свежие права актора/получателя, точный Identity membership, фактический
+CRM scope и READ_ONLY. Право CRM_ADMIN читать все отделы не подменяет фактическое
+членство в отделе при выборе руководителем TEAM_LEAD. Это не command receipt и
+не разрешение, которое можно кешировать/передавать клиенту для последующей записи.
+
+Sales должен вызывать проверку перед каждой новой командой назначения, отдельно
+проверять владение самой сделкой/задачей и доступ получателя к связанной сделке,
+сохранять binding и делать CAS/receipt в своей БД. Access не читает Sales tables.
+Проверка межсервисная, не распределённая транзакция с блокировкой Identity;
+доменный scope перепроверяется и при последующих чтениях. Старые назначения
+не меняются; отсутствие `selected` не повод автоматически назначать другого.
+
+Порядок выпуска: Identity reader и его точный private route, Access API с новым
+справочником/authorize route, затем Sales client/команды и frontend selector.
+Новые env, схемы/права БД, RabbitMQ-события и публичный Identity directory не нужны.
+Этот источник пока не означает готовность UI назначения или его production rollout.
+
 ## Worker, publisher и PostgreSQL
 
 `CRM_ACCESS_PROCESS_ROLE=api|worker|outbox-publisher` задаёт соответственно

@@ -33,6 +33,9 @@ export interface IdentityDirectoryEntry {
 	displayName: string | null;
 	verifiedEmail: string | null;
 }
+export interface IdentityAssigneeEntry extends IdentityDirectoryEntry {
+	workspaceRole: 'OWNER' | 'MEMBER';
+}
 const date = (value: unknown): value is string =>
 	typeof value === 'string' &&
 	Number.isFinite(Date.parse(value)) &&
@@ -147,6 +150,96 @@ export class IdentityInvitationClient {
 		}
 		return response.items as IdentityDirectoryEntry[];
 	}
+	async assignees(
+		workspaceId: string,
+		members: { membershipId: string; subject: string }[],
+		includeOwner: boolean,
+		signal?: AbortSignal
+	): Promise<IdentityAssigneeEntry[]> {
+		if (
+			members.length > 1000 ||
+			new Set(members.map(item => item.membershipId)).size !==
+				members.length
+		)
+			throw new ServiceUnavailableException(
+				'Identity assignee request is invalid'
+			);
+		if (members.length === 0 && !includeOwner) return [];
+		const response = await this.post(
+			`/workspaces/${workspaceId}/assignee-directory`,
+			{
+				schemaVersion: 1,
+				membershipIds: members.map(item => item.membershipId),
+				includeOwner
+			},
+			undefined,
+			true,
+			8 * 1024 * 1024,
+			signal
+		);
+		if (
+			!isRecord(response) ||
+			!hasExactKeys(response, ['schemaVersion', 'workspaceId', 'items']) ||
+			response.schemaVersion !== 1 ||
+			response.workspaceId !== workspaceId ||
+			!Array.isArray(response.items) ||
+			response.items.length > members.length + Number(includeOwner)
+		)
+			throw new ServiceUnavailableException(
+				'Identity assignee contract is invalid'
+			);
+		const expected = new Map(
+			members.map(item => [item.membershipId, item.subject])
+		);
+		const ids = new Set<string>();
+		const subjects = new Set<string>();
+		let ownerCount = 0;
+		for (const item of response.items) {
+			if (
+				!isRecord(item) ||
+				!hasExactKeys(item, [
+					'membershipId',
+					'subject',
+					'workspaceRole',
+					'displayName',
+					'verifiedEmail'
+				]) ||
+				!isUuidV4(item.membershipId) ||
+				typeof item.subject !== 'string' ||
+				!/^[^\s\x00-\x1f\x7f]{1,256}$/.test(item.subject) ||
+				!['OWNER', 'MEMBER'].includes(String(item.workspaceRole)) ||
+				ids.has(item.membershipId) ||
+				subjects.has(item.subject) ||
+				(expected.has(item.membershipId)
+					? expected.get(item.membershipId) !== item.subject
+					: !(includeOwner && item.workspaceRole === 'OWNER')) ||
+				!(
+					item.displayName === null ||
+					(typeof item.displayName === 'string' &&
+						item.displayName.length <= 1000)
+				) ||
+				!(
+					item.verifiedEmail === null ||
+					(typeof item.verifiedEmail === 'string' &&
+						item.verifiedEmail.length <= 254 &&
+						item.verifiedEmail ===
+							item.verifiedEmail.trim().toLowerCase() &&
+						/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(item.verifiedEmail))
+				)
+			)
+				throw new ServiceUnavailableException(
+					'Identity assignee contract is invalid'
+				);
+			ids.add(item.membershipId);
+			subjects.add(item.subject);
+			if (item.workspaceRole === 'OWNER') ownerCount += 1;
+		}
+		if (ownerCount > 1)
+			throw new ServiceUnavailableException(
+				'Identity assignee owner is ambiguous'
+			);
+		return response.items as IdentityAssigneeEntry[];
+	}
 	async revoke(intent: CrmInvitationIntent) {
 		if (!intent.revokeCommandId)
 			throw new Error('INVITATION_REVOKE_COMMAND_MISSING');
@@ -260,7 +353,9 @@ export class IdentityInvitationClient {
 		path: string,
 		body: unknown,
 		commandId?: string,
-		directory = false
+		directory = false,
+		maximumBytes = 64 * 1024,
+		signal?: AbortSignal
 	): Promise<unknown> {
 		let response: Response;
 		try {
@@ -270,7 +365,9 @@ export class IdentityInvitationClient {
 					method: 'POST',
 					redirect: 'error',
 					cache: 'no-store',
-					signal: AbortSignal.timeout(this.timeout),
+					signal: signal
+						? AbortSignal.any([signal, AbortSignal.timeout(this.timeout)])
+						: AbortSignal.timeout(this.timeout),
 					headers: {
 						'x-winwidget-service': 'crm-access',
 						'x-winwidget-internal-token': this.token,
@@ -296,7 +393,7 @@ export class IdentityInvitationClient {
 				'Identity invitation service is unavailable'
 			);
 		try {
-			return await readBoundedJson(response);
+			return await readBoundedJson(response, maximumBytes);
 		} catch {
 			throw new ServiceUnavailableException(
 				'Identity invitation contract is invalid'

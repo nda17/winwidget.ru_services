@@ -80,6 +80,37 @@ function setup(role = 'OWNER', status = 'ACTIVE') {
 }
 
 describe('CRM service authorization', () => {
+	it.each(['OWNER', 'MANAGER'])(
+		'returns the actual %s membership only for the assignment context',
+		async role => {
+			const current = setup(role);
+			expect(
+				await current.service.assignmentSubject(workspaceId, 'user-1')
+			).toMatchObject({ subject: 'user-1', membershipId, role });
+			expect(
+				await current.service.authorizeSubject(workspaceId, 'user-1')
+			).not.toHaveProperty('membershipId');
+		}
+	);
+	it('refuses an assignment binding after Identity revocation or membership replacement', async () => {
+		const current = setup('MANAGER');
+		current.identity.sourceContext.mockResolvedValueOnce({
+			subject: 'user-1',
+			membership: null
+		} as never);
+		await expect(
+			current.service.assignmentSubject(workspaceId, 'user-1')
+		).rejects.toBeInstanceOf(ForbiddenException);
+		current.prisma.crmWorkspaceMember.findUnique.mockResolvedValueOnce({
+			role: 'MANAGER',
+			membershipId: teamId,
+			teams: [],
+			disabledAt: null
+		});
+		await expect(
+			current.service.assignmentSubject(workspaceId, 'user-1')
+		).rejects.toBeInstanceOf(ForbiddenException);
+	});
 	it.each(['OWNER', 'CRM_ADMIN'])(
 		'binds %s native source authority to fresh canonical Identity owner',
 		async role => {

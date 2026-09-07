@@ -7,6 +7,9 @@ const require = createRequire(import.meta.url);
 const { PrismaClient } = require('@prisma/crm-access-client');
 const { CrmTeamService } = require('../../dist/src/team/team.service.js');
 const {
+	CrmAssigneeService
+} = require('../../dist/src/team/team-assignee.service.js');
+const {
 	CrmEmployeeProfileService
 } = require('../../dist/src/team/team-profile.service.js');
 const {
@@ -864,6 +867,143 @@ try {
 		items: [],
 		selected: null
 	});
+	// Real Access predicates, membership joins and profile search; Identity
+	// transport is a scoped active-binding double, tested separately on PG18.
+	const pickerMembers = Array.from({ length: 4 }, (_, index) => ({
+		id: randomUUID(),
+		workspaceId,
+		subject: `picker-${index}-${randomUUID()}`,
+		membershipId: randomUUID(),
+		role: index === 0 ? 'TEAM_LEAD' : 'MANAGER',
+		disabledAt: index === 3 ? new Date() : null
+	}));
+	await prisma.crmWorkspaceMember.createMany({ data: pickerMembers });
+	await prisma.crmMemberTeam.createMany({
+		data: pickerMembers.map((member, index) => ({
+			workspaceId,
+			memberId: member.id,
+			teamId: index === 2 ? unassigned.id : lookupTeams[0].id
+		}))
+	});
+	await prisma.crmEmployeeProfile.createMany({
+		data: pickerMembers.map((member, index) => ({
+			workspaceId,
+			subject: member.subject,
+			firstName: 'Иван',
+			lastName: index === 1 ? 'Петров' : 'Сидоров'
+		}))
+	});
+	const currentBindings = new Map(
+		pickerMembers.map(member => [member.membershipId, member.subject])
+	);
+	let pickerActor = {
+		schemaVersion: 1,
+		workspaceId,
+		subject: pickerMembers[0].subject,
+		role: 'TEAM_LEAD',
+		state: 'ACTIVE',
+		dataScope: 'TEAM',
+		teamIds: [lookupTeams[0].id],
+		permissions: ['sales:read', 'sales:write']
+	};
+	const picker = new CrmAssigneeService(
+		prisma,
+		{
+			authorize: async () => ({ ...pickerActor }),
+			assignmentSubject: async (_workspaceId, subject) => {
+				const member = pickerMembers.find(
+					item => item.subject === subject
+				);
+				return {
+					...pickerActor,
+					subject,
+					membershipId: member.membershipId,
+					role: member.role,
+					dataScope: member.role === 'MANAGER' ? 'OWN' : 'TEAM'
+				};
+			}
+		},
+		{
+			assignees: async (_workspaceId, members) =>
+				members
+					.filter(
+						item => currentBindings.get(item.membershipId) === item.subject
+					)
+					.map(item => ({
+						membershipId: item.membershipId,
+						subject: item.subject,
+						workspaceRole: 'MEMBER',
+						displayName: 'Legacy picker name',
+						verifiedEmail: null
+					}))
+		}
+	);
+	const pickerQuery = { workspaceId, page: 1, pageSize: 1 };
+	const firstPage = await picker.options('Bearer local-test', pickerQuery);
+	assert.equal(firstPage.total, 2);
+	assert.equal(firstPage.items.length, 1);
+	assert.equal(
+		(
+			await picker.options('Bearer local-test', {
+				...pickerQuery,
+				search: 'петров ИВАН'
+			})
+		).items[0].subject,
+		pickerMembers[1].subject
+	);
+	for (const hidden of [pickerMembers[2], pickerMembers[3]])
+		assert.equal(
+			(
+				await picker.options('Bearer local-test', {
+					...pickerQuery,
+					selectedSubject: hidden.subject
+				})
+			).selected,
+			null
+		);
+	const bindingCommand = {
+		schemaVersion: 1,
+		purpose: 'SALES_ASSIGNMENT',
+		workspaceId,
+		subject: pickerMembers[1].subject,
+		membershipId: pickerMembers[1].membershipId,
+		teamId: lookupTeams[0].id
+	};
+	assert.equal(
+		(await picker.authorize('Bearer local-test', bindingCommand)).assignee
+			.subject,
+		pickerMembers[1].subject
+	);
+	currentBindings.delete(pickerMembers[1].membershipId);
+	assert.equal(
+		(await picker.options('Bearer local-test', pickerQuery)).total,
+		1
+	);
+	await prisma.crmWorkspaceMember.update({
+		where: { id: pickerMembers[1].id },
+		data: { disabledAt: new Date() }
+	});
+	await assert.rejects(
+		picker.authorize('Bearer local-test', bindingCommand),
+		error => error.status === 404
+	);
+	pickerActor = {
+		...pickerActor,
+		state: 'READ_ONLY',
+		permissions: ['sales:read']
+	};
+	assert.equal(
+		(await picker.options('Bearer local-test', pickerQuery)).total,
+		1
+	);
+	await assert.rejects(
+		picker.authorize('Bearer local-test', bindingCommand),
+		error => error.status === 403
+	);
+	console.log(
+		'PASS CRM assignee PG18: scoped department selection, FIO, pagination, current binding, disabled exclusion and READ_ONLY'
+	);
+
 	console.log(
 		'PASS WinCRM team PostgreSQL18: least privilege, page directory binding, scoped department names and selected pagination, archive/foreign/revoked exclusion, parallel command/acceptance replay, FIFO Trial quota including owner, disabled/pending no seat, tenant joins, read-only deny, revoke race, receipt-before-effect, real 30s durable retry across publisher recreation, replay, unpublished legacy conversion (transport double)'
 	);

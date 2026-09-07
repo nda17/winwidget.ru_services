@@ -10,6 +10,10 @@ export const IDENTITY_GLOBAL_PREFIX_EXCLUDES = [
 		method: RequestMethod.POST
 	},
 	{
+		path: 'internal/v1/crm-access/workspaces/:workspaceId/assignee-directory',
+		method: RequestMethod.POST
+	},
+	{
 		path: 'internal/v1/crm-access/invitations',
 		method: RequestMethod.POST
 	},

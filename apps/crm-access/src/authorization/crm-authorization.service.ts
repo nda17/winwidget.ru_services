@@ -164,6 +164,25 @@ export class CrmAuthorizationService {
 		return context;
 	}
 
+	// Keep the existing exact authorize DTO unchanged. Sales assignment alone
+	// needs the current Identity membership binding, not a guessed CRM row ID.
+	async assignmentSubject(workspaceId: string, subject: string) {
+		const correlationId = getCrmAccessCorrelationId();
+		const identity = await this.identity.sourceContext(
+			workspaceId,
+			subject,
+			correlationId
+		);
+		const context = await this.resolve(
+			workspaceId,
+			identity.subject,
+			identity.membership,
+			correlationId,
+			'crm-sales'
+		);
+		return { ...context, membershipId: identity.membership!.membershipId };
+	}
+
 	private async resolve(
 		workspaceId: string,
 		subject: string,

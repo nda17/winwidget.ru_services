@@ -7,6 +7,7 @@ import {
 	Param,
 	ParseUUIDPipe,
 	Post,
+	ServiceUnavailableException,
 	UseGuards,
 	UsePipes,
 	ValidationPipe
@@ -16,6 +17,7 @@ import {
 	ArrayUnique,
 	Equals,
 	IsArray,
+	IsBoolean,
 	IsUUID
 } from 'class-validator';
 import {
@@ -33,6 +35,18 @@ export class WorkspaceDirectoryDto {
 	membershipIds!: string[];
 }
 
+// A bounded internal batch, not the public/admin employee directory. Missing,
+// inactive and deleted bindings are omitted rather than represented as active.
+export class AssigneeDirectoryDto {
+	@Equals(1) schemaVersion!: 1;
+	@IsArray()
+	@ArrayMaxSize(1000)
+	@ArrayUnique()
+	@IsUUID('4', { each: true })
+	membershipIds!: string[];
+	@IsBoolean() includeOwner!: boolean;
+}
+
 @Controller('internal/v1/crm-access/workspaces')
 @UseGuards(IdentityInternalGuard)
 @InternalServices('crm-access')
@@ -46,6 +60,81 @@ export class WorkspaceDirectoryDto {
 )
 export class WorkspaceDirectoryController {
 	constructor(private readonly prisma: IdentityPrismaService) {}
+
+	@Post(':workspaceId/assignee-directory')
+	@HttpCode(200)
+	@Header('Cache-Control', 'no-store')
+	async assignees(
+		@Param('workspaceId', new ParseUUIDPipe({ version: '4' }))
+		workspaceId: string,
+		@Body() dto: AssigneeDirectoryDto
+	) {
+		return this.prisma.$transaction(
+			async tx => {
+				await tx.$executeRawUnsafe('SET TRANSACTION READ ONLY');
+				await tx.$executeRawUnsafe(
+					"SET LOCAL statement_timeout = '1500ms'"
+				);
+				if (
+					!(await tx.workspace.findFirst({
+						where: { id: workspaceId, status: 'ACTIVE' },
+						select: { id: true }
+					}))
+				)
+					throw new NotFoundException(
+						'Workspace directory is unavailable'
+					);
+				const members = await tx.workspaceMember.findMany({
+					where: {
+						workspaceId,
+						status: 'ACTIVE',
+						user: { status: 'ACTIVE', deletedAt: null },
+						OR: [
+							{ id: { in: dto.membershipIds } },
+							...(dto.includeOwner ? [{ role: 'OWNER' as const }] : [])
+						]
+					},
+					select: {
+						id: true,
+						userId: true,
+						role: true,
+						user: {
+							select: {
+								name: true,
+								authIdentities: {
+									where: { type: 'EMAIL', verifiedAt: { not: null } },
+									select: { value: true },
+									orderBy: { id: 'asc' },
+									take: 1
+								}
+							}
+						}
+					},
+					orderBy: { id: 'asc' },
+					take: 1002
+				});
+				if (
+					members.length > 1001 ||
+					members.filter(member => member.role === 'OWNER').length > 1
+				)
+					throw new ServiceUnavailableException(
+						'Workspace owner binding is ambiguous'
+					);
+				return {
+					schemaVersion: 1 as const,
+					workspaceId,
+					items: members.map(member => ({
+						membershipId: member.id,
+						subject: member.userId,
+						workspaceRole: member.role,
+						displayName: member.user.name,
+						verifiedEmail: member.user.authIdentities[0]?.value ?? null
+					}))
+				};
+			},
+			{ isolationLevel: 'RepeatableRead', maxWait: 500, timeout: 2000 }
+		);
+	}
 
 	@Post(':workspaceId/member-directory')
 	@HttpCode(200)
