@@ -407,6 +407,19 @@ export class CrmTeamAdmissionService {
 							role
 						}
 					});
+			if (!member && currentIntent?.firstName && currentIntent.lastName)
+				await tx.crmEmployeeProfile.createMany({
+					data: [
+						{
+							workspaceId,
+							subject: candidate.subject,
+							firstName: currentIntent.firstName,
+							lastName: currentIntent.lastName,
+							middleName: currentIntent.middleName
+						}
+					],
+					skipDuplicates: true
+				});
 			if (!member && teamIds.length)
 				await tx.crmMemberTeam.createMany({
 					data: teamIds.map(teamId => ({

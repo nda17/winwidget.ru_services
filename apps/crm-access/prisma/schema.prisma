@@ -63,6 +63,25 @@ model CrmWorkspaceMember {
   @@schema("crm_access")
 }
 
+// Workspace-local employee name, including the owner who has no CRM member row.
+// Identity remains the authority for account and membership lifecycle.
+model CrmEmployeeProfile {
+  id          String   @id @default(uuid()) @db.Uuid
+  workspaceId String   @map("workspace_id") @db.Uuid
+  subject     String   @db.VarChar(256)
+  firstName   String   @map("first_name") @db.VarChar(100)
+  lastName    String   @map("last_name") @db.VarChar(100)
+  middleName  String?  @map("middle_name") @db.VarChar(100)
+  version     Int      @default(1)
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  @@unique([workspaceId, subject])
+  @@index([workspaceId, lastName, firstName, id])
+  @@map("crm_employee_profiles")
+  @@schema("crm_access")
+}
+
 model CrmTeam {
   id          String          @id @default(uuid()) @db.Uuid
   workspaceId String          @map("workspace_id") @db.Uuid
@@ -96,6 +115,9 @@ model CrmInvitationIntent {
   id                    String        @id @default(uuid()) @db.Uuid
   workspaceId           String        @map("workspace_id") @db.Uuid
   email                 String        @db.VarChar(254)
+  firstName             String?       @map("first_name") @db.VarChar(100)
+  lastName              String?       @map("last_name") @db.VarChar(100)
+  middleName            String?       @map("middle_name") @db.VarChar(100)
   role                  CrmMemberRole
   teamIds               String[]      @default([]) @map("team_ids") @db.Uuid
   inviterSubject        String        @map("inviter_subject") @db.VarChar(256)

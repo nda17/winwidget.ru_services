@@ -18,6 +18,8 @@ import { CrmAuthorizationService } from './authorization/crm-authorization.servi
 import { CrmInternalGuard } from './authorization/crm-internal.guard';
 import { CrmTeamController } from './team/team.controller';
 import { CrmTeamService } from './team/team.service';
+import { CrmEmployeeProfileService } from './team/team-profile.service';
+import { CrmEmployeeProfileController } from './team/team-profile.controller';
 import { IdentityInvitationClient } from './internal/identity-invitation.client';
 import { CrmTeamAdmissionService } from './team/team-admission.service';
 import { CrmTeamRabbitService } from './team/team-rabbit.service';
@@ -50,6 +52,7 @@ const role = parseCrmAccessRole(process.env.CRM_ACCESS_PROCESS_ROLE);
 					CrmPermissionsController,
 					CrmAuthorizationController,
 					CrmTeamController,
+					CrmEmployeeProfileController,
 					CrmBillingController,
 					BillingOperationController
 				]
@@ -64,6 +67,7 @@ const role = parseCrmAccessRole(process.env.CRM_ACCESS_PROCESS_ROLE);
 		CrmAccessService,
 		CrmAccessHealthService,
 		CrmTeamService,
+		CrmEmployeeProfileService,
 		IdentityInvitationClient,
 		CrmTeamAdmissionService,
 		CrmTeamRabbitService,

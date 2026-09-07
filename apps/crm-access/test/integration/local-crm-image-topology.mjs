@@ -99,6 +99,7 @@ const mutableTables = {
 	'crm-access': [
 		'crm_workspace_access',
 		'crm_workspace_members',
+		'crm_employee_profiles',
 		'crm_teams',
 		'crm_invitation_intents',
 		'crm_admissions',

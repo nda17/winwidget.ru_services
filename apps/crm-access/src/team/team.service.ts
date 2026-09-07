@@ -38,6 +38,10 @@ import {
 } from './team.util';
 import { parseTeamEvent, teamRoute } from './team-messaging.contract';
 import type { TeamConsumer } from './team.util';
+import {
+	employeeDisplayName,
+	normalizeEmployeeName
+} from './team-profile.dto';
 
 const teamsInclude = {
 	teams: {
@@ -119,6 +123,16 @@ export class CrmTeamService {
 		const profiles = new Map(
 			directory.map(item => [item.membershipId, item])
 		);
+		const employeeProfiles = new Map(
+			(
+				await this.prisma.crmEmployeeProfile.findMany({
+					where: {
+						workspaceId: actor.workspaceId,
+						subject: { in: items.map(item => item.subject) }
+					}
+				})
+			).map(item => [item.subject, employeeDisplayName(item)])
+		);
 		return {
 			schemaVersion: 1,
 			workspaceId: actor.workspaceId,
@@ -133,7 +147,9 @@ export class CrmTeamService {
 			total,
 			items: items.map(item => ({
 				...memberDto(item),
-				displayName: profiles.get(item.membershipId)!.displayName,
+				displayName:
+					employeeProfiles.get(item.subject) ??
+					profiles.get(item.membershipId)!.displayName,
 				verifiedEmail: profiles.get(item.membershipId)!.verifiedEmail
 			}))
 		};
@@ -461,12 +477,15 @@ export class CrmTeamService {
 		this.manageRole(actor, dto.role);
 		const email = dto.email.trim().toLowerCase();
 		const teamIds = [...dto.teamIds].sort();
+		const profile = dto.profile
+			? normalizeEmployeeName(dto.profile)
+			: undefined;
 		return command(
 			this.prisma,
 			actor,
 			dto.commandId,
 			'invitation.create',
-			{ ...dto, email, teamIds },
+			{ ...dto, email, teamIds, ...(profile ? { profile } : {}) },
 			async tx => {
 				await this.requireTeams(tx, dto.workspaceId, teamIds);
 				const now = new Date();
@@ -497,6 +516,7 @@ export class CrmTeamService {
 						email,
 						role: dto.role,
 						teamIds,
+						...profile,
 						inviterSubject: actor.subject,
 						expiresAt: new Date(now.getTime() + dto.ttlDays * 86400000),
 						createdAt: now,

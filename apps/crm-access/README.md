@@ -256,10 +256,52 @@ WAITING admission и не обходит ранее принятые пригл�
 у позднего acceptance event. Изменение платной квоты выполняется через BFF и
 Billing; подтверждённое освобождение capacity fence пробуждает очередь.
 
-Имена и подтверждённые email берутся только для текущей страницы через
+Подтверждённые email и резервное имя берутся только для текущей страницы через
 закрытый Identity member-directory, без телефонов, provider IDs или глобального
-справочника. Несовпадение membership/subject или недоступность Identity
-закрывают страницу с `503`; имена не выдумываются.
+справочника. Заполненное ФИО своего workspace имеет приоритет над Identity
+displayName. Несовпадение membership/subject или недоступность Identity
+закрывают страницу с `503`; имена не выдумываются. Shape прежнего `members`
+и командных ответов не меняется.
+
+### ФИО сотрудника
+
+`GET /api/v1/crm/access/team/profiles?workspaceId=…&subject=…` читает один
+workspace-local профиль. Без `subject` — профиль текущего актора.
+`POST` того же пути принимает `schemaVersion:1`, `commandId`, `workspaceId`,
+`subject`, `expectedVersion` и `profile:{firstName,lastName,middleName?}`.
+`Idempotency-Key` совпадает с `commandId`. Версия `0` создаёт отсутствующий
+профиль, последующие изменения требуют текущую версию. Конкурирующее
+изменение возвращает `409`; точный повтор возвращает прежний результат.
+Ответ: `schemaVersion:1`, `workspaceId`, `subject` актора, `targetSubject`,
+`profile:null|{id,firstName,lastName,middleName,version,updatedAt}`.
+Чтение/запись возвращают `Cache-Control:no-store`.
+
+Матрица: все действующие CRM-роли читают/изменяют собственное ФИО;
+READ_ONLY разрешает только чтение. OWNER изменяет ФИО всех действующих
+участников. CRM_ADMIN читает команду, изменяет своё ФИО и профили
+TEAM_LEAD/MANAGER/ANALYST, но не владельца/других CRM_ADMIN.
+TEAM_LEAD/MANAGER/ANALYST не получают административный справочник и
+не изменяют чужое ФИО. Свежий Identity/CRM-допуск проверяется для актора
+и чужой цели; локальный disabled/role повторно проверяется в транзакции.
+Профиль владельца не требует фиктивной строки CRM-member и не занимает
+дополнительное место. Лимит каждого поля 100 символов, отчество необязательно;
+имя/фамилия передаются раздельно, а не угадываются из произвольной строки.
+
+`POST team/invitations` дополнительно принимает необязательный `profile`
+того же формата. Старый запрос без поля сохраняет прежний hash/семантику.
+ФИО хранится только в Access intent и становится профилем в транзакции
+успешного admission; pending/revoked не создают профиль. Повтор admission
+и повторное включение сотрудника не переписывают заполненное ФИО.
+Identity account и membership не изменяются этим функционалом.
+Профиль и минимальный audit (только версии, без копий ФИО) фиксируются
+синхронно вместе с command receipt; новый RabbitMQ event для быстрого
+редактирования имени не нужен. Приглашения сохраняют прежние Outbox/events.
+
+Перед включением полей на frontend применить миграцию профилей, выдать
+runtime только SELECT/INSERT/UPDATE новой таблицы и выпустить API/worker
+CRM Access одной совместимой ревизии. Старый worker игнорирует новые имена;
+не включать новые приглашения при mixed Access revisions. Миграция не
+изменяет старые имена, membership и назначения задач.
 
 ## Worker, publisher и PostgreSQL
 
@@ -311,7 +353,7 @@ Shutdown сначала отменяет consume/timer и дожидается �
 закрывает RabbitMQ и Prisma.
 
 Runtime: `USAGE crm_access`; `SELECT service_identity`;
-`SELECT,INSERT,UPDATE` на `crm_workspace_access`, `crm_workspace_members`,
+`SELECT,INSERT,UPDATE` на `crm_workspace_access`, `crm_workspace_members`, `crm_employee_profiles`,
 `crm_teams`, `crm_invitation_intents`, `crm_admissions`;
 `SELECT,INSERT,UPDATE` на `crm_billing_capacity`, `crm_billing_operations`;
 `SELECT,INSERT,DELETE` на `crm_member_teams`;

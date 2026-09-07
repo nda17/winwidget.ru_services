@@ -7,6 +7,9 @@ const require = createRequire(import.meta.url);
 const { PrismaClient } = require('@prisma/crm-access-client');
 const { CrmTeamService } = require('../../dist/src/team/team.service.js');
 const {
+	CrmEmployeeProfileService
+} = require('../../dist/src/team/team-profile.service.js');
+const {
 	CrmTeamAdmissionService
 } = require('../../dist/src/team/team-admission.service.js');
 const {
@@ -171,7 +174,16 @@ try {
 			email: `qa-${randomUUID()}@example.test`,
 			role: 'MANAGER',
 			teamIds: [teamId],
-			ttlDays: 7
+			ttlDays: 7,
+			...(index === 0
+				? {
+						profile: {
+							firstName: 'Иван',
+							lastName: 'Петров',
+							middleName: 'Иванович'
+						}
+					}
+				: {})
 		});
 		const result = await teams.invite('Bearer local-test', dto);
 		assert.equal(result.invitation.status, 'REGISTERING');
@@ -213,6 +225,11 @@ try {
 		'Pending acceptance never allocates a CRM seat'
 	);
 	assert.equal(
+		await prisma.crmEmployeeProfile.count({ where: { workspaceId } }),
+		0,
+		'Pending invitation names do not create an active employee profile'
+	);
+	assert.equal(
 		await prisma.crmAdmission.count({
 			where: { workspaceId, status: 'WAITING' }
 		}),
@@ -238,6 +255,107 @@ try {
 		rows.map(row => row.status),
 		['ACTIVE', 'ACTIVE', 'ACTIVE', 'ACTIVE', 'WAITING', 'WAITING'],
 		'Admission is FIFO and never overbooks'
+	);
+	const admittedProfile =
+		await prisma.crmEmployeeProfile.findUniqueOrThrow({
+			where: {
+				workspaceId_subject: {
+					workspaceId,
+					subject: invited[0].proof.subject
+				}
+			}
+		});
+	assert.equal(admittedProfile.firstName, 'Иван');
+	assert.equal(admittedProfile.lastName, 'Петров');
+	assert.equal(admittedProfile.middleName, 'Иванович');
+	assert.equal(
+		await prisma.crmEmployeeProfile.count({ where: { workspaceId } }),
+		1,
+		'Legacy accepted invitations keep no invented employee profile'
+	);
+	const namedDirectory = await teams.members('Bearer local-test', {
+		workspaceId,
+		page: 1,
+		pageSize: 100
+	});
+	assert.equal(
+		namedDirectory.items.find(
+			item => item.subject === invited[0].proof.subject
+		).displayName,
+		'Петров Иван Иванович'
+	);
+	assert.equal(
+		namedDirectory.items.find(
+			item => item.subject === invited[1].proof.subject
+		).displayName,
+		null
+	);
+	const profiles = new CrmEmployeeProfileService(prisma, auth);
+	const ownerProfileCommand = command({
+		subject: ownerSubject,
+		expectedVersion: 0,
+		profile: { firstName: 'Анна', lastName: 'Соколова' }
+	});
+	const membersBeforeProfileEdit =
+		await prisma.crmWorkspaceMember.findMany({
+			where: { workspaceId },
+			orderBy: { id: 'asc' }
+		});
+	const profileResults = await Promise.all([
+		profiles.update('Bearer local-test', ownerProfileCommand),
+		profiles.update('Bearer local-test', ownerProfileCommand)
+	]);
+	assert.deepEqual(profileResults[0], profileResults[1]);
+	assert.equal(profileResults[0].profile.version, 1);
+	assert.equal(
+		await prisma.crmTeamAudit.count({
+			where: { commandId: ownerProfileCommand.commandId }
+		}),
+		1
+	);
+	await assert.rejects(
+		profiles.update('Bearer local-test', {
+			...ownerProfileCommand,
+			profile: { firstName: 'Изменено', lastName: 'Соколова' }
+		}),
+		error => error.status === 409
+	);
+	const competingProfiles = await Promise.allSettled(
+		['Анна', 'Мария'].map(firstName =>
+			profiles.update(
+				'Bearer local-test',
+				command({
+					subject: ownerSubject,
+					expectedVersion: 1,
+					profile: { firstName, lastName: 'Соколова' }
+				})
+			)
+		)
+	);
+	assert.equal(
+		competingProfiles.filter(result => result.status === 'fulfilled')
+			.length,
+		1
+	);
+	assert.equal(
+		competingProfiles.filter(
+			result =>
+				result.status === 'rejected' && result.reason.status === 409
+		).length,
+		1
+	);
+	assert.equal(
+		(await profiles.get('Bearer local-test', { workspaceId })).profile
+			.version,
+		2
+	);
+	assert.deepEqual(
+		await prisma.crmWorkspaceMember.findMany({
+			where: { workspaceId },
+			orderBy: { id: 'asc' }
+		}),
+		membersBeforeProfileEdit,
+		'Employee names never change memberships, roles, assignments or seat usage'
 	);
 	const differentTeam = await teams.createTeam(
 		'Bearer local-test',
@@ -637,6 +755,7 @@ try {
 	);
 	for (const table of [
 		'crm_workspace_members',
+		'crm_employee_profiles',
 		'crm_teams',
 		'crm_invitation_intents',
 		'crm_admissions',

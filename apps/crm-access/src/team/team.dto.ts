@@ -4,18 +4,23 @@ import {
 	ArrayUnique,
 	Equals,
 	IsArray,
+	IsDefined,
 	IsEmail,
 	IsIn,
 	IsInt,
 	IsOptional,
 	IsString,
 	IsUUID,
+	Matches,
 	Max,
 	MaxLength,
 	Min,
-	MinLength
+	MinLength,
+	ValidateIf,
+	ValidateNested
 } from 'class-validator';
 import type { CrmMemberRole } from '@prisma/crm-access-client';
+import { EmployeeNameDto } from './team-profile.dto';
 
 export class TeamQueryDto {
 	@IsUUID('4')
@@ -80,6 +85,12 @@ export class SetMemberTeamsDto extends VersionedTeamCommandDto {
 	teamIds!: string[];
 }
 export class CreateInvitationDto extends TeamCommandDto {
+	@ValidateIf((_object, value) => value !== undefined)
+	@IsDefined()
+	@ValidateNested()
+	@Type(() => EmployeeNameDto)
+	profile?: EmployeeNameDto;
+
 	@IsEmail()
 	@MaxLength(254)
 	email!: string;
@@ -95,4 +106,30 @@ export class CreateInvitationDto extends TeamCommandDto {
 	@Min(1)
 	@Max(7)
 	ttlDays = 7;
+}
+
+export class EmployeeProfileQueryDto {
+	@IsUUID('4')
+	workspaceId!: string;
+
+	@IsOptional()
+	@IsString()
+	@Matches(/^[^\s\x00-\x1f\x7f]{1,256}$/)
+	subject?: string;
+}
+
+export class UpdateEmployeeProfileDto extends TeamCommandDto {
+	@IsString()
+	@Matches(/^[^\s\x00-\x1f\x7f]{1,256}$/)
+	subject!: string;
+
+	@IsInt()
+	@Min(0)
+	@Max(2147483646)
+	expectedVersion!: number;
+
+	@IsDefined()
+	@ValidateNested()
+	@Type(() => EmployeeNameDto)
+	profile!: EmployeeNameDto;
 }
