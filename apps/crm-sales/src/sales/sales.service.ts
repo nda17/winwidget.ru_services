@@ -25,8 +25,11 @@ import type {
 	VersionedSalesCommand
 } from './sales.dto';
 
-type DealWithTasks = Deal & { tasks: SalesTask[] };
-const includeTasks = { tasks: { where: { status: 'OPEN' as const } } };
+type DealWithNextAction = Deal & { nextAction: SalesTask | null };
+const activeTaskStatuses = ['OPEN', 'IN_PROGRESS'] as const;
+// Follow the existing composite FK, without loading every parallel task just
+// to find one next action for each deal on a paginated page.
+const includeNextAction = { nextAction: true } as const;
 
 export function salesScope(access: SalesAccess): Prisma.DealWhereInput {
 	if (access.dataScope === 'ALL')
@@ -59,7 +62,7 @@ function taskDto(task: SalesTask) {
 		updatedAt: task.updatedAt.toISOString()
 	};
 }
-function dealDto(deal: DealWithTasks) {
+function dealDto(deal: DealWithNextAction) {
 	return {
 		id: deal.id,
 		workspaceId: deal.workspaceId,
@@ -77,9 +80,7 @@ function dealDto(deal: DealWithTasks) {
 		archivedAt: deal.archivedAt?.toISOString() || null,
 		createdAt: deal.createdAt.toISOString(),
 		updatedAt: deal.updatedAt.toISOString(),
-		nextTask: deal.tasks.find(task => task.id === deal.nextTaskId)
-			? taskDto(deal.tasks.find(task => task.id === deal.nextTaskId)!)
-			: null
+		nextTask: deal.nextAction ? taskDto(deal.nextAction) : null
 	};
 }
 function canonical(value: unknown): string {
@@ -164,7 +165,7 @@ export class SalesService {
 				skip: (query.page - 1) * query.pageSize,
 				take: query.pageSize,
 				orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
-				include: includeTasks
+				include: includeNextAction
 			})
 		]);
 		return {
@@ -378,7 +379,16 @@ export class SalesService {
 					dto.expectedVersion,
 					{ stageId: stage.id, status: stage.state, nextTaskId: taskId }
 				);
-				await this.closeTasks(transaction, access, id, 'COMPLETED');
+				// An OPEN transition replaces only the selected next action. Other
+				// workday tasks remain untouched; terminal transitions close all.
+				if (stage.state !== 'OPEN' || deal.nextTaskId)
+					await this.closeTasks(
+						transaction,
+						access,
+						id,
+						'COMPLETED',
+						stage.state === 'OPEN' ? deal.nextTaskId! : undefined
+					);
 				if (taskId && dto.nextTask)
 					await this.createTask(
 						transaction,
@@ -421,10 +431,12 @@ export class SalesService {
 						deal: salesScope(access)
 					}
 				});
-				if (!task) this.notFound();
+				// This legacy command is deal-bound. Standalone task commands have
+				// their own contract, not a fabricated deal/legacy receipt.
+				if (!task?.dealId) this.notFound();
 				const deal = await this.visible(transaction, access, task.dealId);
 				if (
-					task.status !== 'OPEN' ||
+					(task.status !== 'OPEN' && task.status !== 'IN_PROGRESS') ||
 					deal.nextTaskId !== taskId ||
 					deal.status !== 'OPEN'
 				)
@@ -434,7 +446,13 @@ export class SalesService {
 				await this.updateDeal(transaction, access, deal, deal.version, {
 					nextTaskId
 				});
-				await this.closeTasks(transaction, access, deal.id, 'COMPLETED');
+				await this.closeTasks(
+					transaction,
+					access,
+					deal.id,
+					'COMPLETED',
+					taskId
+				);
 				await this.createTask(
 					transaction,
 					{ ...access, subject: deal.assignedToSubject },
@@ -577,7 +595,7 @@ export class SalesService {
 		access: SalesAccess,
 		id: string,
 		includeArchived = false
-	): Promise<DealWithTasks> {
+	): Promise<DealWithNextAction> {
 		const deal = await client.deal.findFirst({
 			where: {
 				AND: [
@@ -585,7 +603,7 @@ export class SalesService {
 					{ id, ...(includeArchived ? {} : { archivedAt: null }) }
 				]
 			},
-			include: includeTasks
+			include: includeNextAction
 		});
 		if (!deal) this.notFound();
 		return deal;
@@ -642,10 +660,16 @@ export class SalesService {
 		transaction: Prisma.TransactionClient,
 		access: SalesAccess,
 		dealId: string,
-		status: 'COMPLETED' | 'CANCELLED'
+		status: 'COMPLETED' | 'CANCELLED',
+		taskId?: string
 	) {
 		await transaction.salesTask.updateMany({
-			where: { workspaceId: access.workspaceId, dealId, status: 'OPEN' },
+			where: {
+				workspaceId: access.workspaceId,
+				dealId,
+				...(taskId ? { id: taskId } : {}),
+				status: { in: [...activeTaskStatuses] }
+			},
 			data: { status, completedAt: new Date(), version: { increment: 1 } }
 		});
 	}

@@ -287,7 +287,7 @@ try {
 		error =>
 			error?.meta?.code === 'P0001' &&
 			String(error?.meta?.message).includes(
-				'Open deal requires exactly one current next action'
+				'Deal next action must match its active tasks'
 			)
 	);
 	assert.equal(
@@ -398,6 +398,300 @@ try {
 			})
 		).total,
 		0
+	);
+
+	// Expanded model: standalone tasks, multiple active actions and IN_PROGRESS
+	// coexist with unchanged v1 commands and their immutable receipts.
+	const standalone = await prisma.salesTask.create({
+		data: {
+			workspaceId: access.workspaceId,
+			dealId: null,
+			title: 'Подготовить отчёт',
+			dueAt: new Date(nextTask.dueAt),
+			assignedToSubject: access.subject
+		}
+	});
+	assert.equal(standalone.status, 'OPEN');
+	const workdayCommand = {
+		...command,
+		commandId: randomUUID(),
+		title: 'Рабочий день'
+	};
+	let workday = (
+		await service.create(access, workdayCommand, 'Bearer test')
+	).deal;
+	const originalReceipt =
+		await prisma.salesCommandReceipt.findUniqueOrThrow({
+			where: { commandId: workdayCommand.commandId }
+		});
+	let parallelTask = await prisma.$transaction(async tx => {
+		const row = await tx.salesTask.create({
+			data: {
+				workspaceId: access.workspaceId,
+				dealId: workday.id,
+				title: 'Параллельная работа',
+				dueAt: new Date(nextTask.dueAt),
+				assignedToSubject: access.subject,
+				status: 'OPEN'
+			}
+		});
+		await tx.$executeRaw`SET CONSTRAINTS crm_sales.deals_next_task_fkey, crm_sales.deals_next_action_integrity, crm_sales.tasks_next_action_integrity IMMEDIATE`;
+		return row;
+	});
+	assert.equal(
+		await prisma.salesTask.count({
+			where: { dealId: workday.id, status: 'OPEN' }
+		}),
+		2
+	);
+	parallelTask = await prisma.$transaction(async tx => {
+		const row = await tx.salesTask.update({
+			where: { id: parallelTask.id },
+			data: { status: 'IN_PROGRESS' }
+		});
+		await tx.$executeRaw`SET CONSTRAINTS crm_sales.deals_next_action_integrity, crm_sales.tasks_next_action_integrity IMMEDIATE`;
+		return row;
+	});
+	assert.equal(parallelTask.completedAt, null);
+	await assert.rejects(
+		service.complete(access, parallelTask.id, {
+			schemaVersion: 1,
+			commandId: randomUUID(),
+			workspaceId: access.workspaceId,
+			expectedVersion: parallelTask.version,
+			outcome: 'Не выбранное действие',
+			nextTask
+		}),
+		error => error.status === 409
+	);
+	await prisma.$transaction(async tx => {
+		await tx.salesTask.update({
+			where: { id: workday.nextTask.id },
+			data: { status: 'IN_PROGRESS' }
+		});
+		await tx.$executeRaw`SET CONSTRAINTS crm_sales.deals_next_action_integrity, crm_sales.tasks_next_action_integrity IMMEDIATE`;
+	});
+	assert.equal(
+		(await service.detail(access, workday.id)).deal.nextTask.status,
+		'IN_PROGRESS'
+	);
+	workday = (
+		await service.complete(access, workday.nextTask.id, {
+			schemaVersion: 1,
+			commandId: randomUUID(),
+			workspaceId: access.workspaceId,
+			expectedVersion: workday.nextTask.version,
+			outcome: 'Первое действие выполнено',
+			nextTask
+		})
+	).deal;
+	assert.deepEqual(
+		await prisma.salesTask.findUniqueOrThrow({
+			where: { id: parallelTask.id }
+		}),
+		parallelTask
+	);
+	assert.deepEqual(
+		await prisma.salesTask.findUniqueOrThrow({
+			where: { id: standalone.id }
+		}),
+		standalone
+	);
+	workday = (
+		await service.transition(access, workday.id, {
+			schemaVersion: 1,
+			commandId: randomUUID(),
+			workspaceId: access.workspaceId,
+			expectedVersion: workday.version,
+			targetStageId: openStage.id,
+			outcome: 'Следующий этап',
+			nextTask
+		})
+	).deal;
+	assert.deepEqual(
+		await prisma.salesTask.findUniqueOrThrow({
+			where: { id: parallelTask.id }
+		}),
+		parallelTask
+	);
+	workday = (
+		await service.transition(access, workday.id, {
+			schemaVersion: 1,
+			commandId: randomUUID(),
+			workspaceId: access.workspaceId,
+			expectedVersion: workday.version,
+			targetStageId: wonStage.id,
+			outcome: 'Сделка завершена'
+		})
+	).deal;
+	assert.equal(
+		(
+			await prisma.salesTask.findUniqueOrThrow({
+				where: { id: parallelTask.id }
+			})
+		).status,
+		'COMPLETED'
+	);
+	assert.deepEqual(
+		await prisma.salesTask.findUniqueOrThrow({
+			where: { id: standalone.id }
+		}),
+		standalone
+	);
+	assert.deepEqual(
+		await prisma.salesCommandReceipt.findUniqueOrThrow({
+			where: { commandId: workdayCommand.commandId }
+		}),
+		originalReceipt
+	);
+	assert.deepEqual(
+		await service.create(access, workdayCommand, 'Bearer test'),
+		originalReceipt.result
+	);
+
+	const flush = async tx => {
+		await tx.$executeRaw`SET CONSTRAINTS crm_sales.deals_next_task_fkey, crm_sales.deals_next_action_integrity, crm_sales.tasks_next_action_integrity IMMEDIATE`;
+	};
+	for (const status of ['OPEN', 'IN_PROGRESS']) {
+		await assert.rejects(
+			prisma.$transaction(async tx => {
+				await tx.salesTask.create({
+					data: {
+						workspaceId: access.workspaceId,
+						dealId: workday.id,
+						title: 'Недопустимая задача',
+						dueAt: new Date(nextTask.dueAt),
+						assignedToSubject: access.subject,
+						status
+					}
+				});
+				await flush(tx);
+			}),
+			error => error?.meta?.code === 'P0001'
+		);
+	}
+	await assert.rejects(
+		prisma.$transaction(async tx => {
+			await tx.salesTask.update({
+				where: { id: standalone.id },
+				data: { dealId: workday.id }
+			});
+			await flush(tx);
+		}),
+		error => error?.meta?.code === 'P0001'
+	);
+	await assert.rejects(
+		prisma.$transaction(async tx => {
+			await tx.salesTask.update({
+				where: { id: standalone.id },
+				data: { workspaceId: foreignWorkspace, dealId: workday.id }
+			});
+			await flush(tx);
+		}),
+		error => error?.code === 'P2003' || error?.meta?.code === '23503'
+	);
+	for (const status of ['COMPLETED', 'CANCELLED']) {
+		await assert.rejects(
+			prisma.salesTask.update({
+				where: { id: standalone.id },
+				data: { status }
+			}),
+			error =>
+				error?.meta?.code === '23514' ||
+				String(error?.message).includes('tasks_completed_at_check')
+		);
+	}
+	await assert.rejects(
+		prisma.salesTask.update({
+			where: { id: standalone.id },
+			data: { status: 'IN_PROGRESS', completedAt: new Date() }
+		}),
+		error =>
+			error?.meta?.code === '23514' ||
+			String(error?.message).includes('tasks_completed_at_check')
+	);
+
+	// Completing the final action without a replacement is a valid future
+	// workday command; the pointer must be cleared atomically, not left stale.
+	const finalAction = (
+		await service.create(
+			access,
+			{ ...command, commandId: randomUUID() },
+			'Bearer test'
+		)
+	).deal;
+	await prisma.$transaction(async tx => {
+		await tx.salesTask.update({
+			where: { id: finalAction.nextTask.id },
+			data: {
+				status: 'COMPLETED',
+				completedAt: new Date(),
+				version: { increment: 1 }
+			}
+		});
+		await tx.deal.update({
+			where: { id: finalAction.id },
+			data: { nextTaskId: null, version: { increment: 1 } }
+		});
+		await flush(tx);
+	});
+	assert.equal(
+		(await service.detail(access, finalAction.id)).deal.nextTask,
+		null
+	);
+	await assert.rejects(
+		prisma.$transaction(async tx => {
+			await tx.salesTask.create({
+				data: {
+					workspaceId: access.workspaceId,
+					dealId: finalAction.id,
+					title: 'Без указателя',
+					dueAt: new Date(nextTask.dueAt),
+					assignedToSubject: access.subject
+				}
+			});
+			await flush(tx);
+		}),
+		error => error?.meta?.code === 'P0001'
+	);
+	await assert.rejects(
+		prisma.$transaction(async tx => {
+			await tx.deal.update({
+				where: { id: finalAction.id },
+				data: { nextTaskId: standalone.id }
+			});
+			await flush(tx);
+		}),
+		error => ['23503', 'P0001'].includes(error?.meta?.code)
+	);
+	assert.deepEqual(
+		await prisma.salesTask.findUniqueOrThrow({
+			where: { id: standalone.id }
+		}),
+		standalone
+	);
+	await assert.rejects(
+		service.complete(access, standalone.id, {
+			schemaVersion: 1,
+			commandId: randomUUID(),
+			workspaceId: access.workspaceId,
+			expectedVersion: 1,
+			outcome: 'Нет сделки',
+			nextTask
+		}),
+		error => error.status === 404
+	);
+	await prisma.salesTask.update({
+		where: { id: standalone.id },
+		data: { status: 'COMPLETED', completedAt: new Date() }
+	});
+	assert.equal(
+		(
+			await prisma.salesTask.findUniqueOrThrow({
+				where: { id: standalone.id }
+			})
+		).status,
+		'COMPLETED'
 	);
 
 	for (const table of ['deal_timeline', 'command_receipts']) {

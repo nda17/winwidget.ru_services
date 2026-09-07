@@ -77,7 +77,7 @@ Read-only позволяет чтение; `ANALYST` получает тольк
   действие для открытого этапа;
 - `POST /tasks/:id/complete` — результат текущего действия и обязательное
   следующее; `expectedVersion` относится к задаче;
-- `POST /deals/:id/archive` — мягкое архивирование с отменой открытой задачи.
+- `POST /deals/:id/archive` — мягкое архивирование с отменой активных задач сделки.
 
 Изменяющие DTO включают `schemaVersion: 1`, UUIDv4 `commandId`, совпадающий
 с `Idempotency-Key`, и `workspaceId`; изменение существующей сделки требует
@@ -92,14 +92,19 @@ origin задаётся `CRM_CUSTOMERS_INTERNAL_BASE_URL`. Прямых чтен
 Команды возвращают `{schemaVersion:1,deal}`; списки —
 `{schemaVersion:1,page,pageSize,total,items}`. Сделка включает `version`,
 `contactId`, snapshot `contactName`, `assignedToSubject`, nullable `teamId`,
-`archivedAt`, `nextTask` и canonical даты. Каждая неархивированная открытая
-сделка имеет ровно одну активную задачу. Закрытие/архивирование убирает её;
-архивирование сохраняет исторический `status`. Значение `outcome` перехода
+`archivedAt`, `nextTask` и canonical даты. Открытая сделка может иметь несколько
+активных задач либо ни одной. `nextTask` указывает на одну активную задачу той
+же сделки/workspace и равен null, если активных задач нет. Чтение использует
+существующий composite FK, не загружает весь набор параллельных задач.
+Закрытие/архивирование завершает/отменяет все активные задачи именно сделки;
+самостоятельные задачи не затрагиваются. Архивирование сохраняет исторический
+`status`. Значение `outcome` перехода
 или завершения задачи обязательно и ограничено 4000 символами.
 
-Workspace/composite FK, partial unique index и deferred constraint triggers
-защищают связи этапа, сделки и задачи и не позволяют commit открытой сделки
-без следующего действия. Business mutation, timeline и actor/request-bound
+Workspace/composite FK и deferred constraint triggers защищают связи этапа,
+сделки и задачи: активный набор требует корректного next-action pointer;
+пустой набор допускает null; закрытая сделка не сохраняет активные задачи.
+Business mutation, timeline и actor/request-bound
 receipt выполняются одной SERIALIZABLE-транзакцией. Replay возвращает
 первоначальный результат только после новой проверки прав и row scope.
 `OWN` ограничивает записи ответственным; `TEAM` — собственными записями и
@@ -125,10 +130,39 @@ Runtime получает только SELECT/INSERT/UPDATE на `deals`/`tasks`,
 наличие новых таблиц и колонок. `pnpm test:workflow` запускает PostgreSQL 18
 сценарий после migrations: create → complete task → WON → reopen → archive,
 конкурентные CAS/replay, cross-workspace/OWN/ANALYST проверки, невозможность
-commit без next action и append-only ACL. Требуются loopback тестовая БД
+commit с некорректным next action и append-only ACL. Требуются loopback тестовая БД
 `winwidget_crm_sales_test` (либо её суффикс),
 `CRM_SALES_INTEGRATION_ALLOW_MUTATION=true`, `CRM_SALES_TEST_DATABASE_URL`,
 `CRM_SALES_TEST_RUNTIME_ROLE` и отдельный sentinel чужой схемы.
+
+### Подготовка модели «Моего дня»
+
+Миграции `20260907120000_add_task_in_progress` и
+`20260907120100_expand_workday_tasks` добавляют `IN_PROGRESS`, nullable `dealId`
+и снимают ограничение ровно одной активной задачи. Enum расширяется отдельным
+коммитом PostgreSQL до использования нового значения в CHECK. Исторические
+строки, назначения, Intake proofs и JSON прежних receipts не переписываются;
+новых runtime-прав и межсервисных зависимостей нет.
+
+`OPEN`/`IN_PROGRESS` имеют `completedAt: null`; `COMPLETED`/`CANCELLED` требуют
+дату завершения. Проверка next action рассматривает прежнего и нового родителя
+при изменении связи, включая standalone. Независимая задача не может стать
+`nextTask` сделки без настоящей composite FK-связи.
+
+Прежний `POST /tasks/:id/complete` остаётся командой «завершить выбранное
+действие и создать следующее» с прежним форматом receipt. Он принимает активное
+выбранное действие, не завершает параллельные задачи и не принимает standalone.
+Переход между OPEN-этапами заменяет только выбранное действие; переход в WON/LOST
+или архивирование закрывает весь активный набор данной сделки. `GET /tasks`
+пока сохраняет старый deal-bound список OPEN; самостоятельные задачи, новые
+фильтры/доска и их команды требуют отдельного scoped workday API.
+
+Это расширение хранилища и совместимых readers, не готовый пользовательский
+workflow. До включения новых writers необходимо выпустить совместимые frontend
+readers (`IN_PROGRESS`, отсутствие next action), миграции и Sales runtime;
+старые открытые страницы должны обновиться. Нельзя откатывать к старому Sales
+runtime после появления новых состояний: старый код считает активным только
+OPEN. Напоминания/назначения/повторы ещё не публикуют события из этого изменения.
 
 ## Локальные проверки
 

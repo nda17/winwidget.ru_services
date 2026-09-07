@@ -57,7 +57,7 @@ const deal = {
 	archivedAt: null,
 	createdAt: now,
 	updatedAt: now,
-	tasks: []
+	nextAction: null
 };
 
 function harness() {
@@ -147,6 +147,15 @@ describe('SalesService security and workflow', () => {
 			service.detail({ ...access, role: 'ANALYST' }, dealId)
 		).rejects.toBeInstanceOf(ForbiddenException);
 		expect(transaction.deal.findFirst).not.toHaveBeenCalled();
+	});
+
+	it('loads only the selected composite-bound task instead of every parallel task', async () => {
+		const { service, transaction } = harness();
+		await service.detail(access, dealId);
+		expect(transaction.deal.findFirst).toHaveBeenCalledWith({
+			where: { AND: [{ workspaceId }, { id: dealId, archivedAt: null }] },
+			include: { nextAction: true }
+		});
 	});
 
 	it('rejects a cross-workspace command and unverifiable team before writes', async () => {
@@ -323,6 +332,161 @@ describe('SalesService security and workflow', () => {
 			})
 		).rejects.toMatchObject({ status: 409 });
 		expect(transaction.deal.updateMany).not.toHaveBeenCalled();
+	});
+
+	it.each(['OPEN', 'IN_PROGRESS'])(
+		'completes only the selected %s action without closing other workday tasks',
+		async status => {
+			const { service, transaction } = harness();
+			transaction.salesTask.findFirst.mockResolvedValueOnce({
+				id: taskId,
+				workspaceId,
+				dealId,
+				version: 1,
+				status
+			});
+			await service.complete(access, taskId, {
+				schemaVersion: 1,
+				commandId,
+				workspaceId,
+				expectedVersion: 1,
+				outcome: 'Связались',
+				nextTask
+			});
+			expect(transaction.salesTask.updateMany).toHaveBeenCalledWith({
+				where: {
+					workspaceId,
+					dealId,
+					id: taskId,
+					status: { in: ['OPEN', 'IN_PROGRESS'] }
+				},
+				data: {
+					status: 'COMPLETED',
+					completedAt: expect.any(Date),
+					version: { increment: 1 }
+				}
+			});
+		}
+	);
+
+	it.each(['COMPLETED', 'CANCELLED'])(
+		'rejects a terminal %s task before legacy completion writes',
+		async status => {
+			const { service, transaction } = harness();
+			transaction.salesTask.findFirst.mockResolvedValueOnce({
+				id: taskId,
+				workspaceId,
+				dealId,
+				version: 1,
+				status
+			});
+			await expect(
+				service.complete(access, taskId, {
+					schemaVersion: 1,
+					commandId,
+					workspaceId,
+					expectedVersion: 1,
+					outcome: 'Связались',
+					nextTask
+				})
+			).rejects.toMatchObject({ status: 409 });
+			expect(transaction.salesTask.updateMany).not.toHaveBeenCalled();
+		}
+	);
+
+	it('does not route standalone tasks through a legacy deal receipt', async () => {
+		const { service, transaction } = harness();
+		transaction.salesTask.findFirst.mockResolvedValueOnce({
+			id: taskId,
+			workspaceId,
+			dealId: null,
+			version: 1,
+			status: 'OPEN'
+		} as never);
+		await expect(
+			service.complete(access, taskId, {
+				schemaVersion: 1,
+				commandId,
+				workspaceId,
+				expectedVersion: 1,
+				outcome: 'Связались',
+				nextTask
+			})
+		).rejects.toBeInstanceOf(NotFoundException);
+		expect(transaction.deal.findFirst).not.toHaveBeenCalled();
+		expect(transaction.salesTask.updateMany).not.toHaveBeenCalled();
+		expect(transaction.salesCommandReceipt.create).not.toHaveBeenCalled();
+	});
+
+	it.each(['OPEN', 'WON'])(
+		'limits an %s transition to the appropriate deal tasks',
+		async state => {
+			const { service, transaction } = harness();
+			transaction.pipelineStage.findFirst.mockResolvedValueOnce({
+				id: stageId,
+				workspaceId,
+				pipelineId,
+				state
+			});
+			await service.transition(access, dealId, {
+				schemaVersion: 1,
+				commandId,
+				workspaceId,
+				expectedVersion: 1,
+				targetStageId: stageId,
+				outcome: 'Переход',
+				...(state === 'OPEN' ? { nextTask } : {})
+			});
+			expect(
+				transaction.salesTask.updateMany.mock.calls[0][0].where
+			).toEqual({
+				workspaceId,
+				dealId,
+				...(state === 'OPEN' ? { id: taskId } : {}),
+				status: { in: ['OPEN', 'IN_PROGRESS'] }
+			});
+		}
+	);
+
+	it('does not close unrelated workday tasks when an OPEN deal has no selected action', async () => {
+		const { service, transaction } = harness();
+		transaction.deal.findFirst.mockResolvedValueOnce({
+			...deal,
+			nextTaskId: null
+		} as never);
+		await service.transition(access, dealId, {
+			schemaVersion: 1,
+			commandId,
+			workspaceId,
+			expectedVersion: 1,
+			targetStageId: stageId,
+			outcome: 'Переход',
+			nextTask
+		});
+		expect(transaction.salesTask.updateMany).not.toHaveBeenCalled();
+		expect(transaction.salesTask.create).toHaveBeenCalledTimes(1);
+	});
+
+	it('archive cancels every active task in the exact deal, never standalone tasks', async () => {
+		const { service, transaction } = harness();
+		await service.archive(access, dealId, {
+			schemaVersion: 1,
+			commandId,
+			workspaceId,
+			expectedVersion: 1
+		});
+		expect(transaction.salesTask.updateMany).toHaveBeenCalledWith({
+			where: {
+				workspaceId,
+				dealId,
+				status: { in: ['OPEN', 'IN_PROGRESS'] }
+			},
+			data: {
+				status: 'CANCELLED',
+				completedAt: expect.any(Date),
+				version: { increment: 1 }
+			}
+		});
 	});
 
 	it.each([undefined, { ...nextTask, dueAt: '2026-02-31T09:00:00.000Z' }])(

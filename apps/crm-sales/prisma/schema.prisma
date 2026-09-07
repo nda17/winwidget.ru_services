@@ -137,7 +137,8 @@ model Deal {
   updatedAt         DateTime              @updatedAt @map("updated_at")
   pipeline          Pipeline              @relation(fields: [pipelineId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
   stage             PipelineStage         @relation(fields: [stageId, pipelineId, workspaceId], references: [id, pipelineId, workspaceId], onDelete: Restrict)
-  tasks             SalesTask[]
+  tasks             SalesTask[]           @relation("DealTasks")
+  nextAction        SalesTask?            @relation("DealNextTask", fields: [nextTaskId, id, workspaceId], references: [id, dealId, workspaceId], onDelete: NoAction, onUpdate: NoAction, map: "deals_next_task_fkey")
   timeline          DealTimeline[]
   intakeOperations  IntakeOperationSlot[] @relation("IntakeDeal")
 
@@ -153,7 +154,7 @@ model Deal {
 model SalesTask {
   id                String                @id @default(uuid()) @db.Uuid
   workspaceId       String                @map("workspace_id") @db.Uuid
-  dealId            String                @map("deal_id") @db.Uuid
+  dealId            String?               @map("deal_id") @db.Uuid
   version           Int                   @default(1)
   title             String                @db.VarChar(200)
   dueAt             DateTime              @map("due_at")
@@ -162,11 +163,13 @@ model SalesTask {
   completedAt       DateTime?             @map("completed_at")
   createdAt         DateTime              @default(now()) @map("created_at")
   updatedAt         DateTime              @updatedAt @map("updated_at")
-  deal              Deal                  @relation(fields: [dealId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
+  deal              Deal?                 @relation("DealTasks", fields: [dealId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
+  selectedFor       Deal[]                @relation("DealNextTask")
   intakeOperations  IntakeOperationSlot[] @relation("IntakeFirstTask")
 
   @@unique([id, dealId, workspaceId])
   @@index([workspaceId, status, dueAt])
+  @@index([workspaceId, assignedToSubject, status, dueAt, id], map: "tasks_assignee_workday_idx")
   @@map("tasks")
   @@schema("crm_sales")
 }
@@ -204,6 +207,7 @@ model SalesCommandReceipt {
 
 enum SalesTaskStatus {
   OPEN
+  IN_PROGRESS
   COMPLETED
   CANCELLED
 
