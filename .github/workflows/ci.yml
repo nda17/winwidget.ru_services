@@ -1331,7 +1331,7 @@ jobs:
       - service-integration
       - widgets-integration
     if: github.event_name == 'push' && github.ref == 'refs/heads/prod'
-    uses: nda17/winwidget.ru_infra/.github/workflows/deploy-production.yml@6ab9828d9e8fdc058780514a5b434855c9924b07
+    uses: nda17/winwidget.ru_infra/.github/workflows/deploy-production.yml@48be9afa0ea4e38faaead5331554819d400927a0
     with:
       services_revision: ${{ github.sha }}
       release_scope: crm-prepare
@@ -1349,10 +1349,28 @@ jobs:
     name: Initialize four isolated CRM databases
     needs: deploy-production
     if: github.event_name == 'push' && github.ref == 'refs/heads/prod'
-    uses: nda17/winwidget.ru_infra/.github/workflows/deploy-production.yml@6ab9828d9e8fdc058780514a5b434855c9924b07
+    uses: nda17/winwidget.ru_infra/.github/workflows/deploy-production.yml@48be9afa0ea4e38faaead5331554819d400927a0
     with:
       services_revision: ${{ github.sha }}
       release_scope: crm-databases
+      expected_live_revision: '484e546451088671e23ae37ae4026b9b3fe500c5'
+      expected_service_env_sha256: '4f0b6410c124fbae9b5608da9e28c74b19229cf529b662e0cc9971dc4f6aee6b'
+    secrets:
+      BACKEND_PRODUCTION_SSH_HOST: ${{ secrets.PRODUCTION_SSH_HOST }}
+      BACKEND_PRODUCTION_SSH_PORT: ${{ secrets.PRODUCTION_SSH_PORT }}
+      BACKEND_PRODUCTION_SSH_USER: ${{ secrets.PRODUCTION_SSH_USER }}
+      BACKEND_PRODUCTION_SSH_PRIVATE_KEY: ${{ secrets.PRODUCTION_SSH_PRIVATE_KEY }}
+      BACKEND_PRODUCTION_SSH_KNOWN_HOSTS: ${{ secrets.BACKEND_PRODUCTION_SSH_KNOWN_HOSTS }}
+      BACKEND_PRODUCTION_ENV_SHA256: ${{ secrets.BACKEND_PRODUCTION_ENV_SHA256 }}
+
+  deploy-crm-runtime:
+    name: Start twelve isolated CRM processes with public access closed
+    needs: deploy-crm-databases
+    if: github.event_name == 'push' && github.ref == 'refs/heads/prod'
+    uses: nda17/winwidget.ru_infra/.github/workflows/deploy-production.yml@48be9afa0ea4e38faaead5331554819d400927a0
+    with:
+      services_revision: ${{ github.sha }}
+      release_scope: crm-runtime
       expected_live_revision: '484e546451088671e23ae37ae4026b9b3fe500c5'
       expected_service_env_sha256: '4f0b6410c124fbae9b5608da9e28c74b19229cf529b662e0cc9971dc4f6aee6b'
     secrets:
