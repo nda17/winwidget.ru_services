@@ -199,7 +199,7 @@ try {
 		'json'
 	);
 	assert.equal(v1Companies.rowCount, 2);
-	assert.equal(exportHeaders(v1Companies)['x-wincrm-export-schema'], '1');
+	assert.equal(exportHeaders(v1Companies)['X-WinCRM-Export-Schema'], '1');
 	assert.equal(JSON.parse(v1Companies.body).schemaVersion, 1);
 	assert.ok(
 		JSON.parse(v1Companies.body).items.every(row => !('legalName' in row))
@@ -213,7 +213,7 @@ try {
 		2
 	);
 	assert.equal(v2Companies.rowCount, 2);
-	assert.equal(exportHeaders(v2Companies)['x-wincrm-export-schema'], '2');
+	assert.equal(exportHeaders(v2Companies)['X-WinCRM-Export-Schema'], '2');
 	const v2Document = JSON.parse(v2Companies.body);
 	assert.equal(v2Document.schemaVersion, 2);
 	assert.deepEqual(
@@ -248,7 +248,7 @@ try {
 		undefined,
 		2
 	);
-	assert.equal(exportHeaders(v2Csv)['x-wincrm-export-schema'], '2');
+	assert.equal(exportHeaders(v2Csv)['X-WinCRM-Export-Schema'], '2');
 	assert.ok(
 		v2Csv.body
 			.toString()
