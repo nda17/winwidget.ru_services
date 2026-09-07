@@ -1,11 +1,26 @@
-import { ForbiddenException, ValidationPipe } from '@nestjs/common';
+import {
+	ForbiddenException,
+	ServiceUnavailableException,
+	ValidationPipe
+} from '@nestjs/common';
+import {
+	HEADERS_METADATA,
+	HTTP_CODE_METADATA,
+	METHOD_METADATA,
+	PATH_METADATA
+} from '@nestjs/common/constants';
+import { RequestMethod } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import { CrmAssigneeService } from './team-assignee.service';
 import {
+	AssigneeLabelsDto,
 	AssigneeQueryDto,
 	AuthorizeAssigneeDto
 } from './team-assignee.dto';
-import { CrmAssigneeAuthorizationController } from './team-assignee.controller';
+import {
+	CrmAssigneeAuthorizationController,
+	CrmAssigneeController
+} from './team-assignee.controller';
 
 const workspaceId = randomUUID();
 const teamId = randomUUID();
@@ -472,5 +487,428 @@ describe('Scoped assignee selection and command authority', () => {
 					{ type: 'query', metatype: AssigneeQueryDto }
 				)
 			).rejects.toBeDefined();
+	});
+});
+
+describe('Bounded read-only assignee labels', () => {
+	const binding = { subject: 'member', membershipId };
+	const labelsDto = {
+		schemaVersion: 1 as const,
+		workspaceId,
+		bindings: [binding]
+	};
+	const employee = {
+		...binding,
+		displayName: 'Петров Иван',
+		verifiedEmail: 'member@example.test',
+		role: 'MANAGER'
+	};
+	const pipe = new ValidationPipe({
+		whitelist: true,
+		forbidNonWhitelisted: true,
+		forbidUnknownValues: true,
+		transform: true
+	});
+	it('returns exact bindings in request order, preserving legacy null without rebinding history', async () => {
+		const { service, prisma, auth } = setup();
+		const oldMembership = randomUUID();
+		const bindings = [
+			{ subject: 'member', membershipId: oldMembership },
+			{ subject: 'member', membershipId: null },
+			binding,
+			{ subject: 'unavailable', membershipId: randomUUID() }
+		];
+		const input = { ...labelsDto, bindings };
+		const unchanged = JSON.stringify(input);
+		expect(await service.labels('Bearer test', input)).toEqual({
+			schemaVersion: 1,
+			workspaceId,
+			subject: 'owner',
+			items: [
+				{ binding: bindings[0], employee: null },
+				{ binding: bindings[1], employee },
+				{ binding, employee },
+				{ binding: bindings[3], employee: null }
+			]
+		});
+		expect(JSON.stringify(input)).toBe(unchanged);
+		expect(auth.assignmentSubject).not.toHaveBeenCalled();
+		expect(prisma.crmWorkspaceMember.findFirst).not.toHaveBeenCalled();
+		expect(prisma.crmEmployeeProfile.findMany).toHaveBeenCalledWith({
+			where: { workspaceId, subject: { in: ['member'] } }
+		});
+	});
+	it.each([1, 20, 100])(
+		'uses constant query counts for %i exact requested employees',
+		async count => {
+			const { service, prisma, auth, identity } = setup();
+			const members = Array.from({ length: count }, (_, index) => ({
+				...member,
+				id: randomUUID(),
+				subject: `employee-${index}`,
+				membershipId: randomUUID()
+			}));
+			prisma.crmWorkspaceMember.findMany.mockResolvedValue(members);
+			prisma.crmEmployeeProfile.findMany.mockResolvedValue([]);
+			identity.assignees.mockResolvedValue(
+				members.map(item => ({
+					...entry,
+					subject: item.subject,
+					membershipId: item.membershipId
+				}))
+			);
+			const bindings = members.map(({ subject, membershipId }) => ({
+				subject,
+				membershipId
+			}));
+			const result = await service.labels('Bearer test', {
+				...labelsDto,
+				bindings
+			});
+			expect(result.items).toHaveLength(count);
+			expect(result.items.every(item => item.employee !== null)).toBe(
+				true
+			);
+			expect(identity.assignees).toHaveBeenCalledTimes(1);
+			expect(identity.assignees).toHaveBeenCalledWith(
+				workspaceId,
+				members,
+				true,
+				expect.any(AbortSignal)
+			);
+			expect(auth.authorize).toHaveBeenCalledTimes(2);
+			expect(auth.authorize).toHaveBeenNthCalledWith(
+				1,
+				'Bearer test',
+				workspaceId,
+				'crm-sales'
+			);
+			expect(auth.authorize).toHaveBeenNthCalledWith(
+				2,
+				'Bearer test',
+				workspaceId,
+				'crm-sales'
+			);
+			expect(prisma.crmWorkspaceMember.findMany).toHaveBeenCalledTimes(2);
+			expect(prisma.crmWorkspaceMember.findMany).toHaveBeenCalledWith(
+				expect.objectContaining({
+					take: count + 1,
+					where: {
+						AND: [
+							expect.objectContaining({ workspaceId, disabledAt: null }),
+							{ subject: { in: bindings.map(item => item.subject) } }
+						]
+					}
+				})
+			);
+			expect(prisma.crmEmployeeProfile.findMany).toHaveBeenCalledTimes(1);
+			expect(prisma.$transaction).toHaveBeenCalledWith(
+				expect.any(Function),
+				{ isolationLevel: 'RepeatableRead' }
+			);
+		}
+	);
+	it('authorizes an empty request without fetching directory or profiles', async () => {
+		const { service, prisma, auth, identity } = setup();
+		expect(
+			await service.labels('Bearer test', { ...labelsDto, bindings: [] })
+		).toEqual({
+			schemaVersion: 1,
+			workspaceId,
+			subject: 'owner',
+			items: []
+		});
+		expect(auth.authorize).toHaveBeenCalledTimes(1);
+		expect(prisma.crmWorkspaceMember.findMany).not.toHaveBeenCalled();
+		expect(prisma.crmEmployeeProfile.findMany).not.toHaveBeenCalled();
+		expect(identity.assignees).not.toHaveBeenCalled();
+	});
+	it.each(['OWNER', 'CRM_ADMIN'])(
+		'includes requested Identity owner without a local member for %s',
+		async role => {
+			const { service, prisma, identity } = setup({ role });
+			prisma.crmWorkspaceMember.findMany.mockResolvedValue([]);
+			prisma.crmEmployeeProfile.findMany.mockResolvedValue([]);
+			identity.assignees.mockResolvedValue([
+				{ ...entry, subject: 'owner', workspaceRole: 'OWNER' }
+			]);
+			expect(
+				await service.labels('Bearer test', {
+					...labelsDto,
+					bindings: [{ subject: 'owner', membershipId }]
+				})
+			).toMatchObject({
+				items: [
+					{
+						binding: { subject: 'owner', membershipId },
+						employee: {
+							subject: 'owner',
+							membershipId,
+							role: 'OWNER',
+							displayName: 'Legacy name'
+						}
+					}
+				]
+			});
+			expect(identity.assignees.mock.calls[0][2]).toBe(true);
+		}
+	);
+	it('does not read or return unrequested owner profiles', async () => {
+		const { service, prisma, identity } = setup();
+		identity.assignees.mockResolvedValue([
+			entry,
+			{
+				...entry,
+				membershipId: randomUUID(),
+				subject: 'owner',
+				workspaceRole: 'OWNER'
+			}
+		]);
+		const result = await service.labels('Bearer test', labelsDto);
+		expect(result.items).toEqual([{ binding, employee }]);
+		expect(prisma.crmEmployeeProfile.findMany).toHaveBeenCalledWith({
+			where: { workspaceId, subject: { in: ['member'] } }
+		});
+	});
+	it.each([
+		{ role: 'MANAGER', dataScope: 'OWN' },
+		{ role: 'TEAM_LEAD', dataScope: 'TEAM' }
+	])(
+		'retains $dataScope candidates and never requests owner access',
+		async patch => {
+			const { service, prisma, identity } = setup({
+				...patch,
+				subject: 'member',
+				state: 'READ_ONLY',
+				permissions: ['sales:read']
+			});
+			await expect(
+				service.labels('Bearer test', labelsDto)
+			).resolves.toMatchObject({ items: [{ employee }] });
+			const candidateWhere =
+				prisma.crmWorkspaceMember.findMany.mock.calls[0][0].where.AND[0];
+			expect(candidateWhere.AND[0]).toEqual(
+				patch.dataScope === 'OWN'
+					? { subject: 'member' }
+					: {
+							OR: [
+								{ subject: 'member' },
+								{
+									teams: {
+										some: {
+											teamId: { in: [teamId] },
+											team: { archivedAt: null }
+										}
+									}
+								}
+							]
+						}
+			);
+			expect(identity.assignees.mock.calls[0][2]).toBe(false);
+		}
+	);
+	it.each([{ role: 'ANALYST' }, { permissions: [] }])(
+		'denies insufficient read permissions before local or Identity lookup: %j',
+		async patch => {
+			const { service, prisma, identity } = setup(patch);
+			await expect(
+				service.labels('Bearer test', labelsDto)
+			).rejects.toMatchObject({ status: 403 });
+			expect(prisma.crmWorkspaceMember.findMany).not.toHaveBeenCalled();
+			expect(identity.assignees).not.toHaveBeenCalled();
+		}
+	);
+	it('omits revoked, missing and out-of-scope bindings without leaking stored profile names', async () => {
+		const { service, prisma, identity } = setup({
+			role: 'MANAGER',
+			dataScope: 'OWN'
+		});
+		prisma.crmWorkspaceMember.findMany.mockResolvedValue([]);
+		identity.assignees.mockResolvedValue([]);
+		await expect(
+			service.labels('Bearer test', labelsDto)
+		).resolves.toMatchObject({ items: [{ binding, employee: null }] });
+		expect(prisma.crmEmployeeProfile.findMany).not.toHaveBeenCalled();
+	});
+	it('does not load a current profile for only an obsolete exact membership', async () => {
+		const { service, prisma } = setup();
+		const oldBinding = { subject: 'member', membershipId: randomUUID() };
+		await expect(
+			service.labels('Bearer test', {
+				...labelsDto,
+				bindings: [oldBinding]
+			})
+		).resolves.toMatchObject({
+			items: [{ binding: oldBinding, employee: null }]
+		});
+		expect(prisma.crmEmployeeProfile.findMany).not.toHaveBeenCalled();
+	});
+	it('preserves Identity unavailability as an error, not unavailable employees', async () => {
+		const { service, prisma, identity } = setup();
+		identity.assignees.mockRejectedValue(
+			new ServiceUnavailableException('Directory unavailable')
+		);
+		await expect(
+			service.labels('Bearer test', labelsDto)
+		).rejects.toMatchObject({ status: 503 });
+		expect(prisma.crmEmployeeProfile.findMany).not.toHaveBeenCalled();
+	});
+	it.each([
+		{ subject: 'different-actor' },
+		{ workspaceId: randomUUID() },
+		{ role: 'CRM_ADMIN' },
+		{ dataScope: 'TEAM' },
+		{ teamIds: [] },
+		{ permissions: ['sales:read'] },
+		{ state: 'READ_ONLY' }
+	])('rejects changed actor authority after Identity: %j', async patch => {
+		const { service, prisma, auth } = setup();
+		auth.authorize
+			.mockResolvedValueOnce(actor)
+			.mockResolvedValue({ ...actor, ...patch });
+		await expect(
+			service.labels('Bearer test', labelsDto)
+		).rejects.toMatchObject({ status: 403 });
+		expect(prisma.$transaction).not.toHaveBeenCalled();
+		expect(prisma.crmEmployeeProfile.findMany).not.toHaveBeenCalled();
+	});
+	it.each([
+		[],
+		[{ ...member, version: 2 }],
+		[{ ...member, id: randomUUID() }],
+		[{ ...member, membershipId: randomUUID() }],
+		[{ ...member, teams: [] }],
+		[{ ...member, role: 'TEAM_LEAD' }]
+	])(
+		'rejects exact local membership drift after Identity %#',
+		async (...members) => {
+			const { service, prisma } = setup();
+			prisma.crmWorkspaceMember.findMany
+				.mockResolvedValueOnce([member])
+				.mockResolvedValue(members);
+			await expect(
+				service.labels('Bearer test', labelsDto)
+			).rejects.toMatchObject({ status: 409 });
+			expect(prisma.crmEmployeeProfile.findMany).not.toHaveBeenCalled();
+		}
+	);
+	it.each([
+		[entry, entry],
+		[entry, { ...entry, membershipId: randomUUID() }],
+		[{ ...entry, subject: 'foreign' }],
+		[{ ...entry, membershipId: randomUUID() }],
+		[
+			{ ...entry, workspaceRole: 'OWNER' },
+			{
+				...entry,
+				subject: 'owner-two',
+				membershipId: randomUUID(),
+				workspaceRole: 'OWNER'
+			}
+		]
+	])(
+		'fails closed on ambiguous or unsolicited Identity bindings %#',
+		async (...entries) => {
+			const { service, prisma, identity } = setup();
+			identity.assignees.mockResolvedValue(entries);
+			await expect(
+				service.labels('Bearer test', labelsDto)
+			).rejects.toMatchObject({ status: 503 });
+			expect(prisma.crmEmployeeProfile.findMany).not.toHaveBeenCalled();
+		}
+	);
+	it('rejects an unsolicited Identity owner for OWN scope', async () => {
+		const { service, identity } = setup({
+			role: 'MANAGER',
+			dataScope: 'OWN'
+		});
+		identity.assignees.mockResolvedValue([
+			{ ...entry, workspaceRole: 'OWNER' }
+		]);
+		await expect(
+			service.labels('Bearer test', labelsDto)
+		).rejects.toMatchObject({ status: 503 });
+	});
+	it('rejects local candidate overflow before Identity', async () => {
+		const { service, prisma, identity } = setup();
+		prisma.crmWorkspaceMember.findMany.mockResolvedValue([member, member]);
+		await expect(
+			service.labels('Bearer test', labelsDto)
+		).rejects.toMatchObject({ status: 503 });
+		expect(identity.assignees).not.toHaveBeenCalled();
+	});
+	it('accepts empty, exact, legacy and 100 unique pairs through the production validation pipe', async () => {
+		for (const bindings of [
+			[],
+			[binding],
+			[{ ...binding, membershipId: null }, binding],
+			Array.from({ length: 100 }, (_, index) => ({
+				subject: `member-${index}`,
+				membershipId: randomUUID()
+			}))
+		]) {
+			expect(
+				await pipe.transform(
+					{ ...labelsDto, bindings },
+					{ type: 'body', metatype: AssigneeLabelsDto }
+				)
+			).toEqual({ ...labelsDto, bindings });
+		}
+	});
+	it.each([
+		{ schemaVersion: 2 },
+		{ workspaceId: 'bad' },
+		{ extra: true },
+		{ bindings: undefined },
+		{ bindings: null },
+		{ bindings: {} },
+		{ bindings: [binding, binding] },
+		{
+			bindings: [
+				{ ...binding, membershipId: null },
+				{ ...binding, membershipId: null }
+			]
+		},
+		{
+			bindings: Array.from({ length: 101 }, (_, index) => ({
+				subject: `member-${index}`,
+				membershipId: randomUUID()
+			}))
+		},
+		{ bindings: [null] },
+		{ bindings: ['member'] },
+		{ bindings: [[binding]] },
+		{ bindings: [{ ...binding, membershipId: undefined }] },
+		{ bindings: [{ ...binding, membershipId: 'bad' }] },
+		{ bindings: [{ ...binding, subject: 'with space' }] },
+		{ bindings: [{ ...binding, subject: 'a'.repeat(257) }] },
+		{ bindings: [{ ...binding, actor: true }] }
+	])('rejects malformed, duplicate or oversized DTO %#', async patch => {
+		await expect(
+			pipe.transform(
+				{ ...labelsDto, ...patch },
+				{ type: 'body', metatype: AssigneeLabelsDto }
+			)
+		).rejects.toBeDefined();
+	});
+	it('exposes a no-store 200 read-only POST without invoking assignment authorization', () => {
+		const service = { labels: jest.fn().mockReturnValue({ items: [] }) };
+		const controller = new CrmAssigneeController(service as never);
+		expect(controller.labels('Bearer test', labelsDto)).toEqual({
+			items: []
+		});
+		expect(service.labels).toHaveBeenCalledWith('Bearer test', labelsDto);
+		expect(Reflect.getMetadata(PATH_METADATA, controller.labels)).toBe(
+			'assignee-labels'
+		);
+		expect(Reflect.getMetadata(METHOD_METADATA, controller.labels)).toBe(
+			RequestMethod.POST
+		);
+		expect(
+			Reflect.getMetadata(HTTP_CODE_METADATA, controller.labels)
+		).toBe(200);
+		expect(
+			Reflect.getMetadata(HEADERS_METADATA, controller.labels)
+		).toContainEqual({ name: 'Cache-Control', value: 'no-store' });
 	});
 });

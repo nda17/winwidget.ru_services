@@ -390,6 +390,39 @@ Sales должен вызывать проверку перед каждой н�
 Новые env, схемы/права БД, RabbitMQ-события и публичный Identity directory не нужны.
 Этот источник пока не означает готовность UI назначения или его production rollout.
 
+### Имена ответственных на странице задач
+
+`POST /api/v1/crm/access/team/assignee-labels` — read-only пакетный поиск имён
+для уже загруженной страницы, без отдельных запросов на каждую задачу и без
+полной выгрузки сотрудников. Body:
+`{schemaVersion:1,workspaceId,bindings:[{subject,membershipId}]}`.
+Принимаются 0–100 уникальных точных пар; `membershipId` — UUID v4 либо явный
+`null` у legacy-назначения. Отсутствующий membershipId не принимается.
+
+Ответ 200 / `Cache-Control: no-store`:
+`{schemaVersion:1,workspaceId,subject,items:[{binding:{subject,membershipId},employee}]}`.
+`subject` верхнего уровня — авторизованный читатель; `items` сохраняет порядок
+и точные пары запроса. `employee` содержит те же поля, что справочник выбора,
+либо null при недоступном, отозванном или не совпадающем текущем membership.
+ФИО Access имеет приоритет над Identity name. Для legacy null можно показать
+имя текущего сотрудника, но `binding.membershipId` остаётся null: это только
+отображение, не восстановление назначения и не право на запись. Точная старая
+пара не подменяется новым membership при повторном вступлении сотрудника.
+
+Матрица чтения совпадает со справочником выше: видимость связанной сделки не
+расширяет OWN/TEAM directory scope. OWNER доступен для ALL без локальной
+CRM-member строки, только если запрошен. Access читает лишь запрошенные subjects
+в своём scope (не более 100), делает один существующий Identity batch, затем
+повторно авторизует читателя и сверяет точный локальный снимок membership/ролей/
+отделов в RepeatableRead. Профили читаются одним запросом только для совпавших
+доступных пар. Недоступность Identity остаётся ошибкой, а не списком null.
+
+Endpoint не пишет данные, не создаёт command receipt/Outbox/событие изменения
+и не вызывает авторизацию нового назначения. Новые миграции, Identity/Sales
+контракты и Gateway routes не требуются: действует существующий защищённый
+prefix `/api/v1/crm/access`. Выпускается Access API перед frontend batch-reader;
+сам факт наличия источника не подтверждает production rollout.
+
 ## Worker, publisher и PostgreSQL
 
 `CRM_ACCESS_PROCESS_ROLE=api|worker|outbox-publisher` задаёт соответственно

@@ -12,6 +12,7 @@ import {
 } from '@nestjs/common';
 import { CrmInternalGuard } from '../authorization/crm-internal.guard';
 import {
+	AssigneeLabelsDto,
 	AssigneeQueryDto,
 	AuthorizeAssigneeDto
 } from './team-assignee.dto';
@@ -27,6 +28,15 @@ export class CrmAssigneeController {
 		@Query() query: AssigneeQueryDto
 	) {
 		return this.assignees.options(token, query);
+	}
+	@Post('assignee-labels')
+	@HttpCode(200)
+	@Header('Cache-Control', 'no-store')
+	labels(
+		@Headers('authorization') token: string | undefined,
+		@Body() dto: AssigneeLabelsDto
+	) {
+		return this.assignees.labels(token, dto);
 	}
 }
 

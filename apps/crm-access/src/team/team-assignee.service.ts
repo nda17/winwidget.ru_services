@@ -13,6 +13,7 @@ import {
 } from '../internal/identity-invitation.client';
 import { CrmAccessPrismaService } from '../prisma/crm-access-prisma.service';
 import type {
+	AssigneeLabelsDto,
 	AssigneeQueryDto,
 	AuthorizeAssigneeDto
 } from './team-assignee.dto';
@@ -54,6 +55,136 @@ export class CrmAssigneeService {
 		private readonly auth: CrmAuthorizationService,
 		private readonly identity: IdentityInvitationClient
 	) {}
+
+	async labels(token: string | undefined, dto: AssigneeLabelsDto) {
+		const actor = await this.auth.authorize(
+			token,
+			dto.workspaceId,
+			'crm-sales'
+		);
+		this.permission(actor, false);
+		const envelope = {
+			schemaVersion: 1 as const,
+			workspaceId: actor.workspaceId,
+			subject: actor.subject
+		};
+		if (dto.bindings.length === 0) return { ...envelope, items: [] };
+		const subjects = [
+			...new Set(dto.bindings.map(binding => binding.subject))
+		];
+		const candidateQuery = {
+			where: {
+				AND: [this.candidateScope(actor), { subject: { in: subjects } }]
+			},
+			select: candidateSelect,
+			orderBy: { id: 'asc' as const },
+			take: subjects.length + 1
+		};
+		const candidates =
+			await this.prisma.crmWorkspaceMember.findMany(candidateQuery);
+		if (candidates.length > subjects.length)
+			throw new ServiceUnavailableException(
+				'CRM directory bindings are ambiguous'
+			);
+		const includeOwner = actor.dataScope === 'ALL';
+		const verified = await this.identity.assignees(
+			actor.workspaceId,
+			candidates,
+			includeOwner,
+			AbortSignal.timeout(10_000)
+		);
+		const fresh = await this.auth.authorize(
+			token,
+			dto.workspaceId,
+			'crm-sales'
+		);
+		this.permission(fresh, false);
+		if (fingerprint(fresh) !== fingerprint(actor))
+			throw new ForbiddenException('CRM directory authority changed');
+		return this.prisma.$transaction(
+			async tx => {
+				const current =
+					await tx.crmWorkspaceMember.findMany(candidateQuery);
+				if (JSON.stringify(current) !== JSON.stringify(candidates))
+					throw new ConflictException('CRM directory membership changed');
+				const byMembership = new Map(
+					current.map(item => [item.membershipId, item])
+				);
+				if (
+					new Set(verified.map(item => item.subject)).size !==
+						verified.length ||
+					new Set(verified.map(item => item.membershipId)).size !==
+						verified.length ||
+					verified.filter(item => item.workspaceRole === 'OWNER').length >
+						1 ||
+					verified.some(item =>
+						item.workspaceRole === 'OWNER'
+							? !includeOwner
+							: byMembership.get(item.membershipId)?.subject !==
+								item.subject
+					)
+				)
+					throw new ServiceUnavailableException(
+						'CRM directory bindings are ambiguous'
+					);
+				// Legacy null permits a display lookup only. It never repairs a stored
+				// assignment, and an exact historical membership cannot match a rejoin.
+				const eligible = verified.filter(item =>
+					dto.bindings.some(
+						binding =>
+							binding.subject === item.subject &&
+							(binding.membershipId === null ||
+								binding.membershipId === item.membershipId)
+					)
+				);
+				const profiles = new Map(
+					(eligible.length === 0
+						? []
+						: await tx.crmEmployeeProfile.findMany({
+								where: {
+									workspaceId: actor.workspaceId,
+									subject: { in: eligible.map(item => item.subject) }
+								}
+							})
+					).map(profile => [profile.subject, employeeDisplayName(profile)])
+				);
+				const employees = new Map(
+					eligible.map(item => [
+						item.subject,
+						{
+							subject: item.subject,
+							membershipId: item.membershipId,
+							displayName: profiles.get(item.subject) ?? item.displayName,
+							verifiedEmail: item.verifiedEmail,
+							role:
+								item.workspaceRole === 'OWNER'
+									? ('OWNER' as const)
+									: byMembership.get(item.membershipId)!.role
+						}
+					])
+				);
+				return {
+					...envelope,
+					items: dto.bindings.map(binding => {
+						const employee = employees.get(binding.subject);
+						return {
+							binding: {
+								subject: binding.subject,
+								membershipId: binding.membershipId
+							},
+							employee:
+								employee &&
+								(binding.membershipId === null ||
+									binding.membershipId === employee.membershipId)
+									? employee
+									: null
+						};
+					})
+				};
+			},
+			{ isolationLevel: 'RepeatableRead' }
+		);
+	}
 
 	async options(token: string | undefined, query: AssigneeQueryDto) {
 		const actor = await this.auth.authorize(

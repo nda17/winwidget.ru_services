@@ -1,10 +1,17 @@
+import { Type } from 'class-transformer';
 import {
+	ArrayMaxSize,
+	ArrayUnique,
 	Equals,
+	IsArray,
+	IsObject,
 	IsOptional,
 	IsString,
 	IsUUID,
 	Matches,
-	MaxLength
+	MaxLength,
+	ValidateIf,
+	ValidateNested
 } from 'class-validator';
 import { TeamQueryDto } from './team.dto';
 
@@ -15,6 +22,27 @@ export class AssigneeQueryDto extends TeamQueryDto {
 	@Matches(/^[^\s\x00-\x1f\x7f]{1,256}$/)
 	selectedSubject?: string;
 	@IsOptional() @IsUUID('4') teamId?: string;
+}
+
+export class AssigneeLabelBindingDto {
+	@IsString() @Matches(/^[^\s\x00-\x1f\x7f]{1,256}$/) subject!: string;
+	@ValidateIf((_object, value) => value !== null)
+	@IsUUID('4')
+	membershipId!: string | null;
+}
+
+export class AssigneeLabelsDto {
+	@Equals(1) schemaVersion!: 1;
+	@IsUUID('4') workspaceId!: string;
+	@IsArray()
+	@IsObject({ each: true })
+	@ArrayMaxSize(100)
+	@ArrayUnique((binding: AssigneeLabelBindingDto | null) =>
+		JSON.stringify([binding?.subject, binding?.membershipId])
+	)
+	@ValidateNested({ each: true })
+	@Type(() => AssigneeLabelBindingDto)
+	bindings!: AssigneeLabelBindingDto[];
 }
 
 export class AuthorizeAssigneeDto {
