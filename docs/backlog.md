@@ -591,6 +591,14 @@ consent/command evidence, запрет runtime EXECUTE новой защитно
 CRM-сервисов service-owned backup/restore и отдельные runtime/migration роли
 проверить на выбранном backend VPS до открытия рабочего продукта.
 
+Read-only проверка после companion rollout 07.09.2026 подтверждает:
+runtime Billing имеет SELECT/INSERT/UPDATE/DELETE на всех девяти новых
+commerce-таблицах; TRUNCATE и EXECUTE защитной routine уже запрещены.
+До открытия платной CRM убрать лишний DELETE и UPDATE consent evidence
+через отдельную service-owned миграцию и проверить, что штатные
+операции/повторы работают без этих прав. Права существующих Widgets-платежей
+не менять; отказ части triggers от DELETE не заменяет точного ACL.
+
 ### P2 — безопасная ротация ключа платёжных методов
 
 - Добавить key ID в versioned ciphertext и keyring current/previous keys.

@@ -1317,6 +1317,35 @@ jobs:
               '
           done
 
+      - name: Verify actual Intake image roles with closed API and prepared consumers
+        if: matrix.app == 'crm-intake'
+        env:
+          CRM_IMAGE_TAG: winwidget-crm-intake:ci-${{ github.sha }}
+        run: |
+          for role in api worker publisher widget-control-worker widget-control-publisher widget-transfer-worker widget-transfer-publisher; do
+            widgets=false
+            transfers=false
+            case "$role" in widget-*) widgets=true ;; esac
+            case "$role" in widget-transfer-*) transfers=true ;; esac
+            docker run --rm --network none --read-only --cap-drop ALL \
+              --security-opt no-new-privileges --user 1001:1001 \
+              --memory 384m --memory-swap 384m --pids-limit 32 \
+              --env "CRM_INTAKE_PROCESS_ROLE=$role" \
+              --env "CRM_INTAKE_WIDGETS_ENABLED=$widgets" \
+              --env "CRM_INTAKE_WIDGET_TRANSFERS_ENABLED=$transfers" \
+              --entrypoint node "$CRM_IMAGE_TAG" -e '
+              const assert = require("node:assert/strict");
+              const {intakeProcessRole} = require("/app/dist/src/acceptance/acceptance.messaging.js");
+              const expected = process.env.CRM_INTAKE_PROCESS_ROLE;
+              assert.equal(intakeProcessRole(), expected);
+              if (expected.startsWith("widget-")) {
+                process.env.CRM_INTAKE_WIDGETS_ENABLED = "false";
+                assert.throws(() => intakeProcessRole());
+              }
+              console.log(expected + ": process gate verified");
+              '
+          done
+
   deploy-production:
     name: Prepare isolated CRM images and configuration
     needs:
@@ -1335,7 +1364,7 @@ jobs:
       - service-integration
       - widgets-integration
     if: github.event_name == 'push' && github.ref == 'refs/heads/prod'
-    uses: nda17/winwidget.ru_infra/.github/workflows/deploy-production.yml@48be9afa0ea4e38faaead5331554819d400927a0
+    uses: nda17/winwidget.ru_infra/.github/workflows/deploy-production.yml@15c4a6b34334457542a2cbed8e0af453894e81a1
     with:
       services_revision: ${{ github.sha }}
       release_scope: crm-prepare
@@ -1353,7 +1382,7 @@ jobs:
     name: Initialize four isolated CRM databases
     needs: deploy-production
     if: github.event_name == 'push' && github.ref == 'refs/heads/prod'
-    uses: nda17/winwidget.ru_infra/.github/workflows/deploy-production.yml@48be9afa0ea4e38faaead5331554819d400927a0
+    uses: nda17/winwidget.ru_infra/.github/workflows/deploy-production.yml@15c4a6b34334457542a2cbed8e0af453894e81a1
     with:
       services_revision: ${{ github.sha }}
       release_scope: crm-databases
@@ -1371,7 +1400,7 @@ jobs:
     name: Start twelve isolated CRM processes with public access closed
     needs: deploy-crm-databases
     if: github.event_name == 'push' && github.ref == 'refs/heads/prod'
-    uses: nda17/winwidget.ru_infra/.github/workflows/deploy-production.yml@48be9afa0ea4e38faaead5331554819d400927a0
+    uses: nda17/winwidget.ru_infra/.github/workflows/deploy-production.yml@15c4a6b34334457542a2cbed8e0af453894e81a1
     with:
       services_revision: ${{ github.sha }}
       release_scope: crm-runtime

@@ -408,7 +408,7 @@ test('all structural inputs are documented and no placeholder can silently produ
 	}
 });
 
-test('default CRM flags do not activate commerce or native Widgets', () => {
+test('default CRM API flags stay closed while specialized consumers are enabled before producers', () => {
 	assert.equal(
 		config.services['crm-access-api'].environment
 			.CRM_ACCESS_BILLING_ENABLED,
@@ -424,6 +424,19 @@ test('default CRM flags do not activate commerce or native Widgets', () => {
 			.CRM_INTAKE_WIDGET_TRANSFERS_ENABLED,
 		'false'
 	);
+	for (const role of [
+		'widget-control-worker',
+		'widget-control-publisher',
+		'widget-transfer-worker',
+		'widget-transfer-publisher'
+	]) {
+		const env = config.services['crm-intake-' + role].environment;
+		assert.equal(env.CRM_INTAKE_WIDGETS_ENABLED, 'true');
+		assert.equal(
+			env.CRM_INTAKE_WIDGET_TRANSFERS_ENABLED,
+			role.startsWith('widget-transfer-') ? 'true' : 'false'
+		);
+	}
 	// Existing services need opt-in CRM settings, not embedded CRM runtimes/DBs.
 	const ordinary = companion().config;
 	assert.equal(
@@ -630,6 +643,22 @@ reject('no new transfers without the managed connector', value => {
 		'crm-intake-api'
 	].environment.CRM_INTAKE_WIDGET_TRANSFERS_ENABLED = 'true';
 });
+for (const role of [
+	'widget-control-worker',
+	'widget-control-publisher',
+	'widget-transfer-worker',
+	'widget-transfer-publisher'
+])
+	reject(
+		'specialized ' +
+			role +
+			' cannot start with its required processing disabled',
+		value => {
+			value.services[
+				'crm-intake-' + role
+			].environment.CRM_INTAKE_WIDGETS_ENABLED = 'false';
+		}
+	);
 reject('no cross-role feature gate mismatch', value => {
 	value.services[
 		'crm-access-worker'

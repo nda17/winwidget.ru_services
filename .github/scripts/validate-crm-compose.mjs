@@ -634,8 +634,12 @@ export function validateCrmCompose(config) {
 					);
 					same(
 						env[key],
-						first.environment[key],
-						'CRM connector gate differs between roles'
+						(role.startsWith('widget-') &&
+							key === 'CRM_INTAKE_WIDGETS_ENABLED') ||
+							role.startsWith('widget-transfer-')
+							? 'true'
+							: first.environment[key],
+						'CRM connector consumer readiness differs from its role contract'
 					);
 				}
 				check(
