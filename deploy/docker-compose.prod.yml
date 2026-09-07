@@ -1543,10 +1543,12 @@ services:
       PLATFORM_BACKUP_URL: ${PLATFORM_BACKUP_URL:?PLATFORM_BACKUP_URL is required}
       SUPPORT_BACKUP_URL: ${SUPPORT_BACKUP_URL:?SUPPORT_BACKUP_URL is required}
       OPERATIONS_BACKUP_URL: ${OPERATIONS_BACKUP_URL:?OPERATIONS_BACKUP_URL is required}
-      CRM_ACCESS_BACKUP_URL: ${CRM_ACCESS_BACKUP_URL:?CRM_ACCESS_BACKUP_URL is required}
-      CRM_INTAKE_BACKUP_URL: ${CRM_INTAKE_BACKUP_URL:?CRM_INTAKE_BACKUP_URL is required}
-      CRM_CUSTOMERS_BACKUP_URL: ${CRM_CUSTOMERS_BACKUP_URL:?CRM_CUSTOMERS_BACKUP_URL is required}
-      CRM_SALES_BACKUP_URL: ${CRM_SALES_BACKUP_URL:?CRM_SALES_BACKUP_URL is required}
+      # Required by the Operations release validator, not by unrelated scoped
+      # releases that only materialize this shared Compose document.
+      CRM_ACCESS_BACKUP_URL: ${CRM_ACCESS_BACKUP_URL:-}
+      CRM_INTAKE_BACKUP_URL: ${CRM_INTAKE_BACKUP_URL:-}
+      CRM_CUSTOMERS_BACKUP_URL: ${CRM_CUSTOMERS_BACKUP_URL:-}
+      CRM_SALES_BACKUP_URL: ${CRM_SALES_BACKUP_URL:-}
       DATABASE_BACKUP_PROVENANCE_KEY_ID: operations-backup-ed25519-2026-08-31
       DATABASE_BACKUP_PROVENANCE_PRIVATE_KEY_FILE: /run/winwidget-operations-secrets/database-backup-provenance-private-key.pem
     network_mode: host

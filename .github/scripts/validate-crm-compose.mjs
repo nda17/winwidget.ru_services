@@ -277,18 +277,33 @@ export function validateCrmCompanionCompose(config, source) {
 		config?.name === 'winwidget' && config.services && source,
 		'Invalid CRM companion inputs'
 	);
-	if (backupOnlyKeys.some(key => Object.hasOwn(source, key))) {
+	if (
+		backupOnlyKeys.some(
+			key =>
+				Object.hasOwn(source, key) ||
+				Object.hasOwn(
+					config.services['operations-worker']?.environment ?? {},
+					key
+				)
+		)
+	) {
 		for (const key of backupOnlyKeys) targets[key] = ['operations-worker'];
 	}
 	for (const [key, names] of Object.entries(targets)) {
+		// New backup-only placeholders may be absent from an older canonical env.
+		// The Operations admission validator still requires all four exact URLs.
+		const expected =
+			backupOnlyKeys.includes(key) && source[key] === undefined
+				? ''
+				: source[key];
 		check(
-			typeof source[key] === 'string',
+			typeof expected === 'string',
 			'Missing canonical CRM companion setting'
 		);
 		for (const name of names)
 			same(
 				config.services[name]?.environment?.[key],
-				source[key],
+				expected,
 				'CRM companion environment differs'
 			);
 	}

@@ -1,5 +1,8 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
+const { spawnSync } = require('node:child_process');
+const { readFileSync } = require('node:fs');
+const { resolve } = require('node:path');
 const {
 	CRM_BACKUP_TARGETS,
 	validateCrmBackupBoundary
@@ -28,6 +31,86 @@ const validate = services =>
 test('accepts four backup-only endpoints without CRM runtime or restore containers', () => {
 	assert.doesNotThrow(() => validate(fixture()));
 	assert.equal(CRM_BACKUP_TARGETS.length, 4);
+});
+
+test('unrelated CRM companions render without new backup credentials while Operations admission remains strict', async () => {
+	const root = resolve(__dirname, '../..');
+	const { validateCrmCompanionCompose } =
+		await import('./validate-crm-compose.mjs');
+	const source = Object.fromEntries(
+		readFileSync(resolve(root, '.env.example'), 'utf8')
+			.split('\n')
+			.filter(line => /^[A-Z][A-Z0-9_]*=/.test(line))
+			.map(line => {
+				const split = line.indexOf('=');
+				return [line.slice(0, split), line.slice(split + 1)];
+			})
+	);
+	for (const state of ['absent', 'empty', 'configured']) {
+		const environment = { ...source };
+		for (const [key] of CRM_BACKUP_TARGETS) {
+			if (state === 'absent') delete environment[key];
+			if (state === 'empty') environment[key] = '';
+		}
+		const rendered = spawnSync(
+			'docker',
+			[
+				'compose',
+				'--env-file',
+				'/dev/null',
+				'-f',
+				'deploy/docker-compose.prod.yml',
+				'--profile',
+				'*',
+				'config',
+				'--format',
+				'json'
+			],
+			{
+				cwd: root,
+				encoding: 'utf8',
+				timeout: 20000,
+				maxBuffer: 1024 * 1024,
+				env: {
+					PATH: process.env.PATH,
+					HOME: process.env.HOME,
+					COMPOSE_DISABLE_ENV_FILE: 'true',
+					...environment
+				}
+			}
+		);
+		assert.equal(
+			rendered.status,
+			0,
+			'Synthetic scoped Compose must render without starting Docker containers'
+		);
+		const config = JSON.parse(rendered.stdout);
+		assert.equal(
+			validateCrmCompanionCompose(config, environment).wiringVerified,
+			true
+		);
+		const admission = () =>
+			validateCrmBackupBoundary(config.services, key => environment[key]);
+		for (const [key] of CRM_BACKUP_TARGETS) {
+			const leaked = structuredClone(config);
+			leaked.services['billing-api'].environment[key] = '';
+			assert.throws(() =>
+				validateCrmCompanionCompose(leaked, environment)
+			);
+		}
+		if (state === 'configured') assert.doesNotThrow(admission);
+		else {
+			assert.throws(
+				admission,
+				/CRM backup-only process boundary is invalid/
+			);
+			for (const [key] of CRM_BACKUP_TARGETS)
+				assert.equal(
+					config.services['operations-worker'].environment[key],
+					''
+				);
+		}
+	}
 });
 for (const [key] of CRM_BACKUP_TARGETS) {
 	test(`${key} is required and must match canonical interpolation`, () => {
