@@ -2,6 +2,11 @@
 
 set -euo pipefail
 
+command -v rg >/dev/null || {
+	printf '%s\n' 'ripgrep is required for the apps-only lifecycle checks.' >&2
+	exit 1
+}
+
 bash -n .github/scripts/validate-production-compose.sh
 node --check .github/scripts/validate-production-compose.cjs
 node --check apps/operations/test/integration/database-restore-control-ledger-postgres18.integration.mjs
@@ -430,7 +435,7 @@ if (!servicesWorkflow.includes('node .github/scripts/test-crm-bootstrap-failure.
 	throw new Error('CRM bounded bootstrap process gate is missing');
 }
 const pinnedInfraRevision =
-	'6ab9828d9e8fdc058780514a5b434855c9924b07';
+	'48be9afa0ea4e38faaead5331554819d400927a0';
 for (const evidence of [
 	"cancel-in-progress: ${{ github.ref != 'refs/heads/prod' }}",
 	'operations-control-ledger:',
@@ -487,21 +492,21 @@ const infraReleaseReferences = [
 	)
 ];
 if (
-	infraReleaseReferences.length !== 2 ||
+	infraReleaseReferences.length !== 3 ||
 	infraReleaseReferences.some(reference => reference[1] !== pinnedInfraRevision)
 ) {
 	throw new Error('CRM production stages must use the same exact reviewed infra SHA');
 }
-// Both stages run for one immutable source SHA. No routine/all rollout is
-// allowed while this candidate initializes only the isolated CRM databases.
-for (const [job, scope] of [['deploy-production', 'crm-prepare'], ['deploy-crm-databases', 'crm-databases']]) {
+// All stages run for one immutable source SHA. No routine/all rollout is
+// allowed while this candidate starts only the closed isolated CRM runtime.
+for (const [job, scope, dependency] of [['deploy-production', 'crm-prepare', null], ['deploy-crm-databases', 'crm-databases', 'deploy-production'], ['deploy-crm-runtime', 'crm-runtime', 'deploy-crm-databases']]) {
 	const block = servicesWorkflow.match(new RegExp('^  ' + job + ':\\n([\\s\\S]*?)(?=^  [a-z][a-z0-9-]*:|$(?![\\s\\S]))', 'm'))?.[1];
 	if (!block || !block.includes('release_scope: ' + scope) ||
 		!block.includes('services_revision: ${{ github.sha }}') ||
 		!block.includes("expected_live_revision: '484e546451088671e23ae37ae4026b9b3fe500c5'") ||
 		!block.includes("expected_service_env_sha256: '4f0b6410c124fbae9b5608da9e28c74b19229cf529b662e0cc9971dc4f6aee6b'") ||
-		(job === 'deploy-crm-databases' && !block.includes('needs: deploy-production'))) {
-		throw new Error('CRM database release stages must share the exact approved baseline and run sequentially');
+		(dependency && !block.includes('needs: ' + dependency))) {
+		throw new Error('CRM release stages must share the exact approved baseline and run sequentially');
 	}
 }
 

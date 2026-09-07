@@ -30,6 +30,10 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: 20
+      - name: Install required lifecycle search tool
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y ripgrep
       - run: bash .github/scripts/static-check-services-lifecycle.sh
       - name: Verify isolated four-frontend browser harness
         run: node --test apps/crm-access/test/integration/local-frontends.test.mjs apps/crm-access/test/integration/local-browser-team.test.mjs apps/crm-access/test/integration/local-team-runtime.test.mjs
