@@ -748,6 +748,10 @@ backup-роли и health-check не доказывает регулярное �
   Подтвердить worker-only подключения на целевой топологии; не выдавать backup
   credentials API или бизнес-workers. Полные production env синхронизировать
   локально и на VPS с побайтовой проверкой без вывода секретов.
+- Соблюдать порядок Operations → frontend админки. Новый frontend ожидает
+  12 CRM-полей расписания и 13 backup-целей: прежний Operations их не отдаёт,
+  поэтому преждевременный выпуск нарушает предпросмотр и сохранение расписания.
+  До frontend rollout проверить именно ответ нового Operations, а не только CI.
 - На выбранной ревизии подтвердить границу: 13 backup-целей, 11 подписываемых,
   только 7 прежних restore-целей. CRM sidecar не разрешает destructive restore
   или общий restore rehearsal; `DATABASE_RESTORE_ENABLED` не включать этим
