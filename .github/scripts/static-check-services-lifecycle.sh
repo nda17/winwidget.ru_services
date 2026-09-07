@@ -435,7 +435,7 @@ if (!servicesWorkflow.includes('node .github/scripts/test-crm-bootstrap-failure.
 	throw new Error('CRM bounded bootstrap process gate is missing');
 }
 const pinnedInfraRevision =
-	'15c4a6b34334457542a2cbed8e0af453894e81a1';
+	'c5f512c856b9ee5c914b6b53c294a9939e050e2e';
 for (const evidence of [
 	"cancel-in-progress: ${{ github.ref != 'refs/heads/prod' }}",
 	'operations-control-ledger:',
@@ -492,22 +492,24 @@ const infraReleaseReferences = [
 	)
 ];
 if (
-	infraReleaseReferences.length !== 3 ||
+	infraReleaseReferences.length !== 1 ||
 	infraReleaseReferences.some(reference => reference[1] !== pinnedInfraRevision)
 ) {
-	throw new Error('CRM production stages must use the same exact reviewed infra SHA');
+	throw new Error('Billing CRM ACL release must use one exact reviewed infra SHA');
 }
-// All stages run for one immutable source SHA. No routine/all rollout is
-// allowed while this candidate starts only the closed isolated CRM runtime.
-for (const [job, scope, dependency] of [['deploy-production', 'crm-prepare', null], ['deploy-crm-databases', 'crm-databases', 'deploy-production'], ['deploy-crm-runtime', 'crm-runtime', 'deploy-crm-databases']]) {
+// CRM is already live. Never replay its initial closed-product provisioning
+// chain. This release changes only the exact Billing-owned evidence ACL.
+for (const [job, scope] of [['deploy-production', 'billing-crm-commerce-acl']]) {
 	const block = servicesWorkflow.match(new RegExp('^  ' + job + ':\\n([\\s\\S]*?)(?=^  [a-z][a-z0-9-]*:|$(?![\\s\\S]))', 'm'))?.[1];
 	if (!block || !block.includes('release_scope: ' + scope) ||
 		!block.includes('services_revision: ${{ github.sha }}') ||
-		!block.includes("expected_live_revision: '484e546451088671e23ae37ae4026b9b3fe500c5'") ||
-		!block.includes("expected_service_env_sha256: '4f0b6410c124fbae9b5608da9e28c74b19229cf529b662e0cc9971dc4f6aee6b'") ||
-		(dependency && !block.includes('needs: ' + dependency))) {
-		throw new Error('CRM release stages must share the exact approved baseline and run sequentially');
+		!block.includes("expected_live_revision: '774db6490808cbaff4ff96033c589205cb3935f7'") ||
+		!block.includes("expected_service_env_sha256: 'a0ed9b243c69c882da78ebb8eb3926785a30d5b2615aa9e50c9ad3803d2a2fed'")) {
+		throw new Error('Billing ACL release must pin its live owner revision and env hash');
 	}
+}
+if (/release_scope: (?:crm-prepare|crm-databases|crm-runtime|all)\b/.test(servicesWorkflow)) {
+	throw new Error('Initial CRM provisioning and broad rollout must not replay for this migration');
 }
 
 const rootReadme = readFileSync('README.md', 'utf8');

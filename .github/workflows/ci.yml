@@ -1352,7 +1352,7 @@ jobs:
           done
 
   deploy-production:
-    name: Prepare isolated CRM images and configuration
+    name: Apply isolated Billing CRM commerce ACL migration
     needs:
       - billing-crm-policy-integration
       - billing-wincrm-commerce-integration
@@ -1369,48 +1369,12 @@ jobs:
       - service-integration
       - widgets-integration
     if: github.event_name == 'push' && github.ref == 'refs/heads/prod'
-    uses: nda17/winwidget.ru_infra/.github/workflows/deploy-production.yml@15c4a6b34334457542a2cbed8e0af453894e81a1
+    uses: nda17/winwidget.ru_infra/.github/workflows/deploy-production.yml@c5f512c856b9ee5c914b6b53c294a9939e050e2e
     with:
       services_revision: ${{ github.sha }}
-      release_scope: crm-prepare
-      expected_live_revision: '484e546451088671e23ae37ae4026b9b3fe500c5'
-      expected_service_env_sha256: '4f0b6410c124fbae9b5608da9e28c74b19229cf529b662e0cc9971dc4f6aee6b'
-    secrets:
-      BACKEND_PRODUCTION_SSH_HOST: ${{ secrets.PRODUCTION_SSH_HOST }}
-      BACKEND_PRODUCTION_SSH_PORT: ${{ secrets.PRODUCTION_SSH_PORT }}
-      BACKEND_PRODUCTION_SSH_USER: ${{ secrets.PRODUCTION_SSH_USER }}
-      BACKEND_PRODUCTION_SSH_PRIVATE_KEY: ${{ secrets.PRODUCTION_SSH_PRIVATE_KEY }}
-      BACKEND_PRODUCTION_SSH_KNOWN_HOSTS: ${{ secrets.BACKEND_PRODUCTION_SSH_KNOWN_HOSTS }}
-      BACKEND_PRODUCTION_ENV_SHA256: ${{ secrets.BACKEND_PRODUCTION_ENV_SHA256 }}
-
-  deploy-crm-databases:
-    name: Initialize four isolated CRM databases
-    needs: deploy-production
-    if: github.event_name == 'push' && github.ref == 'refs/heads/prod'
-    uses: nda17/winwidget.ru_infra/.github/workflows/deploy-production.yml@15c4a6b34334457542a2cbed8e0af453894e81a1
-    with:
-      services_revision: ${{ github.sha }}
-      release_scope: crm-databases
-      expected_live_revision: '484e546451088671e23ae37ae4026b9b3fe500c5'
-      expected_service_env_sha256: '4f0b6410c124fbae9b5608da9e28c74b19229cf529b662e0cc9971dc4f6aee6b'
-    secrets:
-      BACKEND_PRODUCTION_SSH_HOST: ${{ secrets.PRODUCTION_SSH_HOST }}
-      BACKEND_PRODUCTION_SSH_PORT: ${{ secrets.PRODUCTION_SSH_PORT }}
-      BACKEND_PRODUCTION_SSH_USER: ${{ secrets.PRODUCTION_SSH_USER }}
-      BACKEND_PRODUCTION_SSH_PRIVATE_KEY: ${{ secrets.PRODUCTION_SSH_PRIVATE_KEY }}
-      BACKEND_PRODUCTION_SSH_KNOWN_HOSTS: ${{ secrets.BACKEND_PRODUCTION_SSH_KNOWN_HOSTS }}
-      BACKEND_PRODUCTION_ENV_SHA256: ${{ secrets.BACKEND_PRODUCTION_ENV_SHA256 }}
-
-  deploy-crm-runtime:
-    name: Start twelve isolated CRM processes with public access closed
-    needs: deploy-crm-databases
-    if: github.event_name == 'push' && github.ref == 'refs/heads/prod'
-    uses: nda17/winwidget.ru_infra/.github/workflows/deploy-production.yml@15c4a6b34334457542a2cbed8e0af453894e81a1
-    with:
-      services_revision: ${{ github.sha }}
-      release_scope: crm-runtime
-      expected_live_revision: '484e546451088671e23ae37ae4026b9b3fe500c5'
-      expected_service_env_sha256: '4f0b6410c124fbae9b5608da9e28c74b19229cf529b662e0cc9971dc4f6aee6b'
+      release_scope: billing-crm-commerce-acl
+      expected_live_revision: '774db6490808cbaff4ff96033c589205cb3935f7'
+      expected_service_env_sha256: 'a0ed9b243c69c882da78ebb8eb3926785a30d5b2615aa9e50c9ad3803d2a2fed'
     secrets:
       BACKEND_PRODUCTION_SSH_HOST: ${{ secrets.PRODUCTION_SSH_HOST }}
       BACKEND_PRODUCTION_SSH_PORT: ${{ secrets.PRODUCTION_SSH_PORT }}

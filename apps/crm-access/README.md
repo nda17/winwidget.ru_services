@@ -72,8 +72,13 @@ pnpm start
 доступны через точные HTTPS origins, локальный `crm-sales` может использовать
 loopback HTTP. CRM backend допускается на текущем backend VPS только после
 измерения ресурсного запаса; при его недостатке потребуется отдельный VPS.
-Rollout CRM backend ещё не выполнен. Четыре независимых frontend-приложения
-размещены на существующем frontend VPS, WinCRM — на `crm.winwidget.ru`.
+Первичный rollout выполнен 07.09.2026: четыре изолированные CRM-БД и
+12 API/worker/publisher процессов работают на текущем backend VPS. Через
+production-браузер проверены явный запуск Trial, onboarding, ручная заявка,
+контакт, сделка, задачи и нативная доставка новой заявки колеса фортуны.
+Четыре независимых frontend-приложения размещены на существующем frontend VPS,
+WinCRM — на `crm.winwidget.ru`. Платные CRM-gates пока выключены; внешние
+платёжные и оставшиеся browser/role/load проверки перечислены в `docs/backlog.md`.
 Межсерверные обращения идут через защищённый
 private ingress на стороне владельца сервиса; его listener остаётся локальным,
 а service token проверяется независимо от TLS и сетевого allowlist. Нельзя
