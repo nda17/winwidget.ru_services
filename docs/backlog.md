@@ -155,25 +155,15 @@ backend/business gates MVP.
 - при запуске проверить реальные caller/receiver пары токенов и независимую
   backend-авторизацию доменных команд; синхронизированные private env и
   `/crm/access/permissions` сами по себе не подтверждают работающие HTTP-вызовы;
-- держать публичные CRM routes закрытыми до запуска совместимого `crm-access`
-  runtime: новый exact Billing-контракт нельзя подключать к старому parser;
-- добавить точные Gateway route prefixes `/api/v1/crm/access` -> `crm-access`,
-  `/api/v1/crm/templates` и `/api/v1/crm/sales` -> `crm-sales`,
-  `/api/v1/crm/customers` -> `crm-customers`, `/api/v1/crm/intake` -> `crm-intake`,
-  отдельный `/api/v1/crm/intake/ingest` с политикой `crm-source` только для
-  canonical POST `/:sourceId` и preflight OPTIONS; остальные Intake routes
-  требуют пользовательский JWT. Ключ источника не является Identity JWT.
-  Добавить `/api/v1/workspace-invitations` -> Identity и
-  `/api/v1/billing-settings/crm` -> Billing с `required`,
-  origin `https://crm.winwidget.ru` и
-  обновить route-manifest только вместе с полной двусторонней синхронизацией
-  production env;
-- подключить профиль `crm-runtime` отдельного `deploy/docker-compose.crm.yml`
-  к CRM-only release controller и проверить приложения с уже подготовленными
-  owner БД и ролями; сохранить независимое восстановление runtime без
-  автоматического down/reset миграций. Новые dump/backup-копии не являются
-  условием этого запуска по решению пользователя. Нельзя объединять
-  CRM-схемы или давать сервисам доступ к чужим таблицам;
+- проверить авторизованные browser/API сценарии на восьми CRM Gateway
+  prefixes и точных origins; отрицательные проверки 401/CORS сами по себе
+  не доказывают бизнес-авторизацию, onboarding или доступ администратора;
+- перед следующим production push заменить одноразовую цепочку
+  `crm-prepare -> crm-databases -> crm-runtime` на соответствующий проверенный
+  steady-state scope. Первичная цепочка не предназначена для обновления уже
+  работающих приложений и должна отклонять новый запуск с устаревшей ревизией
+  Gateway/env. Не обходить её отказ scope `all`, удалением БД или ослаблением
+  inventory; сохранить раздельный rollout CRM и независимость Widgets;
 - проверить возможность размещения четырёх CRM-сервисов на текущем backend
   VPS: пользователь разрешил этот вариант 06.09.2026 при достаточном запасе
   ресурсов. До размещения подтвердить стабильность workers, измерить
@@ -198,12 +188,9 @@ backend/business gates MVP.
   влияет на заявки и прежние интеграции, managed connector включается явно
   только на оплаченных `EASY`/`HARD`; окончание подписки прекращает новые
   передачи, сохраняя полученные данные. Историю автоматически не переносить.
-- до включения native connector добавить точный event route
-  `widgets.wincrm.lead-transfer.requested.v1` в service-owned RabbitMQ topic
-  write allowlist Widgets и независимую binding/очередь Intake. Текущий
-  production ACL этот event не разрешает; одного feature flag недостаточно.
-  Не расширять доступ до общего wildcard. Доказать confirm/mandatory return
-  и доставку под реальными least-privilege credentials перед включением;
+- до включения native connector доказать confirm/mandatory return
+  и доставку под реальными least-privilege credentials; предоставленные
+  точные producer ACL и binding/очередь не заменяют бизнес-проверку;
 - включать native API только после обновления всех Widgets publishers,
   миграций, broker ACL и готовности durable binding/consumer Intake. Старый
   publisher не знает новый event и может поместить его в QUARANTINED.
@@ -225,13 +212,10 @@ backend/business gates MVP.
 контейнера по 2 GiB плюс резерв 2 GiB), а не автоматически запрещает CRM runtime.
 Его невыполнение не разрешает ослаблять restore gate.
 
-При раздельных ролях native connector нужны 12 application processes:
+Нагрузочная проверка должна охватывать 12 application processes:
 Access — API/worker/publisher; Intake — API, три workers и три publishers;
-Customers и Sales — по API. Требуется запустить эти 12 application containers
-поверх четырёх owner PostgreSQL, без постоянных migration/release jobs.
-Перед запуском обязательны CRM-only controller, проверка фактических OCI
-revisions, аутентификация runtime с выданными broker credentials и measured memory/CPU caps.
-Shape validator не подтверждает capacity и не разрешает rollout. Routine
+Customers и Sales — по API, поверх четырёх owner PostgreSQL.
+Проверка healthy/OCI revisions и подключения consumers не подтверждает capacity. Routine
 backend controller проверяет контейнеры своего project `winwidget`, но
 RabbitMQ users — глобально: сохранять точный `CRM_RABBITMQ_CONTRACT=mvp-v1`
 с восемью CRM process principals и отдельным
@@ -244,12 +228,11 @@ runtime, пока существуют CRM users или события. Runtime 
 очереди, без configure/write. Проверить runtime reconnect, fail-closed при
 отсутствующей очереди и обработку бизнес-сообщений с реальными credentials;
 успешный provisioning не заменяет эти проверки.
-Перед запуском приглашений/оплаты проверить полный companion-контракт:
-Identity publisher должен иметь два точных routes принятия/письма приглашения,
-Notification Delivery — opt-in reader `wincrm-invitation-email` с прежними kinds,
-Billing publisher — provider-operation route и write на отдельный provider DLQ
-exchange. Новый Billing provider principal получает только read своей основной
-очереди; queue/DLQ/bindings создаёт provisioner, без TTL retry.
+Перед запуском приглашений/оплаты проверить полный companion-контракт
+на бизнес-сообщениях: Identity invitation accepted/email, Notification Delivery
+opt-in reader `wincrm-invitation-email` с прежними kinds, Billing provider
+operation и независимый DLQ. Наличие ACL и подключённого provider consumer
+не является доказательством успешной обработки.
 При применении подготовленного companion Compose сверить фактические
 process env и exact runtime revisions:
 provider URL только Billing worker, private tokens только нужным caller/receiver,
