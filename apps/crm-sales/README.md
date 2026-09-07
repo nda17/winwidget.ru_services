@@ -135,6 +135,16 @@ commit с некорректным next action и append-only ACL. Требую�
 `CRM_SALES_INTEGRATION_ALLOW_MUTATION=true`, `CRM_SALES_TEST_DATABASE_URL`,
 `CRM_SALES_TEST_RUNTIME_ROLE` и отдельный sentinel чужой схемы.
 
+`GET /deals` дополнительно принимает `withoutNextAction=true|false`.
+Отсутствие параметра и `false` сохраняют прежнюю выборку. `true` выбирает
+только открытые неархивные сделки без связанных задач в `OPEN`/`IN_PROGRESS`;
+проверяется вся связь `tasks`, а не только `nextTaskId`. Фильтр пересекается
+с прежними workspace/OWN/TEAM, поиском, воронкой, этапом и статусом до подсчёта
+и серверной пагинации. Поэтому `status=WON|LOST` вместе с включённым фильтром
+возвращает пустой результат, не игнорирует выбранный статус. Другие значения,
+массивы и пустая строка отклоняются. Новых миграций, команд и runtime grants нет;
+frontend с новым параметром выпускается после совместимого Sales reader.
+
 ### Подготовка модели «Моего дня»
 
 Миграции `20260907120000_add_task_in_progress` и

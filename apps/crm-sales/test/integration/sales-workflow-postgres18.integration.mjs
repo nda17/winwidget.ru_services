@@ -998,6 +998,18 @@ try {
 			(await service.detail(access, linkedDeal.deal.id)).deal.nextTask.id,
 			linked.task.id
 		);
+		const withoutNextActionQuery = {
+			workspaceId: access.workspaceId,
+			page: 1,
+			pageSize: 1,
+			search: linkedDeal.deal.title,
+			withoutNextAction: 'true'
+		};
+		assert.equal(
+			(await service.deals(access, withoutNextActionQuery)).total,
+			0,
+			'An OPEN related task excludes a deal from the no-next-action filter'
+		);
 		const completedLinked = await workday.status(
 			access,
 			linked.task.id,
@@ -1014,6 +1026,68 @@ try {
 			null,
 			'Completing the last task does not force creation of another'
 		);
+		const withoutNextAction = await service.deals(
+			access,
+			withoutNextActionQuery
+		);
+		assert.equal(withoutNextAction.total, 1);
+		assert.deepEqual(
+			withoutNextAction.items.map(item => item.id),
+			[linkedDeal.deal.id]
+		);
+		const secondFilteredPage = await service.deals(access, {
+			...withoutNextActionQuery,
+			page: 2
+		});
+		assert.equal(secondFilteredPage.total, 1);
+		assert.deepEqual(secondFilteredPage.items, []);
+		for (const status of ['WON', 'LOST']) {
+			assert.equal(
+				(
+					await service.deals(access, {
+						...withoutNextActionQuery,
+						status
+					})
+				).total,
+				0,
+				'Contradictory status remains an intersection, not an ignored filter'
+			);
+		}
+		for (const scoped of [
+			{ ...access, workspaceId: randomUUID() },
+			{ ...access, dataScope: 'OWN', subject: randomUUID(), teamIds: [] },
+			{
+				...access,
+				dataScope: 'TEAM',
+				subject: randomUUID(),
+				teamIds: [randomUUID()]
+			}
+		]) {
+			assert.equal(
+				(await service.deals(scoped, withoutNextActionQuery)).total,
+				0,
+				'The next-action predicate never broadens workspace or record scope'
+			);
+		}
+		assert.equal(
+			(
+				await service.deals(
+					{ ...access, state: 'READ_ONLY' },
+					withoutNextActionQuery
+				)
+			).total,
+			1
+		);
+		assert.deepEqual(
+			await service.deals(access, {
+				...withoutNextActionQuery,
+				withoutNextAction: 'false'
+			}),
+			await service.deals(access, {
+				...withoutNextActionQuery,
+				withoutNextAction: undefined
+			})
+		);
 		const reopened = await workday.status(
 			access,
 			linked.task.id,
@@ -1029,6 +1103,11 @@ try {
 			(await service.detail(access, linkedDeal.deal.id)).deal.nextTask.id,
 			linked.task.id
 		);
+		assert.equal(
+			(await service.deals(access, withoutNextActionQuery)).total,
+			0,
+			'IN_PROGRESS also excludes a deal from the no-next-action filter'
+		);
 		const cancelled = await workday.status(
 			access,
 			linked.task.id,
@@ -1041,6 +1120,11 @@ try {
 			'Bearer fixture'
 		);
 		assert.equal(cancelled.task.status, 'CANCELLED');
+		assert.equal(
+			(await service.deals(access, withoutNextActionQuery)).total,
+			1,
+			'COMPLETED and CANCELLED tasks are not pending next actions'
+		);
 		const listQuery = Object.assign(new WorkdayQuery(), {
 			workspaceId: access.workspaceId,
 			scope: 'ALL',

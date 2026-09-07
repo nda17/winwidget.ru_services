@@ -12,6 +12,7 @@ import {
 	MaxLength,
 	Min,
 	MinLength,
+	ValidateIf,
 	ValidateNested
 } from 'class-validator';
 
@@ -30,6 +31,10 @@ export class DealListQuery extends SalesListQuery {
 		| 'OPEN'
 		| 'WON'
 		| 'LOST';
+	// Keep query strings explicit: Boolean('false') would enable the filter.
+	@ValidateIf((_object, value) => value !== undefined)
+	@IsIn(['true', 'false'])
+	withoutNextAction?: 'true' | 'false';
 }
 export class NextTaskDto {
 	@IsString() @MinLength(1) @MaxLength(200) @Matches(/\S/) title!: string;

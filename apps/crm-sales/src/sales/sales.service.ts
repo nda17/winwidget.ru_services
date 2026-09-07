@@ -155,7 +155,18 @@ export class SalesService {
 								]
 							}
 						: {})
-				}
+				},
+				...(query.withoutNextAction === 'true'
+					? [
+							{
+								status: 'OPEN' as const,
+								// Use all related tasks, not the denormalized next-action pointer.
+								tasks: {
+									none: { status: { in: [...activeTaskStatuses] } }
+								}
+							}
+						]
+					: [])
 			]
 		};
 		const [total, rows] = await this.prisma.$transaction([
