@@ -540,7 +540,7 @@ for (const [job, scope] of [['deploy-production', 'crm-commerce-activate']]) {
 		!block.includes('services_revision: ${{ github.sha }}') ||
 		!block.includes("expected_live_revision: '837113b9f9f303bd6c043c2a2e37b0791369d7a3'") ||
 		!block.includes("expected_service_env_sha256: '73b86415a52f7b9756acd7d24efae98187d80de684f1eeb40b9fcfd465e7fccd'") ||
-		!block.includes("expected_crm_commerce_baseline_sha256: '385019aca3651d14ba7705465873ed3dc6eeb7d9a5e5293a7882d56f782258cb'")) {
+		!block.includes("expected_crm_commerce_baseline_sha256: '2392ddf7b8b588cb1131da0e5aa9f751e763fb1a07b1245443a83c11bb06f64e'")) {
 		throw new Error('CRM commerce activation must pin its live Gateway revision, CRM env and exact baseline');
 	}
 }
