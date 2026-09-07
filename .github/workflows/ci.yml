@@ -1107,7 +1107,7 @@ jobs:
               exit 0
               ;;
             crm-access)
-              mutable_tables='crm_access.crm_workspace_access, crm_access.crm_workspace_members, crm_access.crm_employee_profiles, crm_access.crm_teams, crm_access.crm_invitation_intents, crm_access.crm_admissions, crm_access.crm_team_outbox, crm_access.crm_team_deliveries, crm_access.crm_billing_capacity, crm_access.crm_billing_operations'
+              mutable_tables='crm_access.crm_workspace_access, crm_access.crm_workspace_branding, crm_access.crm_workspace_members, crm_access.crm_employee_profiles, crm_access.crm_teams, crm_access.crm_invitation_intents, crm_access.crm_admissions, crm_access.crm_team_outbox, crm_access.crm_team_deliveries, crm_access.crm_billing_capacity, crm_access.crm_billing_operations'
               receipt_tables='crm_access.crm_team_command_receipts, crm_access.crm_team_audit'
               docker exec "$POSTGRES_CONTAINER_ID" psql -U crm_domain_bootstrap_ci -d "$DOMAIN_DATABASE" -v ON_ERROR_STOP=1 -c 'GRANT SELECT, INSERT, UPDATE, DELETE ON crm_access.crm_member_teams TO crm_domain_runtime_ci; GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA crm_access TO crm_domain_runtime_ci'
               ;;

@@ -437,6 +437,24 @@ model CrmCommercialPolicy {
   @@schema("billing")
 }
 
+model CrmAdminDayGrant {
+  commandId    String   @id @map("command_id") @db.Uuid
+  workspaceId  String   @map("workspace_id") @db.Uuid
+  actorSubject String   @map("actor_subject") @db.VarChar(256)
+  actorRole    String   @map("actor_role") @db.VarChar(16)
+  days         Int
+  reason       String   @db.VarChar(1000)
+  target       String   @db.VarChar(32)
+  periodId     String?  @map("period_id") @db.Uuid
+  oldExpiresAt DateTime @map("old_expires_at")
+  newExpiresAt DateTime @map("new_expires_at")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  @@index([workspaceId, createdAt, commandId])
+  @@map("crm_admin_day_grants")
+  @@schema("billing")
+}
+
 model CrmEntitlement {
   id                      String               @id @default(uuid()) @db.Uuid
   workspaceId             String               @unique(map: "crm_entitlements_workspace_id_key") @map("workspace_id") @db.Uuid

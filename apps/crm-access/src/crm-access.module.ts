@@ -40,6 +40,8 @@ import { CrmBillingService } from './billing/billing.service';
 import { CrmBillingCapacityService } from './billing/billing-capacity.service';
 import { BillingCommerceClient } from './billing/billing-commerce.client';
 import { CrmBillingReconciliationService } from './billing/billing-reconciliation.service';
+import { CrmWorkspaceBrandingController } from './branding/workspace-branding.controller';
+import { CrmWorkspaceBrandingService } from './branding/workspace-branding.service';
 
 const role = parseCrmAccessRole(process.env.CRM_ACCESS_PROCESS_ROLE);
 
@@ -58,6 +60,7 @@ const role = parseCrmAccessRole(process.env.CRM_ACCESS_PROCESS_ROLE);
 					CrmAuthorizationController,
 					CrmTeamController,
 					CrmEmployeeProfileController,
+					CrmWorkspaceBrandingController,
 					CrmAssigneeController,
 					CrmAssigneeAuthorizationController,
 					CrmBillingController,
@@ -75,6 +78,7 @@ const role = parseCrmAccessRole(process.env.CRM_ACCESS_PROCESS_ROLE);
 		CrmAccessHealthService,
 		CrmTeamService,
 		CrmEmployeeProfileService,
+		CrmWorkspaceBrandingService,
 		CrmAssigneeService,
 		IdentityInvitationClient,
 		CrmTeamAdmissionService,

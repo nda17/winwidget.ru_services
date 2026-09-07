@@ -77,4 +77,29 @@ describe('CrmAccessHealthService', () => {
 			ServiceUnavailableException
 		);
 	});
+	it('fails readiness closed when workspace branding schema or SELECT privilege is missing', async () => {
+		const query = jest
+			.fn()
+			.mockImplementation(async (parts: TemplateStringsArray) => {
+				if (parts.join('').includes('crm_workspace_branding'))
+					throw new Error('missing schema or privilege');
+				return [];
+			});
+		const health = createHealth({
+			$queryRaw: query,
+			serviceIdentity: {
+				findUnique: jest.fn().mockResolvedValue(identity)
+			},
+			crmWorkspaceAccess: { findFirst: jest.fn() },
+			crmWorkspaceMember: { findFirst: jest.fn() }
+		});
+		await expect(health.readiness()).rejects.toBeInstanceOf(
+			ServiceUnavailableException
+		);
+		expect(
+			query.mock.calls.some(([parts]) =>
+				parts.join('').includes('crm_workspace_branding')
+			)
+		).toBe(true);
+	});
 });

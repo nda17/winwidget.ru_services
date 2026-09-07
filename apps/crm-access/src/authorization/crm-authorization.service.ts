@@ -3,7 +3,10 @@ import {
 	Injectable,
 	ServiceUnavailableException
 } from '@nestjs/common';
-import { CrmAccessLifecycle } from '@prisma/crm-access-client';
+import {
+	CrmAccessLifecycle,
+	type Prisma
+} from '@prisma/crm-access-client';
 import { getCrmAccessCorrelationId } from '../common/crm-access-request-context';
 import { BillingEntitlementClient } from '../internal/billing-entitlement.client';
 import {
@@ -54,7 +57,8 @@ export class CrmAuthorizationService {
 	async authorize(
 		authorization: string | undefined,
 		workspaceId: string,
-		caller?: CrmCaller
+		caller?: CrmCaller,
+		database?: Prisma.TransactionClient
 	) {
 		const correlationId = getCrmAccessCorrelationId();
 		const identity = await this.identity.authContext(
@@ -69,7 +73,8 @@ export class CrmAuthorizationService {
 			identity.subject,
 			membership,
 			correlationId,
-			caller
+			caller,
+			database
 		);
 	}
 
@@ -188,18 +193,19 @@ export class CrmAuthorizationService {
 		subject: string,
 		membership: CrmWorkspaceMembership | null | undefined,
 		correlationId: string,
-		caller?: CrmCaller
+		caller?: CrmCaller,
+		database: Prisma.TransactionClient = this.prisma
 	) {
 		if (!membership)
 			throw new ForbiddenException('Workspace membership is required');
 		const [billing, workspace, member] = await Promise.all([
 			this.billing.get(workspaceId, correlationId),
-			this.prisma.crmWorkspaceAccess.findUnique({
+			database.crmWorkspaceAccess.findUnique({
 				where: { workspaceId }
 			}),
 			membership.role === 'OWNER'
 				? null
-				: this.prisma.crmWorkspaceMember.findUnique({
+				: database.crmWorkspaceMember.findUnique({
 						where: {
 							workspaceId_subject: {
 								workspaceId,
@@ -242,7 +248,7 @@ export class CrmAuthorizationService {
 		// absent OWNER member row or arbitrary team IDs supplied by the client.
 		let teamIds = member?.teams.map(team => team.teamId) ?? [];
 		if (role === 'OWNER' || role === 'CRM_ADMIN') {
-			const teams = await this.prisma.crmTeam.findMany({
+			const teams = await database.crmTeam.findMany({
 				where: { workspaceId, archivedAt: null },
 				select: { id: true },
 				orderBy: { id: 'asc' },

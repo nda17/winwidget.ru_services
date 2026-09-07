@@ -36,6 +36,8 @@ import { BillingCrmAccessController } from './http/billing-crm-access.controller
 import { BillingSettingsController } from './http/billing-settings.controller';
 import { PaymentController } from './http/payment.controller';
 import { SubscriptionController } from './http/subscription.controller';
+import { CrmAdminSubscriptionController } from './http/crm-admin-subscription.controller';
+import { CrmAdminSubscriptionService } from './domain/crm-admin-subscription.service';
 import { TariffPricesController } from './http/tariff-prices.controller';
 import { IdentityInternalClient } from './internal/identity-internal.client';
 import { WidgetsInternalClient } from './internal/widgets-internal.client';
@@ -61,6 +63,7 @@ const API_CONTROLLERS =
 		? [
 				PaymentController,
 				SubscriptionController,
+				CrmAdminSubscriptionController,
 				TariffPricesController,
 				AffiliateController,
 				BillingCampaignAudienceController,
@@ -101,6 +104,7 @@ const API_PROVIDERS =
 		PaymentDomainService,
 		PaymentSuccessTransaction,
 		SubscriptionDomainService,
+		CrmAdminSubscriptionService,
 		TariffAffiliateService,
 		InternalCommandsService,
 		CrmEntitlementService,

@@ -14,6 +14,9 @@ const {
 	CrmEntitlementService
 } = require('../../dist/src/domain/crm-entitlement.service.js');
 const {
+	CrmAdminSubscriptionService
+} = require('../../dist/src/domain/crm-admin-subscription.service.js');
+const {
 	PaymentMethodCryptoService
 } = require('../../dist/src/provider/payment-method-crypto.service.js');
 const {
@@ -260,6 +263,24 @@ try {
 		paid.startsAt.toISOString(),
 		trial.entitlement.effectiveUntil
 	);
+	const scheduledAdminRead = await new CrmAdminSubscriptionService(
+		prisma
+	).list(
+		{ page: 1, pageSize: 20, workspaceId },
+		{
+			subject: owner,
+			roles: ['ADMIN'],
+			active: true,
+			sessionId: 'synthetic-admin-session'
+		}
+	);
+	assert.equal(scheduledAdminRead.total, 1);
+	assert.equal(scheduledAdminRead.items[0].period.id, paid.id);
+	assert.equal(scheduledAdminRead.items[0].entitlement.planCode, 'TRIAL');
+	assert.equal(
+		scheduledAdminRead.items[0].entitlement.effectiveUntil,
+		trial.entitlement.effectiveUntil
+	);
 	const storedBase = await prisma.crmEntitlement.findUniqueOrThrow({
 		where: { workspaceId }
 	});
@@ -422,6 +443,425 @@ try {
 	});
 	clock = record.graceUntil.getTime();
 	assert.equal((await entitlements.get(workspaceId)).status, 'READ_ONLY');
+	phase = 'administrative-free-day-grants';
+	const administrative = new CrmAdminSubscriptionService(prisma);
+	const operator = {
+		subject: owner,
+		roles: ['DEV'],
+		active: true,
+		sessionId: 'synthetic-admin-session'
+	};
+	const makeGrant = (subscription, days = 7) => ({
+		schemaVersion: 1,
+		commandId: randomUUID(),
+		expectedActorSubject: operator.subject,
+		expectedEntitlementVersion: subscription.entitlementVersion,
+		expectedBillingVersion: subscription.billingVersion,
+		expectedPeriodId: subscription.period?.id ?? null,
+		expectedPeriodVersion: subscription.period?.version ?? null,
+		days,
+		reason: 'Synthetic administrative compensation'
+	});
+	const previous = (await administrative.detail(workspaceId, operator))
+		.subscription;
+	assert.equal(previous.blockedReason, null);
+	const originalPeriod = await prisma.crmPaidPeriod.findUniqueOrThrow({
+		where: { id: previous.period.id }
+	});
+	const originalOrderCount = await prisma.crmOrder.count({
+		where: { workspaceId }
+	});
+	const originalRenewal = await prisma.crmAutoRenewal.findUniqueOrThrow({
+		where: { workspaceId }
+	});
+	const grantCommand = makeGrant(previous);
+	const grantResults = await Promise.all([
+		administrative.extend(workspaceId, grantCommand, { actor: operator }),
+		administrative.extend(workspaceId, grantCommand, { actor: operator })
+	]);
+	assert.deepEqual(grantResults[0], grantResults[1]);
+	assert.equal(grantResults[0].grant.target, 'PAID_PERIOD');
+	assert.equal(grantResults[0].grant.actorRole, 'DEV');
+	assert.equal(
+		grantResults[0].grant.newExpiresAt,
+		new Date(clock + 7 * 86400000).toISOString()
+	);
+	assert.equal((await entitlements.get(workspaceId)).status, 'ACTIVE');
+	assert.equal(
+		await prisma.crmOrder.count({ where: { workspaceId } }),
+		originalOrderCount
+	);
+	const grantedPeriod = await prisma.crmPaidPeriod.findUniqueOrThrow({
+		where: { id: previous.period.id }
+	});
+	for (const key of [
+		'startsAt',
+		'originalExpiresAt',
+		'originalSeats',
+		'priceSnapshot',
+		'orderId'
+	])
+		assert.deepEqual(grantedPeriod[key], originalPeriod[key]);
+	const grantedRenewal = await prisma.crmAutoRenewal.findUniqueOrThrow({
+		where: { workspaceId }
+	});
+	for (const key of [
+		'status',
+		'consentVersion',
+		'consentText',
+		'paymentMethodCiphertext',
+		'amountMinor'
+	])
+		assert.deepEqual(grantedRenewal[key], originalRenewal[key]);
+	assert.equal(+grantedRenewal.nextChargeAt, +grantedPeriod.expiresAt);
+	assert.equal(
+		await prisma.crmAdminDayGrant.count({
+			where: { commandId: grantCommand.commandId }
+		}),
+		1
+	);
+	const history = await administrative.history(
+		workspaceId,
+		{ page: 1, pageSize: 20 },
+		operator
+	);
+	assert.equal(history.total, 1);
+	assert.equal(history.items[0].commandId, grantCommand.commandId);
+	assert.deepEqual(
+		(
+			await administrative.command(
+				workspaceId,
+				grantCommand.commandId,
+				operator
+			)
+		).result,
+		grantResults[0]
+	);
+	await assert.rejects(
+		administrative.extend(
+			workspaceId,
+			{ ...grantCommand, days: 8 },
+			{ actor: operator }
+		)
+	);
+	await assert.rejects(
+		administrative.extend(
+			workspaceId,
+			{ ...grantCommand, commandId: randomUUID() },
+			{ actor: operator }
+		),
+		error =>
+			error?.response?.code === 'crm_admin_subscription_version_conflict'
+	);
+	for (const roles of [['USER'], ['CRM_ADMIN']])
+		await assert.rejects(
+			administrative.extend(workspaceId, grantCommand, {
+				actor: { ...operator, roles }
+			}),
+			error => error?.status === 403
+		);
+	const freshForRace = (await administrative.detail(workspaceId, operator))
+		.subscription;
+	const differentCommands = await Promise.allSettled([
+		administrative.extend(workspaceId, makeGrant(freshForRace, 1), {
+			actor: operator
+		}),
+		administrative.extend(workspaceId, makeGrant(freshForRace, 2), {
+			actor: operator
+		})
+	]);
+	assert.equal(
+		differentCommands.filter(result => result.status === 'fulfilled')
+			.length,
+		1
+	);
+	assert.equal(
+		differentCommands.filter(result => result.status === 'rejected')
+			.length,
+		1
+	);
+	const manualTrialWorkspace = randomUUID();
+	await entitlements.activateTrial({
+		schemaVersion: 1,
+		commandId: randomUUID(),
+		workspaceId: manualTrialWorkspace,
+		activatedByUserId: owner
+	});
+	const manualTrial = (
+		await administrative.detail(manualTrialWorkspace, operator)
+	).subscription;
+	const trialGrant = await administrative.extend(
+		manualTrialWorkspace,
+		makeGrant(manualTrial),
+		{ actor: { ...operator, roles: ['ADMIN'] } }
+	);
+	assert.equal(trialGrant.grant.target, 'ENTITLEMENT');
+	assert.equal(trialGrant.subscription.billingVersion, '0');
+	assert.equal(
+		await prisma.crmOrder.count({
+			where: { workspaceId: manualTrialWorkspace }
+		}),
+		0
+	);
+	assert.equal(
+		await prisma.crmCommerceAccount.count({
+			where: { workspaceId: manualTrialWorkspace }
+		}),
+		0
+	);
+	const selected = await administrative.list(
+		{
+			page: 1,
+			pageSize: 10,
+			ownerSubject: owner,
+			workspaceId: manualTrialWorkspace
+		},
+		operator
+	);
+	assert.equal(selected.total, 1);
+	assert.equal(selected.items[0].workspaceId, manualTrialWorkspace);
+	const paidPage = await administrative.list(
+		{ page: 1, pageSize: 100, workspaceId },
+		operator
+	);
+	assert.deepEqual(
+		paidPage.items[0],
+		(await administrative.detail(workspaceId, operator)).subscription
+	);
+	phase = 'administrative-cancellation-retention';
+	const cancellationInput = {
+		schemaVersion: 1,
+		expectedActorSubject: operator.subject
+	};
+	const beforeCancellation = (
+		await administrative.detail(manualTrialWorkspace, operator)
+	).subscription;
+	const unconfirmed = makeGrant(beforeCancellation);
+	const cancelled = await administrative.cancel(
+		manualTrialWorkspace,
+		unconfirmed.commandId,
+		cancellationInput,
+		{ actor: operator }
+	);
+	assert.equal(cancelled.outcome, 'CANCELLED');
+	assert.equal(cancelled.actorSubject, operator.subject);
+	assert.deepEqual(
+		await administrative.cancel(
+			manualTrialWorkspace,
+			unconfirmed.commandId,
+			cancellationInput,
+			{ actor: operator }
+		),
+		cancelled
+	);
+	assert.deepEqual(
+		await administrative.command(
+			manualTrialWorkspace,
+			unconfirmed.commandId,
+			operator
+		),
+		cancelled
+	);
+	assert.deepEqual(
+		(await administrative.detail(manualTrialWorkspace, operator))
+			.subscription,
+		beforeCancellation
+	);
+	assert.equal(
+		await prisma.crmAdminDayGrant.count({
+			where: { commandId: unconfirmed.commandId }
+		}),
+		0
+	);
+	await assert.rejects(
+		administrative.extend(manualTrialWorkspace, unconfirmed, {
+			actor: operator
+		}),
+		error => error?.response?.code === 'crm_admin_grant_cancelled'
+	);
+	const alreadyCommitted = await administrative.cancel(
+		workspaceId,
+		grantCommand.commandId,
+		cancellationInput,
+		{ actor: operator }
+	);
+	assert.equal(alreadyCommitted.outcome, 'COMMITTED');
+	assert.deepEqual(alreadyCommitted.result, grantResults[0]);
+	await assert.rejects(
+		administrative.cancel(
+			manualTrialWorkspace,
+			grantCommand.commandId,
+			cancellationInput,
+			{ actor: operator }
+		),
+		error =>
+			error?.response?.code === 'crm_admin_subscription_command_conflict'
+	);
+	await assert.rejects(
+		administrative.cancel(
+			workspaceId,
+			grantCommand.commandId,
+			{ ...cancellationInput, expectedActorSubject: 'another-admin' },
+			{ actor: { ...operator, subject: 'another-admin' } }
+		),
+		error =>
+			error?.response?.code === 'crm_admin_subscription_command_conflict'
+	);
+	await assert.rejects(
+		administrative.cancel(workspaceId, trialCommandId, cancellationInput, {
+			actor: operator
+		}),
+		error =>
+			error?.response?.code === 'crm_admin_subscription_command_conflict'
+	);
+	for (let iteration = 0; iteration < 4; iteration += 1) {
+		const state = (
+			await administrative.detail(manualTrialWorkspace, operator)
+		).subscription;
+		const racingCommand = makeGrant(state, 1);
+		const grantCall = () =>
+			administrative.extend(manualTrialWorkspace, racingCommand, {
+				actor: operator
+			});
+		const cancelCall = () =>
+			administrative.cancel(
+				manualTrialWorkspace,
+				racingCommand.commandId,
+				cancellationInput,
+				{ actor: operator }
+			);
+		const calls =
+			iteration % 2
+				? [cancelCall(), grantCall()]
+				: [grantCall(), cancelCall()];
+		const results = await Promise.allSettled(calls);
+		const cancellationResult = results[iteration % 2 ? 0 : 1];
+		assert.equal(cancellationResult.status, 'fulfilled');
+		for (const result of results) {
+			if (result.status === 'rejected')
+				assert.equal(
+					result.reason?.response?.code,
+					'crm_admin_grant_cancelled'
+				);
+		}
+		const terminal = await administrative.command(
+			manualTrialWorkspace,
+			racingCommand.commandId,
+			operator
+		);
+		const grantCount = await prisma.crmAdminDayGrant.count({
+			where: { commandId: racingCommand.commandId }
+		});
+		if (terminal.outcome === 'COMMITTED') {
+			assert.equal(grantCount, 1);
+			assert.deepEqual(
+				await administrative.cancel(
+					manualTrialWorkspace,
+					racingCommand.commandId,
+					cancellationInput,
+					{ actor: operator }
+				),
+				terminal
+			);
+		} else {
+			assert.equal(terminal.outcome, 'CANCELLED');
+			assert.equal(grantCount, 0);
+			await assert.rejects(
+				grantCall(),
+				error => error?.response?.code === 'crm_admin_grant_cancelled'
+			);
+		}
+	}
+	for (const commandId of [
+		grantCommand.commandId,
+		unconfirmed.commandId
+	]) {
+		await assert.rejects(
+			prisma.$executeRawUnsafe(
+				'DELETE FROM billing.command_receipts WHERE command_id = $1',
+				commandId
+			),
+			sqlConstraint
+		);
+		await assert.rejects(
+			prisma.$executeRawUnsafe(
+				"UPDATE billing.command_receipts SET command_type = 'FORGOTTEN' WHERE command_id = $1",
+				commandId
+			),
+			sqlConstraint
+		);
+		await assert.rejects(
+			prisma.$executeRawUnsafe(
+				"UPDATE billing.command_receipts SET result = '{}'::jsonb WHERE command_id = $1",
+				commandId
+			),
+			sqlConstraint
+		);
+	}
+	const legacyReceiptId = randomUUID();
+	await prisma.billingCommandReceipt.create({
+		data: {
+			commandId: legacyReceiptId,
+			commandType: 'UNRELATED_WIDGETS_RETENTION_TEST',
+			result: {}
+		}
+	});
+	assert.equal(
+		await prisma.$executeRawUnsafe(
+			'DELETE FROM billing.command_receipts WHERE command_id = $1',
+			legacyReceiptId
+		),
+		1
+	);
+	const [receiptGuard] =
+		await prisma.$queryRaw`SELECT NOT has_function_privilege(current_user, 'billing.protect_crm_admin_command_receipts()', 'EXECUTE') AS private,
+		EXISTS (SELECT 1 FROM pg_trigger WHERE tgrelid = 'billing.command_receipts'::regclass AND tgname = 'crm_admin_command_receipts_no_truncate' AND tgenabled = 'O') AS truncate_guard`;
+	assert.equal(receiptGuard.private, true);
+	assert.equal(receiptGuard.truncate_guard, true);
+	const missingWorkspace = randomUUID();
+	await assert.rejects(
+		administrative.extend(missingWorkspace, makeGrant(manualTrial), {
+			actor: operator
+		}),
+		error =>
+			error?.response?.code === 'crm_admin_subscription_not_provisioned'
+	);
+	assert.equal(
+		await prisma.crmEntitlement.count({
+			where: { workspaceId: missingWorkspace }
+		}),
+		0
+	);
+	for (const privilege of ['UPDATE', 'DELETE', 'TRUNCATE']) {
+		const [acl] = await prisma.$queryRawUnsafe(
+			'SELECT has_table_privilege(current_user, $1, $2) AS allowed',
+			'billing.crm_admin_day_grants',
+			privilege
+		);
+		assert.equal(
+			acl.allowed,
+			false,
+			`manual grant ${privilege} prohibited`
+		);
+	}
+	await assert.rejects(
+		prisma.$executeRawUnsafe(
+			'UPDATE billing.crm_admin_day_grants SET days = 99 WHERE command_id = $1::uuid',
+			grantCommand.commandId
+		),
+		sqlDenied
+	);
+	await assert.rejects(
+		prisma.$executeRawUnsafe(
+			'DELETE FROM billing.crm_admin_day_grants WHERE command_id = $1::uuid',
+			grantCommand.commandId
+		),
+		sqlDenied
+	);
+	await assert.rejects(
+		prisma.$executeRawUnsafe('TRUNCATE billing.crm_admin_day_grants'),
+		sqlDenied
+	);
 	console.log(
 		JSON.stringify({
 			ok: true,
@@ -436,7 +876,9 @@ try {
 			trialProvenance: true,
 			scheduledActivation: true,
 			seatsCas: true,
-			leastPrivilege: true
+			leastPrivilege: true,
+			administrativeFreeDays: true,
+			administrativeCancellation: true
 		})
 	);
 } catch {

@@ -6,6 +6,46 @@ workspace или подписками: актуальную сессию и memb
 состояние входа workspace в CRM, CRM-роли, команды, очередь допуска сотрудников
 и durable ограничения квоты для финансовых операций.
 
+## Название компании в рабочем WinCRM
+
+CRM-local branding не переименовывает Identity workspace, аккаунт или Widgets.
+Новый `GET /api/v1/crm/access/workspace/branding?workspaceId=<UUID v4>`
+доступен всем пяти действующим CRM-ролям, включая `ANALYST` и `READ_ONLY`.
+Ответ: `{schemaVersion:1, workspaceId, subject, branding:{displayName,
+version, updatedAt}}`. При отсутствии настройки возвращаются `null`, `0`,
+`null`; названия существующим пространствам не назначаются автоматически.
+
+`POST` на этот же путь принимает `{schemaVersion:1, workspaceId, commandId,
+expectedActorSubject, expectedVersion, displayName}` и строго совпадающий
+`Idempotency-Key`. Ответ содержит те же поля плюс `commandId`. Только текущие
+`OWNER`/`CRM_ADMIN` с `access:manage-team` и состоянием `ACTIVE`/`GRACE`
+могут менять название; `READ_ONLY` запрещает запись и replay команды.
+`subject` всегда принадлежит проверенному actor, а не поступает из имени.
+
+Имя — необязательный plain text до 40 Unicode codepoints после NFC + trim;
+пустое значение очищается в `null`. HTML-скобки, управляющие символы,
+format/bidi, одиночные суррогаты и разделители строк/абзацев запрещены.
+Строка никогда не обрезается молча. `expectedVersion` лежит в
+`0..2147483646`; после очистки строка с увеличенной версией сохраняется.
+Конфликт версии — `409 crm_branding_version_conflict`, несовпадение
+immutable command receipt — `409 crm_branding_command_conflict`.
+
+Изменение синхронное в собственной PostgreSQL: общие с team-командами
+workspace/command locks, SQL version CAS, immutable receipt и локальный
+append-only `crm_team_audit` фиксируются одной транзакцией. Перед записью
+и replay после получения lock повторно проверяются те же token/actor,
+Identity membership, Billing и локальная CRM-роль. READ COMMITTED сохраняет
+свежие локальные чтения после ожидания lock; они используют тот же Prisma
+transaction client без вложенного захвата pool connection. Audit хранит
+actor, версии и признак изменения без дополнительных копий имени; точный
+результат остаётся в receipt для replay. Это **локальный аудит CRM**, не
+доставка в общий Operations Журнал событий; RabbitMQ здесь не требуется.
+
+Перед rollout необходимы миграция `20260907150000_add_workspace_branding`
+и ACL `SELECT, INSERT, UPDATE` для `crm_workspace_branding`, без
+`DELETE`/`TRUNCATE`. Readiness проверяет наличие таблицы и колонок;
+публичные старые DTO и существующие настройки сохраняются без изменений.
+
 ## Ошибка запуска
 
 При отклонении bootstrap сервис закрывает уже созданный Nest context и

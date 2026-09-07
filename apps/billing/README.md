@@ -297,6 +297,91 @@ seed тесту отдельно разрешён INSERT `identity_contact_proje
 провайдера. Он не доказывает реальные платежи, RabbitMQ или договорные условия
 провайдера. Production rollout и внешние платёжные проверки остаются отдельными.
 
+### Бесплатное административное начисление дней WinCRM
+
+`ADMIN` и `DEV` сервиса (не клиентская роль `CRM_ADMIN`) могут бесплатно
+продлевать уже активированное пространство, включая собственное. Это отдельная
+операция Billing, без заказа, платежа, чека или включения автопродления.
+Widgets subscriptions, тарифы и платежи не изменяются.
+
+- `GET /api/v1/subscriptions/admin/crm` — серверная пагинация `page`, `pageSize`
+  (1–100), необязательные `workspaceId`, `ownerSubject`.
+- `GET /api/v1/subscriptions/admin/crm/:workspaceId` — текущий доступ, период,
+  безопасные данные автопродления, CAS-версии и причина блокировки операции.
+- `GET /api/v1/subscriptions/admin/crm/:workspaceId/history` — пагинация истории.
+- `GET /api/v1/subscriptions/admin/crm/:workspaceId/commands/:commandId` —
+  immutable terminal proof `COMMITTED` или `CANCELLED`. 404 не исключает
+  выполняющийся запрос и не разрешает выдать новый commandId после timeout.
+- `POST /api/v1/subscriptions/admin/crm/:workspaceId/commands/:commandId/cancel` —
+  завершение неподтверждённой команды; body `{schemaVersion:1,expectedActorSubject}`,
+  `Idempotency-Key` равен исходному commandId из path, не новому UUID.
+- `POST /api/v1/subscriptions/admin/crm/:workspaceId/extend-days` — body
+  `{schemaVersion:1,commandId,expectedActorSubject,expectedEntitlementVersion,expectedBillingVersion,
+expectedPeriodId,expectedPeriodVersion,days,reason}`. Версии entitlement/Billing —
+  decimal strings, отсутствие commerce account — `"0"`; обе версии периода
+  передаются явно как `null`, если его нет. `days`: 1–3650, обязательная причина:
+  3–1000 символов. `Idempotency-Key` равен `commandId`.
+
+`expectedActorSubject` закрепляет исходную сессию команды: сервер сравнивает его
+с актуальным introspected actor до transaction/replay. При смене ADMIN даже
+первый повторно отправленный POST отклоняется `crm_admin_subscription_actor_changed`.
+Frontend не заменяет это поле при обновлении токена и не использует автоматический
+interceptor replay для изменяющей команды.
+
+Ответ команды: `{schemaVersion:1,workspaceId,commandId,grant,subscription}`.
+Grant содержит actor/role, причину, дни, цель `ENTITLEMENT` или `PAID_PERIOD`,
+старый/новый срок и время. Администратор не исключается из целей; поиск точного
+ownerSubject использует Billing owner binding, не прямое чтение Identity БД.
+Billing не хранит название workspace; имя пользователя разрешается существующим
+Identity admin lookup. Receipt читается ADMIN/DEV, но UI восстанавливает pending
+команду только при совпадении исходных actor/workspace/commandId.
+
+GET command и POST cancel возвращают union:
+`{schemaVersion:1,workspaceId,commandId,actorSubject,outcome:"COMMITTED",result}`,
+где result — исходный ответ начисления, либо
+`{schemaVersion:1,workspaceId,commandId,actorSubject,actorRole,outcome:"CANCELLED",cancelledAt}`.
+Отмена сериализуется с начислением по original command lock, затем workspace lock.
+Если начисление уже зафиксировано, отмена возвращает COMMITTED и не делает вид,
+что дни отменены. Иначе она сохраняет durable tombstone с исходным UUID, не меняя
+подписку и grant ledger; поздний исходный POST будет отклонён. Audit сообщает
+об отмене команды, а не об отмене подписки. Результат отмены можно восстановить
+после потери HTTP-ответа тем же GET. Lock timeout/404 не являются terminal proof.
+После подтверждённого COMMITTED/CANCELLED frontend может убрать pending marker.
+
+Миграция защищает оба новых administrative receipt type от UPDATE/DELETE,
+а TRUNCATE command_receipts запрещён, пока такие записи существуют. Retention
+других Billing/Widgets receipt types не меняется; нельзя удалять cancellation
+tombstones, иначе старый HTTP-запрос снова станет исполнимым.
+
+Срок увеличивается от `max(now, oldExpiresAt)`. Для trial/expired без оплаченного
+периода изменяется entitlement с сохранением исходного Trial/provisioning и grace
+duration. При существующем текущем или будущем оплаченном периоде изменяется его
+окончание; immutable startsAt, order и price snapshot не переписываются. Покупка,
+сделанная во время Trial, по-прежнему начнётся в исходно согласованный день, а
+бесплатные дни добавятся в конец уже купленного периода. Текущий доступ отдельно
+считается по последнему начавшемуся paid period, как у обычного entitlement API.
+
+Следующее автосписание переносится на новый конец; старый retry-срок сбрасывается,
+но status/consent/payment method/amount не меняются. Незавершённый/неизвестный
+платёж, pending commerce/capacity command или dispatch блокирует начисление (409).
+SUSPENDED/CANCELLED не снимаются этим действием. Для ещё не провижененного workspace
+возвращается 404 `crm_admin_subscription_not_provisioned`: ручное начисление не
+создаёт пользователя, пространство, Trial или фиктивный оплаченный заказ.
+
+Изменение, append-only `crm_admin_day_grants`, command receipt, audit
+`SUBSCRIPTION_EXTEND_DAYS` с `productCode: WINCRM` и прежний entitlement Outbox
+атомарны под существующим workspace lock и Serializable/CAS. Аудит доставляется
+в Operations прежним маршрутом. Migration `20260910120000_add_crm_admin_day_grants`
+даёт `winwidget_billing_runtime` только SELECT/INSERT на ledger; до неё API
+readiness не проходит. Платёжные credentials для бесплатного начисления не нужны,
+флаг новых продаж не включается.
+
+Список ограничен 100 строками и 25s RepeatableRead-транзакцией. Обогащение пакетное:
+не более девяти запросов независимо от размера страницы; LATERAL выбирает только
+ID последнего и последнего начавшегося paid period, затем загружается максимум
+200 периодов страницы, а не вся история. Текущий доступ рассчитывается тем же
+projection builder, что и карточка, с единым временем и snapshot списка.
+
 ### Окружение и миграции
 
 Скопируйте `.env.example` в `.env.production` внутри каталога Billing на VPS.

@@ -80,6 +80,30 @@ function setup(role = 'OWNER', status = 'ACTIVE') {
 }
 
 describe('CRM service authorization', () => {
+	it('uses an existing transaction connection for local reads while refreshing Identity and Billing', async () => {
+		const current = setup('CRM_ADMIN');
+		const tx = setup('CRM_ADMIN').prisma;
+		await expect(
+			current.service.authorize(
+				'Bearer test',
+				workspaceId,
+				undefined,
+				tx as never
+			)
+		).resolves.toMatchObject({ role: 'CRM_ADMIN', state: 'ACTIVE' });
+		expect(current.identity.authContext).toHaveBeenCalledTimes(1);
+		expect(current.billing.get).toHaveBeenCalledTimes(1);
+		expect(tx.crmWorkspaceAccess.findUnique).toHaveBeenCalledTimes(1);
+		expect(tx.crmWorkspaceMember.findUnique).toHaveBeenCalledTimes(1);
+		expect(tx.crmTeam.findMany).toHaveBeenCalledTimes(1);
+		expect(
+			current.prisma.crmWorkspaceAccess.findUnique
+		).not.toHaveBeenCalled();
+		expect(
+			current.prisma.crmWorkspaceMember.findUnique
+		).not.toHaveBeenCalled();
+		expect(current.prisma.crmTeam.findMany).not.toHaveBeenCalled();
+	});
 	it.each(['OWNER', 'MANAGER'])(
 		'returns the actual %s membership only for the assignment context',
 		async role => {

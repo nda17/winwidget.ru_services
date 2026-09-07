@@ -288,6 +288,40 @@ payloads и обязательность имени для них должны �
 выбранного существующего контакта. Повторить service-owned smoke на целевой
 production-топологии с её точными образами и scoped credentials.
 
+### P1 — выпустить бесплатное административное начисление дней WinCRM
+
+Подтверждено пользователем 07.09.2026: глобальные роли ADMIN и DEV могут
+бесплатно добавлять дни CRM клиентам и себе, с обязательной причиной и историей.
+Выпустить административный frontend после PostgreSQL 18 CI новых команд/ledger,
+миграцию Billing `20260910120000_add_crm_admin_day_grants` и production browser
+проверки обеих ролей. Сохранить исходный receipt при timeout; отсутствие GET
+receipt не разрешает автоматически повторить начисление с новым commandId.
+Непровиженное пространство не активировать этой командой, не создавать fake
+order/payment. Если потребуется административная первичная выдача CRM без
+onboarding, согласовать отдельный Identity/CRM Access provisioning contract.
+Не менять Widgets, согласие на автосписания, purchase snapshot и исходное начало
+будущего оплаченного периода.
+
+До release административных начислений проверить production race исходного
+POST с отменой неподтверждённой команды, оба порядка COMMITTED/CANCELLED,
+восстановление после потери ответа отмены и повторный вход тем же ADMIN/DEV.
+Выпустить terminal receipt retention guard вместе с cancel/GET proof union.
+Смена ADMIN между попытками должна отклоняться по expectedActorSubject;
+interceptor refresh не должен переотправлять команду от другого пользователя.
+Marker без причины/PII/JWT снимается только по связанному terminal proof;
+GET 404 и тайм-аут не разрешают новый commandId без завершения исходной команды.
+
+### P1 — выпуск названия компании в интерфейсе WinCRM
+
+До публикации редактора и подписи в шапке выпустить CRM Access migration
+`20260907150000_add_workspace_branding`, scoped runtime grants и совместимые
+GET/POST `/crm/access/workspace/branding`. Пройти PostgreSQL 18 CI:
+concurrent replay/CAS, очистка без сброса версии, ограничения имени, локальный
+аудит, отзыв доступа во время ожидания lock. Затем проверить production UI
+OWNER/CRM_ADMIN, read-only роли, смену workspace/сессии и подпись на телефоне.
+Имя необязательное, до 40 Unicode-символов; Identity и логотип не меняются.
+Не смешивать локальный CRM team audit с общим Operations-журналом.
+
 ### P1 — production recovery отложенных retry новых CRM workflows
 
 Для team, widget-control и acceptance закрепить проверку целевой

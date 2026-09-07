@@ -64,6 +64,11 @@ export class BillingHealthService {
 			await this.prisma.crmPaidPeriod.findFirst({
 				select: { id: true, startsAt: true, activationNotifiedAt: true }
 			});
+			if (this.runtime.apiEnabled) {
+				await this.prisma.crmAdminDayGrant.findFirst({
+					select: { commandId: true }
+				});
+			}
 			if (wincrmProviderMessagingEnabled()) {
 				await Promise.all([
 					this.prisma.crmCommerceAccount.findFirst({

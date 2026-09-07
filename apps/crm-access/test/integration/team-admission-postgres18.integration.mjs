@@ -13,6 +13,9 @@ const {
 	CrmEmployeeProfileService
 } = require('../../dist/src/team/team-profile.service.js');
 const {
+	CrmWorkspaceBrandingService
+} = require('../../dist/src/branding/workspace-branding.service.js');
+const {
 	CrmTeamAdmissionService
 } = require('../../dist/src/team/team-admission.service.js');
 const {
@@ -157,6 +160,230 @@ try {
 			onboardingCompletedAt: now
 		}
 	});
+	// Optional CRM-owned branding: no backfill, exact command receipts, SQL CAS,
+	// least-privilege writes and no extra copies of the name in local audit.
+	const branding = new CrmWorkspaceBrandingService(prisma, auth);
+	const brandingCommand = data =>
+		command({
+			expectedActorSubject: ownerSubject,
+			expectedVersion: 0,
+			displayName: ' Cafe\u0301 ',
+			...data
+		});
+	assert.deepEqual(
+		await branding.get('Bearer local-test', { workspaceId }),
+		{
+			schemaVersion: 1,
+			workspaceId,
+			subject: ownerSubject,
+			branding: { displayName: null, version: 0, updatedAt: null }
+		}
+	);
+	const initialBranding = brandingCommand();
+	const brandingResults = await Promise.all([
+		branding.update('Bearer local-test', initialBranding),
+		branding.update('Bearer local-test', initialBranding)
+	]);
+	assert.deepEqual(brandingResults[0], brandingResults[1]);
+	assert.equal(brandingResults[0].branding.displayName, 'Café');
+	assert.equal(brandingResults[0].branding.version, 1);
+	assert.equal(brandingResults[0].subject, ownerSubject);
+	assert.equal(brandingResults[0].commandId, initialBranding.commandId);
+	assert.equal(
+		await prisma.crmTeamCommandReceipt.count({
+			where: { commandId: initialBranding.commandId }
+		}),
+		1
+	);
+	const brandingAudit = await prisma.crmTeamAudit.findUniqueOrThrow({
+		where: { commandId: initialBranding.commandId }
+	});
+	assert.deepEqual(brandingAudit.before, { version: 0 });
+	assert.deepEqual(brandingAudit.after, { version: 1, changed: true });
+	assert.equal(brandingAudit.action, 'WORKSPACE_BRANDING_UPDATED');
+	assert.equal(JSON.stringify(brandingAudit).includes('Café'), false);
+	await assert.rejects(
+		branding.update('Bearer local-test', {
+			...initialBranding,
+			displayName: 'Other'
+		}),
+		error =>
+			error.status === 409 &&
+			error.response.code === 'crm_branding_command_conflict'
+	);
+	const competingCommands = [
+		brandingCommand({ expectedVersion: 1, displayName: 'First' }),
+		brandingCommand({ expectedVersion: 1, displayName: 'Second' })
+	];
+	const competingBranding = await Promise.allSettled(
+		competingCommands.map(dto => branding.update('Bearer local-test', dto))
+	);
+	assert.equal(
+		competingBranding.filter(result => result.status === 'fulfilled')
+			.length,
+		1
+	);
+	const lostBrandingIndex = competingBranding.findIndex(
+		result => result.status === 'rejected'
+	);
+	assert.equal(
+		competingBranding[lostBrandingIndex].reason.response.code,
+		'crm_branding_version_conflict'
+	);
+	assert.equal(
+		await prisma.crmTeamCommandReceipt.count({
+			where: { commandId: competingCommands[lostBrandingIndex].commandId }
+		}),
+		0
+	);
+	assert.equal(
+		await prisma.crmTeamAudit.count({
+			where: { commandId: competingCommands[lostBrandingIndex].commandId }
+		}),
+		0
+	);
+	const clearedBranding = await branding.update(
+		'Bearer local-test',
+		brandingCommand({ expectedVersion: 2, displayName: null })
+	);
+	assert.equal(clearedBranding.branding.version, 3);
+	assert.equal(clearedBranding.branding.displayName, null);
+	await assert.rejects(
+		branding.update('Bearer local-test', brandingCommand()),
+		error => error.status === 409
+	);
+	const unicodeBranding = await branding.update(
+		'Bearer local-test',
+		brandingCommand({ expectedVersion: 3, displayName: '😀'.repeat(40) })
+	);
+	assert.equal(unicodeBranding.branding.version, 4);
+	assert.equal(unicodeBranding.branding.displayName, '😀'.repeat(40));
+	await assert.rejects(
+		branding.update(
+			'Bearer local-test',
+			brandingCommand({ expectedVersion: 4, displayName: '😀'.repeat(41) })
+		),
+		error => error.status === 400
+	);
+	actor.state = 'READ_ONLY';
+	assert.equal(
+		(await branding.get('Bearer local-test', { workspaceId })).branding
+			.version,
+		4
+	);
+	await assert.rejects(
+		branding.update('Bearer local-test', initialBranding),
+		error => error.status === 403
+	);
+	actor.state = 'ACTIVE';
+	await assert.rejects(
+		branding.update(
+			'Bearer local-test',
+			brandingCommand({
+				expectedActorSubject: 'foreign-actor',
+				expectedVersion: 4
+			})
+		),
+		error => error.status === 403
+	);
+
+	// The mutation must observe a lifecycle change committed while it awaited
+	// the existing workspace lock, even if the initial authority was ACTIVE.
+	let releaseBrandingLock;
+	let lockedBrandingWorkspace;
+	const brandingLockHeld = new Promise(resolve => {
+		lockedBrandingWorkspace = resolve;
+	});
+	const releaseBranding = new Promise(resolve => {
+		releaseBrandingLock = resolve;
+	});
+	const lockingBrandingChange = prisma.$transaction(async tx => {
+		await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`wincrm-team:${workspaceId}`}, 0))`;
+		await tx.crmWorkspaceAccess.update({
+			where: { workspaceId },
+			data: { lifecycle: 'READ_ONLY' }
+		});
+		lockedBrandingWorkspace();
+		await releaseBranding;
+	});
+	await brandingLockHeld;
+	let initialBrandingAuthority;
+	const brandingAuthorityChecked = new Promise(resolve => {
+		initialBrandingAuthority = resolve;
+	});
+	const waitingBranding = new CrmWorkspaceBrandingService(prisma, {
+		authorize: async (...args) => {
+			const value = await auth.authorize(...args);
+			initialBrandingAuthority();
+			return value;
+		}
+	});
+	const deniedWaitingBranding = assert.rejects(
+		waitingBranding.update(
+			'Bearer local-test',
+			brandingCommand({ expectedVersion: 4 })
+		),
+		error => error.status === 403
+	);
+	try {
+		await brandingAuthorityChecked;
+		let observedBrandingWait = false;
+		for (let attempt = 0; attempt < 40; attempt++) {
+			const [waiting] =
+				await prisma.$queryRaw`SELECT EXISTS (SELECT 1 FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid WHERE l.locktype = 'advisory' AND NOT l.granted AND a.datname = current_database() AND a.usename = current_user) AS present`;
+			if (waiting.present) {
+				observedBrandingWait = true;
+				break;
+			}
+			await new Promise(resolve => setTimeout(resolve, 10));
+		}
+		assert.equal(
+			observedBrandingWait,
+			true,
+			'branding must await the workspace lock before it is released'
+		);
+	} finally {
+		releaseBrandingLock();
+	}
+	await lockingBrandingChange;
+	await deniedWaitingBranding;
+	await prisma.crmWorkspaceAccess.update({
+		where: { workspaceId },
+		data: { lifecycle: 'ACTIVE' }
+	});
+	assert.equal(
+		(await branding.get('Bearer local-test', { workspaceId })).branding
+			.version,
+		4
+	);
+	for (const invalidName of [
+		'',
+		'<brand>',
+		'a\nb',
+		'e\u0301',
+		'\u2028Brand',
+		'x'.repeat(41)
+	])
+		await assert.rejects(
+			prisma.$executeRaw`UPDATE crm_access.crm_workspace_branding SET display_name = ${invalidName} WHERE workspace_id = ${workspaceId}::uuid`
+		);
+	await assert.rejects(
+		prisma.$executeRaw`UPDATE crm_access.crm_workspace_branding SET version = 0 WHERE workspace_id = ${workspaceId}::uuid`
+	);
+	await assert.rejects(
+		prisma.crmWorkspaceBranding.create({
+			data: { workspaceId: randomUUID(), displayName: 'Foreign' }
+		})
+	);
+	assert.equal(
+		(await branding.get('Bearer local-test', { workspaceId })).branding
+			.displayName,
+		'😀'.repeat(40)
+	);
+	console.log(
+		'PASS CRM workspace branding PG18: optional state, Unicode, concurrent replay/CAS, clear version, fresh locked authority, READ_ONLY, audit and constraints'
+	);
+
 	const createTeam = command({ name: 'Отдел продаж' });
 	const teamResults = await Promise.all([
 		teams.createTeam('Bearer local-test', createTeam),
@@ -758,6 +985,7 @@ try {
 	);
 	for (const table of [
 		'crm_workspace_members',
+		'crm_workspace_branding',
 		'crm_employee_profiles',
 		'crm_teams',
 		'crm_invitation_intents',

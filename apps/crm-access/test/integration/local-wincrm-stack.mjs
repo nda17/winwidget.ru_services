@@ -714,6 +714,7 @@ async function grantRuntime(service) {
 		'crm-access': {
 			'SELECT, INSERT, UPDATE': [
 				'crm_workspace_access',
+				'crm_workspace_branding',
 				'crm_workspace_members',
 				'crm_employee_profiles',
 				'crm_teams',

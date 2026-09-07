@@ -58,6 +58,7 @@ describe('BillingHealthService provider configuration', () => {
 			.mockResolvedValue({ version: 1 });
 		const crmCommerceAccountFindFirst = jest.fn().mockResolvedValue(null);
 		const crmPaidPeriodFindFirst = jest.fn().mockResolvedValue(null);
+		const crmAdminDayGrantFindFirst = jest.fn().mockResolvedValue(null);
 		const crmProviderOperationFindFirst = jest
 			.fn()
 			.mockResolvedValue(null);
@@ -72,6 +73,7 @@ describe('BillingHealthService provider configuration', () => {
 				crmCommercialPolicy: { findFirst: crmCommercialPolicyFindFirst },
 				crmCommerceAccount: { findFirst: crmCommerceAccountFindFirst },
 				crmPaidPeriod: { findFirst: crmPaidPeriodFindFirst },
+				crmAdminDayGrant: { findFirst: crmAdminDayGrantFindFirst },
 				crmProviderOperation: { findFirst: crmProviderOperationFindFirst },
 				serviceIdentity: {
 					findUnique: jest.fn().mockResolvedValue({
@@ -107,6 +109,7 @@ describe('BillingHealthService provider configuration', () => {
 			crmCommercialPolicyFindFirst,
 			crmCommerceAccountFindFirst,
 			crmPaidPeriodFindFirst,
+			crmAdminDayGrantFindFirst,
 			crmProviderOperationFindFirst,
 			wincrmWorkerReady,
 			wincrmSchedulerReady,
@@ -129,6 +132,15 @@ describe('BillingHealthService provider configuration', () => {
 	it('always requires the paid-period schema used by entitlement reads', async () => {
 		const test = createService('scheduler');
 		test.crmPaidPeriodFindFirst.mockRejectedValue(
+			new Error('migration missing')
+		);
+		await expect(test.service.readiness()).rejects.toThrow(
+			'Billing database is not ready'
+		);
+	});
+	it('requires the administrative grant ledger schema before API readiness', async () => {
+		const test = createService('api');
+		test.crmAdminDayGrantFindFirst.mockRejectedValue(
 			new Error('migration missing')
 		);
 		await expect(test.service.readiness()).rejects.toThrow(

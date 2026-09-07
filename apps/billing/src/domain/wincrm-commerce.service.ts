@@ -1,3 +1,4 @@
+import { enqueueCrmEntitlementChanged } from './crm-entitlement-outbox';
 import {
 	Injectable,
 	ForbiddenException,
@@ -2307,68 +2308,7 @@ export class WincrmCommerceService {
 		return sequence.nextValue - 1n;
 	}
 	private async entitlementWake(tx: Tx, workspaceId: string) {
-		const base = await tx.crmEntitlement.findUnique({
-			where: { workspaceId }
-		});
-		if (!base) return;
-		const now = new Date(),
-			period = await tx.crmPaidPeriod.findFirst({
-				where: { workspaceId, startsAt: { lte: now } },
-				orderBy: [{ startsAt: 'desc' }, { id: 'desc' }]
-			});
-		const account = await tx.crmCommerceAccount.findUnique({
-			where: { workspaceId }
-		});
-		const eventId = randomUUID(),
-			sequence = await this.nextSequence(tx),
-			version =
-				(account?.version ?? 0n) > base.aggregateVersion
-					? account!.version
-					: base.aggregateVersion + 1n;
-		await tx.crmEntitlement.update({
-			where: { workspaceId },
-			data: { sourceSequence: sequence, aggregateVersion: version }
-		});
-		if (period && !period.activationNotifiedAt)
-			await tx.crmPaidPeriod.update({
-				where: { id: period.id },
-				data: { activationNotifiedAt: now }
-			});
-		await tx.outboxEvent.create({
-			data: {
-				eventId,
-				eventType: 'billing.crm-entitlement.changed.v1',
-				aggregateType: 'billing.crm-entitlement',
-				aggregateId: base.id,
-				aggregateVersion: version,
-				sourceSequence: sequence,
-				exchange: 'winwidget.events',
-				routingKey: 'billing.crm-entitlement.changed.v1',
-				payload: {
-					schemaVersion: 1,
-					eventType: 'billing.crm-entitlement.changed.v1',
-					eventId,
-					aggregateId: base.id,
-					aggregateVersion: version.toString(),
-					sourceSequence: sequence.toString(),
-					occurredAt: now.toISOString(),
-					tombstone: false,
-					state: {
-						workspaceId,
-						productCode: 'WINCRM',
-						planCode: period ? 'PAID' : base.planCode,
-						status: base.status,
-						seatLimit: period?.totalSeats ?? base.seatLimit,
-						effectiveFrom: (
-							period?.startsAt ?? base.effectiveFrom
-						).toISOString(),
-						effectiveUntil: (
-							period?.expiresAt ?? base.effectiveUntil
-						).toISOString()
-					}
-				}
-			}
-		});
+		await enqueueCrmEntitlementChanged(tx, workspaceId);
 	}
 
 	async advanceRenewals(now: Date): Promise<number> {

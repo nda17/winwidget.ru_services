@@ -98,6 +98,7 @@ export async function provisionAccessTeamTopology(channel) {
 const mutableTables = {
 	'crm-access': [
 		'crm_workspace_access',
+		'crm_workspace_branding',
 		'crm_workspace_members',
 		'crm_employee_profiles',
 		'crm_teams',
