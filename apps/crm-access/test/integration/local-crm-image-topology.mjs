@@ -145,6 +145,8 @@ const appendOnlyTables = {
 	'crm-sales': [
 		'deal_timeline',
 		'command_receipts',
+		'task_command_receipts',
+		'task_timeline',
 		'pipeline_template_installations',
 		'pipeline_template_installation_commands',
 		'intake_operation_slots',

@@ -12,6 +12,8 @@
 		"tasks": ["SELECT", "INSERT", "UPDATE"],
 		"deal_timeline": ["SELECT", "INSERT"],
 		"command_receipts": ["SELECT", "INSERT"],
+		"task_command_receipts": ["SELECT", "INSERT"],
+		"task_timeline": ["SELECT", "INSERT"],
 		"intake_operation_slots": ["SELECT", "INSERT"],
 		"intake_operation_commands": ["SELECT", "INSERT"],
 		"export_audit": ["SELECT", "INSERT"]

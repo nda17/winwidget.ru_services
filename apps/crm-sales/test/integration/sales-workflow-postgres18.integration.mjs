@@ -7,6 +7,10 @@ const require = createRequire(import.meta.url);
 const { PrismaClient } = require('@prisma/crm-sales-client');
 const { SalesService } = require('../../dist/src/sales/sales.service.js');
 const {
+	WorkdayService
+} = require('../../dist/src/workday/workday.service.js');
+const { WorkdayQuery } = require('../../dist/src/workday/workday.dto.js');
+const {
 	PipelineTemplateCatalogService
 } = require('../../dist/src/templates/pipeline-template-catalog.service.js');
 const {
@@ -719,6 +723,378 @@ try {
 			prisma.$executeRawUnsafe(`TRUNCATE TABLE crm_sales.${table}`),
 			error => error?.meta?.code === '42501'
 		);
+	}
+	// Real runtime-role SQL for the new commands, separate from legacy receipts.
+	{
+		let workdayActor = access;
+		let allowAssignee = true;
+		const ownerMembership = randomUUID(),
+			managerMembership = randomUUID();
+		const workday = new WorkdayService(
+			prisma,
+			{
+				authorize: async () => workdayActor
+			},
+			{
+				authorize: async (_token, actor, target) => {
+					assert.equal(actor.workspaceId, access.workspaceId);
+					if (!allowAssignee)
+						throw Object.assign(new Error('revoked'), { status: 404 });
+					const owner = target.subject === access.subject;
+					assert.equal(
+						target.membershipId,
+						owner ? ownerMembership : managerMembership
+					);
+					return {
+						...target,
+						role: owner ? 'OWNER' : 'MANAGER',
+						dataScope: owner ? 'ALL' : 'OWN',
+						teamIds: []
+					};
+				}
+			}
+		);
+		const workdayPrefix = `workday-${randomUUID()}`;
+		const taskCommand = {
+			schemaVersion: 1,
+			workspaceId: access.workspaceId,
+			commandId: randomUUID(),
+			title: workdayPrefix,
+			dueAt: '2026-09-07T10:00:00.000Z',
+			assignee: { subject: access.subject, membershipId: ownerMembership }
+		};
+		const dealCountBefore = await prisma.deal.count({
+			where: { workspaceId: access.workspaceId }
+		});
+		const [standalone, duplicate] = await Promise.all([
+			workday.create(access, taskCommand, 'Bearer fixture'),
+			workday.create(access, taskCommand, 'Bearer fixture')
+		]);
+		assert.deepEqual(duplicate, standalone);
+		assert.equal(standalone.task.dealId, null);
+		assert.equal(standalone.task.assignedToMembershipId, ownerMembership);
+		assert.equal(
+			await prisma.deal.count({
+				where: { workspaceId: access.workspaceId }
+			}),
+			dealCountBefore
+		);
+		assert.equal(
+			await prisma.taskTimeline.count({
+				where: { taskId: standalone.task.id }
+			}),
+			1
+		);
+		await assert.rejects(
+			workday.create(
+				access,
+				{ ...taskCommand, title: 'conflicting replay' },
+				'Bearer fixture'
+			),
+			error => error.status === 409
+		);
+		const statusCommand = {
+			schemaVersion: 1,
+			workspaceId: access.workspaceId,
+			commandId: randomUUID(),
+			expectedVersion: 1,
+			status: 'IN_PROGRESS'
+		};
+		const started = await workday.status(
+			access,
+			standalone.task.id,
+			statusCommand,
+			'Bearer fixture'
+		);
+		assert.equal(started.task.status, 'IN_PROGRESS');
+		assert.equal(started.task.dueAt, standalone.task.dueAt);
+		assert.equal(
+			started.task.assignedToSubject,
+			standalone.task.assignedToSubject
+		);
+		assert.deepEqual(
+			await workday.status(
+				access,
+				standalone.task.id,
+				statusCommand,
+				'Bearer fixture'
+			),
+			started
+		);
+		const competing = await Promise.allSettled([
+			workday.edit(
+				access,
+				standalone.task.id,
+				{
+					...statusCommand,
+					commandId: randomUUID(),
+					expectedVersion: 2,
+					title: workdayPrefix,
+					dueAt: '2026-09-08T10:00:00.000Z'
+				},
+				'Bearer fixture'
+			),
+			workday.status(
+				access,
+				standalone.task.id,
+				{
+					...statusCommand,
+					commandId: randomUUID(),
+					expectedVersion: 2,
+					status: 'COMPLETED'
+				},
+				'Bearer fixture'
+			)
+		]);
+		assert.equal(
+			competing.filter(result => result.status === 'fulfilled').length,
+			1
+		);
+		assert.equal(
+			competing.find(result => result.status === 'rejected').reason.status,
+			409
+		);
+		const currentStandalone = (
+			await workday.detail(access, standalone.task.id)
+		).task;
+		const assignment = {
+			schemaVersion: 1,
+			workspaceId: access.workspaceId,
+			commandId: randomUUID(),
+			expectedVersion: currentStandalone.version,
+			assignee: {
+				subject: 'workday-manager',
+				membershipId: managerMembership
+			}
+		};
+		allowAssignee = false;
+		await assert.rejects(
+			workday.assign(
+				access,
+				standalone.task.id,
+				assignment,
+				'Bearer fixture'
+			),
+			error => error.status === 404
+		);
+		assert.equal(
+			(await workday.detail(access, standalone.task.id)).task.version,
+			currentStandalone.version
+		);
+		allowAssignee = true;
+		const assigned = await workday.assign(
+			access,
+			standalone.task.id,
+			assignment,
+			'Bearer fixture'
+		);
+		assert.equal(assigned.task.assignedToSubject, 'workday-manager');
+		assert.equal(assigned.task.assignedToMembershipId, managerMembership);
+		workdayActor = {
+			...access,
+			subject: 'workday-manager',
+			role: 'MANAGER',
+			dataScope: 'OWN'
+		};
+		const managerQuery = Object.assign(new WorkdayQuery(), {
+			workspaceId: access.workspaceId,
+			period: 'ALL',
+			search: workdayPrefix
+		});
+		assert.equal(
+			(await workday.list(workdayActor, managerQuery)).total,
+			1
+		);
+		await assert.rejects(
+			workday.detail(
+				{ ...workdayActor, subject: 'unrelated-manager' },
+				standalone.task.id
+			),
+			error => error.status === 404
+		);
+		await assert.rejects(
+			workday.list(workdayActor, { ...managerQuery, scope: 'ALL' }),
+			error => error.status === 403
+		);
+		await assert.rejects(
+			workday.detail(
+				{ ...access, workspaceId: foreignWorkspace },
+				standalone.task.id
+			),
+			error => error.status === 404
+		);
+		workdayActor = { ...access, state: 'READ_ONLY' };
+		await assert.rejects(
+			workday.status(
+				workdayActor,
+				standalone.task.id,
+				{
+					...statusCommand,
+					commandId: randomUUID(),
+					expectedVersion: assigned.task.version
+				},
+				'Bearer fixture'
+			),
+			error => error.status === 403
+		);
+		workdayActor = access;
+		const linkedDeal = await service.create(
+			access,
+			{
+				...command,
+				commandId: randomUUID(),
+				title: 'Workday linked deal'
+			},
+			'Bearer fixture'
+		);
+		const originalTask = await prisma.salesTask.findUniqueOrThrow({
+			where: { id: linkedDeal.deal.nextTask.id }
+		});
+		assert.equal(
+			originalTask.assignedToMembershipId,
+			null,
+			'Do not invent legacy Identity binding'
+		);
+		const linked = await workday.create(
+			access,
+			{
+				...taskCommand,
+				commandId: randomUUID(),
+				dealId: linkedDeal.deal.id
+			},
+			'Bearer fixture'
+		);
+		assert.equal(
+			(await service.detail(access, linkedDeal.deal.id)).deal.nextTask.id,
+			originalTask.id,
+			'Creating a parallel task preserves the selected action'
+		);
+		await assert.rejects(
+			workday.assign(
+				access,
+				linked.task.id,
+				{
+					...assignment,
+					commandId: randomUUID(),
+					expectedVersion: linked.task.version
+				},
+				'Bearer fixture'
+			),
+			error => error.status === 403,
+			'An assignee must not gain unrelated deal history'
+		);
+		await workday.status(
+			access,
+			originalTask.id,
+			{
+				...statusCommand,
+				commandId: randomUUID(),
+				expectedVersion: originalTask.version,
+				status: 'COMPLETED'
+			},
+			'Bearer fixture'
+		);
+		assert.equal(
+			(await service.detail(access, linkedDeal.deal.id)).deal.nextTask.id,
+			linked.task.id
+		);
+		const completedLinked = await workday.status(
+			access,
+			linked.task.id,
+			{
+				...statusCommand,
+				commandId: randomUUID(),
+				expectedVersion: linked.task.version,
+				status: 'COMPLETED'
+			},
+			'Bearer fixture'
+		);
+		assert.equal(
+			(await service.detail(access, linkedDeal.deal.id)).deal.nextTask,
+			null,
+			'Completing the last task does not force creation of another'
+		);
+		const reopened = await workday.status(
+			access,
+			linked.task.id,
+			{
+				...statusCommand,
+				commandId: randomUUID(),
+				expectedVersion: completedLinked.task.version,
+				status: 'IN_PROGRESS'
+			},
+			'Bearer fixture'
+		);
+		assert.equal(
+			(await service.detail(access, linkedDeal.deal.id)).deal.nextTask.id,
+			linked.task.id
+		);
+		const cancelled = await workday.status(
+			access,
+			linked.task.id,
+			{
+				...statusCommand,
+				commandId: randomUUID(),
+				expectedVersion: reopened.task.version,
+				status: 'CANCELLED'
+			},
+			'Bearer fixture'
+		);
+		assert.equal(cancelled.task.status, 'CANCELLED');
+		const listQuery = Object.assign(new WorkdayQuery(), {
+			workspaceId: access.workspaceId,
+			scope: 'ALL',
+			period: 'DAY',
+			from: '2026-09-07',
+			timeZone: 'Europe/Moscow',
+			search: workdayPrefix,
+			pageSize: 1
+		});
+		const day = await workday.list(access, listQuery);
+		assert.equal(day.items.length, 1);
+		assert.equal(day.counts.CANCELLED, 1);
+		assert.equal(
+			day.total,
+			Object.values(day.counts).reduce((sum, count) => sum + count, 0)
+		);
+		assert.deepEqual(day.range, {
+			from: '2026-09-06T21:00:00.000Z',
+			until: '2026-09-07T21:00:00.000Z'
+		});
+		const history = await workday.timeline(access, linked.task.id, {
+			page: 1,
+			pageSize: 1
+		});
+		assert.equal(history.total, 4);
+		assert.equal(history.items.length, 1);
+		await assert.rejects(
+			prisma.taskCommandReceipt.create({
+				data: {
+					commandId: randomUUID(),
+					workspaceId: foreignWorkspace,
+					actorSubject: 'foreign',
+					commandType: 'CREATED',
+					requestHash: 'a'.repeat(64),
+					taskId: standalone.task.id,
+					result: {}
+				}
+			}),
+			error => error?.code === 'P2003'
+		);
+		for (const table of ['task_command_receipts', 'task_timeline']) {
+			await assert.rejects(
+				prisma.$executeRawUnsafe(
+					`UPDATE crm_sales.${table} SET workspace_id=workspace_id WHERE FALSE`
+				),
+				error => error?.meta?.code === '42501'
+			);
+			await assert.rejects(
+				prisma.$executeRawUnsafe(
+					`DELETE FROM crm_sales.${table} WHERE FALSE`
+				),
+				error => error?.meta?.code === '42501'
+			);
+		}
 	}
 	console.log(
 		'CRM Sales PostgreSQL 18 workflow, tenant scope, replay, CAS and next-action invariants passed'

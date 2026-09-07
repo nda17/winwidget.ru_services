@@ -161,16 +161,54 @@ model SalesTask {
   status            SalesTaskStatus       @default(OPEN)
   assignedToSubject String                @map("assigned_to_subject") @db.VarChar(256)
   completedAt       DateTime?             @map("completed_at")
+  assignedToMembershipId String?          @map("assigned_to_membership_id") @db.Uuid
+  teamId            String?               @map("team_id") @db.Uuid
   createdAt         DateTime              @default(now()) @map("created_at")
   updatedAt         DateTime              @updatedAt @map("updated_at")
   deal              Deal?                 @relation("DealTasks", fields: [dealId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
   selectedFor       Deal[]                @relation("DealNextTask")
   intakeOperations  IntakeOperationSlot[] @relation("IntakeFirstTask")
+  commands          TaskCommandReceipt[]
+  timeline          TaskTimeline[]
 
+  @@unique([id, workspaceId])
   @@unique([id, dealId, workspaceId])
   @@index([workspaceId, status, dueAt])
+  @@index([workspaceId, teamId, status, dueAt, id], map: "tasks_team_workday_idx")
   @@index([workspaceId, assignedToSubject, status, dueAt, id], map: "tasks_assignee_workday_idx")
   @@map("tasks")
+  @@schema("crm_sales")
+}
+
+model TaskCommandReceipt {
+  commandId    String   @id @map("command_id") @db.Uuid
+  workspaceId  String   @map("workspace_id") @db.Uuid
+  actorSubject String   @map("actor_subject") @db.VarChar(256)
+  commandType  String   @map("command_type") @db.VarChar(32)
+  requestHash  String   @map("request_hash") @db.Char(64)
+  taskId       String   @map("task_id") @db.Uuid
+  result       Json
+  createdAt    DateTime @default(now()) @map("created_at")
+  task         SalesTask @relation(fields: [taskId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
+
+  @@map("task_command_receipts")
+  @@schema("crm_sales")
+}
+
+model TaskTimeline {
+  id           String   @id @default(uuid()) @db.Uuid
+  workspaceId  String   @map("workspace_id") @db.Uuid
+  taskId       String   @map("task_id") @db.Uuid
+  commandId    String   @unique @map("command_id") @db.Uuid
+  actorSubject String   @map("actor_subject") @db.VarChar(256)
+  kind         String   @db.VarChar(32)
+  before       Json?
+  after        Json
+  createdAt    DateTime @default(now()) @map("created_at")
+  task         SalesTask @relation(fields: [taskId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
+
+  @@index([workspaceId, taskId, createdAt, id])
+  @@map("task_timeline")
   @@schema("crm_sales")
 }
 

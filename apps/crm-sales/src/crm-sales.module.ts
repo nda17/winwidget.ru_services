@@ -18,6 +18,9 @@ import { IntakeOperationClient } from './intake-operations/intake-operation.clie
 import { IntakeOperationGuard } from './intake-operations/intake-operation.guard';
 import { IntakeOperationController } from './intake-operations/intake-operation.controller';
 import { IntakeOperationService } from './intake-operations/intake-operation.service';
+import { WorkdayController } from './workday/workday.controller';
+import { WorkdayService } from './workday/workday.service';
+import { SalesAssigneeClient } from './workday/sales-assignee.client';
 
 @Module({
 	imports: [
@@ -29,6 +32,7 @@ import { IntakeOperationService } from './intake-operations/intake-operation.ser
 		PipelineTemplateCatalogController,
 		PipelineTemplateInstallationController,
 		SalesController,
+		WorkdayController,
 		SalesExportController,
 		IntakeOperationController
 	],
@@ -38,6 +42,8 @@ import { IntakeOperationService } from './intake-operations/intake-operation.ser
 		PipelineTemplateCatalogService,
 		PipelineTemplateInstallationService,
 		SalesService,
+		WorkdayService,
+		SalesAssigneeClient,
 		SalesExportService,
 		SalesAccessClient,
 		SalesAccessGuard,

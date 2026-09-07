@@ -52,8 +52,17 @@ export class CrmSalesHealthService {
 					select: { id: true, nextTaskId: true, version: true }
 				}),
 				this.prisma.salesTask.findFirst({
-					select: { id: true, version: true }
+					select: {
+						id: true,
+						version: true,
+						assignedToMembershipId: true,
+						teamId: true
+					}
 				}),
+				this.prisma.taskCommandReceipt.findFirst({
+					select: { commandId: true }
+				}),
+				this.prisma.taskTimeline.findFirst({ select: { id: true } }),
 				this.prisma.dealTimeline.findFirst({ select: { id: true } }),
 				this.prisma.salesCommandReceipt.findFirst({
 					select: { commandId: true }

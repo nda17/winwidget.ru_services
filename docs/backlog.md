@@ -332,7 +332,7 @@ scoped directory и отдельного Sales command contract.
   доступ прежним участникам без ФИО и fallback имени/email без изменения
   глобального профиля Identity. Не считать source/CI достаточным production proof.
 - Выпустить Identity assignee-directory и Access team/assignees вместе с точными
-  private routes; подключить frontend selector и Sales authorize-assignee client.
+  private routes; подключить frontend selector и выпустить Sales authorize-assignee client.
   Сохранять subject/membership binding; текущий недоступный ответственный не
   заменяется автоматически. Проверить в браузере поиск/пагинацию, владельца без
   CRM-member строки и отзыв membership. Не раскрывать административный список
@@ -361,9 +361,11 @@ scoped directory и отдельного Sales command contract.
   сделки. Привязка к сделке необязательна; прежние связи/назначения остаются.
   До включения нового workflow выпустить расширение Sales schema и совместимые
   readers: nullable dealId, IN_PROGRESS, несколько/ноль активных действий и
-  корректный next-action pointer. Реализовать отдельный scoped workday API,
-  команды/CAS/receipt для standalone и завершения без обязательного следующего
-  действия. Старый endpoint завершения по-прежнему создаёт следующее действие;
+  корректный next-action pointer. Выпустить scoped workday API/команды,
+  migration `20260907140000_add_workday_commands` и append-only runtime grants;
+  подключить UI standalone/статуса/срока/назначения, проверить production
+  CAS/replay и завершение без обязательного следующего действия.
+  Старый endpoint завершения по-прежнему создаёт следующее действие;
   его команды/receipts не переписываются. Закрытие сделки не затрагивает
   standalone; fake deal, чужая БД и автоматическое переназначение запрещены.
   Не включать новые writers на старом Sales runtime/необновлённых readers;

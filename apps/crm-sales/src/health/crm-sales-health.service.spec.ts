@@ -35,6 +35,8 @@ describe('CrmSalesHealthService', () => {
 			pipelineStage: { findFirst: jest.fn().mockResolvedValue(null) },
 			deal: { findFirst: jest.fn().mockResolvedValue(null) },
 			salesTask: { findFirst: jest.fn().mockResolvedValue(null) },
+			taskCommandReceipt: { findFirst: jest.fn().mockResolvedValue(null) },
+			taskTimeline: { findFirst: jest.fn().mockResolvedValue(null) },
 			dealTimeline: { findFirst: jest.fn().mockResolvedValue(null) },
 			salesCommandReceipt: {
 				findFirst: jest.fn().mockResolvedValue(null)
@@ -78,6 +80,20 @@ describe('CrmSalesHealthService', () => {
 			status: 'ready',
 			service: 'crm-sales'
 		});
+		expect(prisma.salesTask.findFirst).toHaveBeenCalledWith({
+			select: {
+				id: true,
+				version: true,
+				assignedToMembershipId: true,
+				teamId: true
+			}
+		});
+		expect(prisma.taskCommandReceipt.findFirst).toHaveBeenCalledWith({
+			select: { commandId: true }
+		});
+		expect(prisma.taskTimeline.findFirst).toHaveBeenCalledWith({
+			select: { id: true }
+		});
 		expect(prisma.pipeline.findFirst).toHaveBeenCalledWith({
 			select: { id: true }
 		});
@@ -91,6 +107,19 @@ describe('CrmSalesHealthService', () => {
 			prisma.pipelineTemplateInstallationCommand.findFirst
 		).toHaveBeenCalledWith({ select: { commandId: true } });
 	});
+
+	it.each(['taskCommandReceipt', 'taskTimeline'] as const)(
+		'refuses readiness without %s permissions/schema',
+		async table => {
+			const prisma = createPrisma();
+			(prisma[table].findFirst as jest.Mock).mockRejectedValue(
+				new Error('permission denied')
+			);
+			await expect(
+				new CrmSalesHealthService(prisma).readiness()
+			).rejects.toBeInstanceOf(ServiceUnavailableException);
+		}
+	);
 
 	it('fails readiness for another service database', async () => {
 		const service = new CrmSalesHealthService(

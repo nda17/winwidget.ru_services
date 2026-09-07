@@ -154,15 +154,72 @@ commit с некорректным next action и append-only ACL. Требую�
 выбранное действие, не завершает параллельные задачи и не принимает standalone.
 Переход между OPEN-этапами заменяет только выбранное действие; переход в WON/LOST
 или архивирование закрывает весь активный набор данной сделки. `GET /tasks`
-пока сохраняет старый deal-bound список OPEN; самостоятельные задачи, новые
-фильтры/доска и их команды требуют отдельного scoped workday API.
+сохраняет старый deal-bound список OPEN; новый workday API ниже обслуживает
+самостоятельные задачи и новые фильтры без подмены прежнего контракта.
 
-Это расширение хранилища и совместимых readers, не готовый пользовательский
-workflow. До включения новых writers необходимо выпустить совместимые frontend
-readers (`IN_PROGRESS`, отсутствие next action), миграции и Sales runtime;
+До включения новых writers необходимо выпустить совместимые frontend
+readers (`IN_PROGRESS`, отсутствие next action, независимый ответственный задачи), миграции и Sales runtime;
 старые открытые страницы должны обновиться. Нельзя откатывать к старому Sales
 runtime после появления новых состояний: старый код считает активным только
 OPEN. Напоминания/назначения/повторы ещё не публикуют события из этого изменения.
+
+### Workday API и команды задач
+
+Prefix: `/api/v1/crm/sales/workday/tasks`. Все endpoints проверяют исходный
+пользовательский Bearer через Access; `workspaceId` обязателен.
+
+- `GET /` — `page`, `pageSize` (1–100), `search`, `scope: MINE|TEAM|ALL`
+  (по умолчанию MINE), optional `teamId`, `assigneeSubject`, `status`.
+  `period: TODAY|TOMORROW|WEEK|DAY|RANGE|ALL|OVERDUE` (TODAY по умолчанию),
+  явный IANA `timeZone` (по умолчанию Europe/Moscow). DAY требует `from`, RANGE
+  требует `from`/`to` формата YYYY-MM-DD; обе даты включены. Неделя — пн–вс.
+  Границы вычисляет сервер, включая 23/25-часовые и пропущенные календарные дни.
+  Ответ содержит `workspaceId`, `subject`, `page`, `pageSize`, `total`, `items`,
+  `counts` по четырём статусам, отдельный `overdueCount`, `asOf`, `timeZone`,
+  `range: {from,until}|null` (until исключён). Counts соблюдают scope/search/период,
+  но не отдельный status; overdueCount соблюдает scope/search по всем датам.
+  Фильтрация предшествует пагинации; все запросы одной REPEATABLE READ snapshot.
+- `GET /:id`, `GET /:id/timeline` — текущая scoped задача и серверная пагинация
+  собственного журнала. Исторический журнал legacy задач не выдумывается.
+- `POST /` — `{schemaVersion:1,commandId,workspaceId,title,dueAt,dealId?,teamId?,
+assignee:{subject,membershipId}}`. UI должен по умолчанию выбрать свежий
+  binding создателя; явное назначение допустимо только в пределах Access authority.
+- `POST /:id/edit` — базовая команда + `expectedVersion`, `title`, `dueAt`.
+- `POST /:id/status` — базовая команда + `expectedVersion`, `status`:
+  OPEN/IN_PROGRESS/COMPLETED/CANCELLED. Не меняет срок/назначение и не создаёт
+  следующую задачу автоматически; CANCELLED не считается завершённой работой.
+- `POST /:id/assignee` — базовая команда + `expectedVersion`, `assignee`.
+  Все POST требуют `Idempotency-Key === commandId`, возвращают `{schemaVersion:1,task}`.
+
+Workday task содержит nullable `dealId`, nullable `assignedToMembershipId`
+(неизвестен для legacy задач), эффективный `teamId`, версию, название, срок,
+статус, subject ответственного и даты. Старый task DTO не расширяется.
+Самостоятельная задача существует без fake Deal. Связанная задача наследует
+актуальную видимость/отдел сделки; получатель должен иметь доступ к ней,
+назначение не открывает прежнюю историю. Для standalone действует OWN/TEAM/ALL;
+TEAM_LEAD может делегировать не личную безотдельную, а задачу своего отдела.
+ANALYST не получает операционные задачи, READ_ONLY разрешает только чтение.
+Закрытая/архивная сделка не допускает новые изменения её задач.
+
+Миграция `20260907140000_add_workday_commands` добавляет nullable поля без
+переназначения данных и собственные append-only `task_command_receipts` /
+`task_timeline` (runtime SELECT/INSERT). Команда, audit и receipt атомарны;
+SERIALIZABLE retry заново проверяет actor authority, запись защищена CAS.
+Перед новым назначением — uncached `authorize-assignee` с exact binding и
+повторной actor authority; отказ/timeout не подменяется локальным разрешением.
+Межсервисная проверка не является распределённой блокировкой Identity.
+Replay требует актуальной видимости записи и возвращает неизменённый результат;
+старые `command_receipts` не переписываются. Рабочая запись не удаляется.
+При завершении выбранной задачи pointer переключается на существующую активную
+задачу либо null. Все изменения связанной задачи инкрементируют версию сделки,
+чтобы старые команды не перезаписали конкурентный workflow.
+
+Release order: совместимые Identity/Access endpoints → migration/runtime grants
+Sales → совместимые readers/новый Sales runtime → Workday UI. Health readiness
+проверяет новые колонки и обе таблицы. Сам UI/доска, напоминания, повторяющиеся
+задачи и асинхронные уведомления требуют отдельного rollout; этот API пока
+не публикует события RabbitMQ. Перед их включением команда обязана атомарно
+создавать Outbox вместе с изменением задачи, а consumer — обеспечивать retry/receipt.
 
 ## Локальные проверки
 
