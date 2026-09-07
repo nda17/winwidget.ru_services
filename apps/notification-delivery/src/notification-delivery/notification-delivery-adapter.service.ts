@@ -109,7 +109,7 @@ export class NotificationDeliveryAdapterService {
 				else
 					await this.telegram.sendMessage(
 						context.destination.telegramChatId!,
-						`Напоминание о задаче WinCRM\n${context.content.title}\nСрок: ${new Date(context.content.dueAt).toLocaleString('ru-RU', { timeZone: context.content.timeZone })} (${context.content.timeZone})\nhttps://crm.winwidget.ru/tasks/${context.content.taskId}`,
+						`Напоминание о задаче WinCRM\n${context.content.title}\nСрок: ${new Date(context.content.dueAt).toLocaleString('ru-RU', { timeZone: context.content.timeZone })} (${context.content.timeZone})\nhttps://crm.winwidget.ru/planner?task=${context.content.taskId}`,
 						{ parseMode: null }
 					);
 				return;

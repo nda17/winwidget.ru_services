@@ -84,7 +84,9 @@ ACK выполняется только после коммита. Retry token �
 При `deliver:true` актуальный PROCESSING/lockToken/lease проверяется перед
 вызовом транспорта. Email использует общий EmailLayout и стабильный
 Message-ID, Telegram — plain text (`parseMode:null`). Ссылка только
-`https://crm.winwidget.ru/tasks/:taskId`; она не предоставляет права доступа.
+`https://crm.winwidget.ru/planner?task=:taskId`; она не предоставляет права
+доступа и не переключает рабочее пространство. Планировщик получает задачу
+через текущие серверные права, включая режим только для чтения.
 Проверка eligibility не блокирует распределённо изменения после ответа;
 отозвать уже принятое провайдером сообщение нельзя. Crash после provider
 accept и до receipt допускает редкий дубль, не обещается exactly-once.

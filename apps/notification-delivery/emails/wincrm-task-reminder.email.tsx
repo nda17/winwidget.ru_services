@@ -19,7 +19,7 @@ export default function WincrmTaskReminderEmail({
 			title="Напоминание о задаче"
 			subtitle={`Срок: ${dueAtLabel} (${timeZone})`}
 			actionLabel="Открыть задачу"
-			actionHref={`https://crm.winwidget.ru/tasks/${taskId}`}
+			actionHref={`https://crm.winwidget.ru/planner?task=${taskId}`}
 		>
 			<Text className="ww-primary-text">{title}</Text>
 			<Text className="ww-secondary-text">

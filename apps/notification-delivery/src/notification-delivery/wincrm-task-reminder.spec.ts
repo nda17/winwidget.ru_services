@@ -323,7 +323,7 @@ describe('Task reminder adapter uses fresh context and current lease (fake trans
 				subject: 'Напоминание о задаче WinCRM',
 				messageId: `<${event.eventId}.wincrm-task-reminder@winwidget.ru>`,
 				html: expect.stringContaining(
-					`href="https://crm.winwidget.ru/tasks/${context().content.taskId}"`
+					`href="https://crm.winwidget.ru/planner?task=${context().content.taskId}"`
 				)
 			})
 		);
@@ -363,6 +363,9 @@ describe('Task reminder adapter uses fresh context and current lease (fake trans
 			{ parseMode: null }
 		);
 		expect(value.sendMail).not.toHaveBeenCalled();
+		expect(value.sendMessage.mock.calls[0][1]).toContain(
+			`https://crm.winwidget.ru/planner?task=${context().content.taskId}`
+		);
 	});
 	it.each([null, { leaseExpiresAt: new Date(0) }])(
 		'never sends after the claim is lost/expired',
