@@ -152,15 +152,9 @@ backend/business gates MVP.
   конкурирующие изменения мест/периода и admission защищаются версиями и
   актуальными межсервисными contracts. Покупка во время Trial начинает
   платный период после окончания Trial, не сокращая его пять дней;
-- синхронно добавить отдельные production tokens Identity/Billing для
-  `crm-access`, не ослабляя обязательную проверку токенов в runtime;
-- синхронно задать одну и ту же сильную пару
-  `CRM_SALES_CRM_ACCESS_TOKEN` в `crm-access` и `crm-sales`; несовпадение или
-  односторонняя ротация блокирует rollout и onboarding;
-- синхронно задать независимые пары `CRM_ACCESS_CRM_CUSTOMERS_TOKEN`,
-  `CRM_ACCESS_CRM_SALES_TOKEN`, `CRM_ACCESS_CRM_INTAKE_TOKEN` у вызывающего
-  сервиса и CRM Access; публичный `/crm/access/permissions` не заменяет
-  свежую независимую backend-авторизацию каждой доменной команды;
+- при запуске проверить реальные caller/receiver пары токенов и независимую
+  backend-авторизацию доменных команд; синхронизированные private env и
+  `/crm/access/permissions` сами по себе не подтверждают работающие HTTP-вызовы;
 - держать публичные CRM routes закрытыми до согласованного применения Billing
   provenance migration/runtime и `crm-access` migration/runtime: новый exact
   Billing-контракт несовместим со старым parser, а новые Billing `NOT NULL`
@@ -244,34 +238,28 @@ Access — API/worker/publisher; Intake — API, три workers и три publis
 Customers и Sales — по API. Требуется запустить эти 12 application containers
 поверх четырёх owner PostgreSQL, без постоянных migration/release jobs.
 Перед запуском обязательны CRM-only controller, проверка фактических OCI
-revisions, provisioning broker credentials и measured memory/CPU caps.
+revisions, аутентификация runtime с выданными broker credentials и measured memory/CPU caps.
 Shape validator не подтверждает capacity и не разрешает rollout. Routine
 backend controller проверяет контейнеры своего project `winwidget`, но
-RabbitMQ users — глобально: перед первым provisioning выпустить controller
-с точным `CRM_RABBITMQ_CONTRACT=disabled|mvp-v1` и согласованно включить
-`mvp-v1` под общим deploy lock после создания восьми CRM process principals
-и отдельного `winwidget-billing-wincrm-provider-worker`, их ACL/bindings.
+RabbitMQ users — глобально: сохранять точный `CRM_RABBITMQ_CONTRACT=mvp-v1`
+с восемью CRM process principals и отдельным
+`winwidget-billing-wincrm-provider-worker`.
 Платёжный consumer работает внутри существующего Billing worker, без нового
 CRM-сервиса. Полный inventory содержит 25 пользователей, не 24.
-На VPS этот переход ещё не проверен. Не ослаблять inventory до wildcard
-и не возвращать `disabled` при rollback runtime, пока существуют CRM users
-или события. До старта Access worker provisioner создаёт
-три основные team queues, три DLQ и точные event/manual-retry bindings;
-runtime с `CRM_ACCESS_RABBITMQ_ASSERT_TOPOLOGY=false` получает только read
-на основные очереди, без configure/write. Подтвердить этот контракт на
-целевом брокере, включая reconnect и fail-closed при отсутствующей очереди.
-Подключить AMQP-компонент `infra/scripts/crm-broker-topology.mjs` к реальному
-controller: shared lock/env/image fence, provision scoped users/ACL и безопасный
-private transport остаются обязательными. Отдельный metadata/provisioning
-тест не заменяет эти gates или проверку бизнес-сообщений на production.
+Не ослаблять inventory до wildcard и не возвращать `disabled` при rollback
+runtime, пока существуют CRM users или события. Runtime с
+`CRM_ACCESS_RABBITMQ_ASSERT_TOPOLOGY=false` получает только read на основные
+очереди, без configure/write. Проверить runtime reconnect, fail-closed при
+отсутствующей очереди и обработку бизнес-сообщений с реальными credentials;
+успешный provisioning не заменяет эти проверки.
 Перед запуском приглашений/оплаты проверить полный companion-контракт:
 Identity publisher должен иметь два точных routes принятия/письма приглашения,
 Notification Delivery — opt-in reader `wincrm-invitation-email` с прежними kinds,
 Billing publisher — provider-operation route и write на отдельный provider DLQ
 exchange. Новый Billing provider principal получает только read своей основной
 очереди; queue/DLQ/bindings создаёт provisioner, без TTL retry.
-Перед применением подготовленного companion Compose согласованно
-синхронизировать canonical/service env и exact runtime revisions:
+При применении подготовленного companion Compose сверить фактические
+process env и exact runtime revisions:
 provider URL только Billing worker, private tokens только нужным caller/receiver,
 email flag только после готовности reader. Перед платным release включить
 `BILLING_WINCRM_RECONCILIATION_ENABLED` у worker/scheduler и сохранять его
