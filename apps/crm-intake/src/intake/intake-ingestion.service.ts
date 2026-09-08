@@ -14,6 +14,7 @@ import { IntakeAuthorizationClient } from '../access/intake-authorization.client
 import { CrmIntakePrismaService } from '../prisma/crm-intake-prisma.service';
 import { IngestInboxEntryDto } from './intake.dto';
 import { hashIntakeSourceToken } from './intake.service';
+import { normalizeTildaPayload } from './tilda-payload';
 
 const UUID =
 	/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -121,6 +122,89 @@ export class IntakeIngestionService {
 		private readonly limits: IntakeIngestionRateLimiter
 	) {}
 
+	async ingestTilda(
+		sourceId: string,
+		token: string | undefined,
+		body: unknown,
+		peerIp: string
+	) {
+		// Use the same credential, permissions, receipts and transaction as API sources.
+		const authorization = token ? `Bearer ${token}` : undefined;
+		const tokenHash = sourceTokenHash(authorization);
+		const normalized = normalizeTildaPayload(sourceId, body);
+		if (normalized.kind === 'lead')
+			return this.ingest(
+				sourceId,
+				authorization,
+				normalized.commandId,
+				normalized.dto,
+				peerIp
+			);
+		this.limits.preauthenticate(peerIp);
+		try {
+			const source = await this.authorizeSource(
+				sourceId,
+				tokenHash,
+				peerIp
+			);
+			const current = await this.prisma.intakeSource.findUnique({
+				where: { id: source.id }
+			});
+			this.assertCurrentSource(current, source, tokenHash);
+			// Tilda's connection probe must not create an entry, audit or receipt.
+			return { schemaVersion: 1 as const, connected: true };
+		} catch (error) {
+			if (error instanceof HttpException) throw error;
+			throw new ServiceUnavailableException(
+				'Intake connection could not be confirmed'
+			);
+		}
+	}
+
+	private async authorizeSource(
+		sourceId: string,
+		tokenHash: string,
+		peerIp: string
+	) {
+		const source = await this.prisma.intakeSource.findUnique({
+			where: { id: sourceId }
+		});
+		if (!matchesSource(source, tokenHash))
+			throw new UnauthorizedException(AUTH_ERROR);
+		await this.limits.consume(source.id, peerIp);
+		// Every replay and connection probe checks the current delegate's authority.
+		const context = await this.authorization.authorizeSource(
+			source.workspaceId,
+			source.createdBySubject
+		);
+		if (
+			context.subject !== source.createdBySubject ||
+			context.workspaceId !== source.workspaceId ||
+			context.state === 'READ_ONLY' ||
+			!['OWNER', 'CRM_ADMIN'].includes(context.role) ||
+			!context.permissions.includes('intake:manage-sources') ||
+			(source.teamId !== null && !context.teamIds.includes(source.teamId))
+		)
+			throw new ForbiddenException('Source authority is no longer active');
+		return source;
+	}
+
+	private assertCurrentSource(
+		current: IntakeSource | null,
+		source: IntakeSource,
+		tokenHash: string
+	) {
+		if (
+			!matchesSource(current, tokenHash) ||
+			current.tokenVersion !== source.tokenVersion ||
+			current.version !== source.version ||
+			current.workspaceId !== source.workspaceId ||
+			current.createdBySubject !== source.createdBySubject ||
+			current.teamId !== source.teamId
+		)
+			throw new UnauthorizedException(AUTH_ERROR);
+	}
+
 	async ingest(
 		sourceId: string,
 		authorization: string | undefined,
@@ -139,29 +223,11 @@ export class IntakeIngestionService {
 				'Source and Idempotency-Key must be UUID v4'
 			);
 		try {
-			const source = await this.prisma.intakeSource.findUnique({
-				where: { id: sourceId }
-			});
-			if (!matchesSource(source, tokenHash))
-				throw new UnauthorizedException(AUTH_ERROR);
-			await this.limits.consume(source.id, peerIp);
-			// Every replay is freshly authorized. A durable source is not a durable user session.
-			const context = await this.authorization.authorizeSource(
-				source.workspaceId,
-				source.createdBySubject
+			const source = await this.authorizeSource(
+				sourceId,
+				tokenHash,
+				peerIp
 			);
-			if (
-				context.subject !== source.createdBySubject ||
-				context.workspaceId !== source.workspaceId ||
-				context.state === 'READ_ONLY' ||
-				!['OWNER', 'CRM_ADMIN'].includes(context.role) ||
-				!context.permissions.includes('intake:manage-sources') ||
-				(source.teamId !== null &&
-					!context.teamIds.includes(source.teamId))
-			)
-				throw new ForbiddenException(
-					'Source authority is no longer active'
-				);
 			const payload = {
 				title: dto.title.trim(),
 				name: dto.name.trim(),
@@ -188,15 +254,7 @@ export class IntakeIngestionService {
 							const current = await tx.intakeSource.findUnique({
 								where: { id: source.id }
 							});
-							if (
-								!matchesSource(current, tokenHash) ||
-								current.tokenVersion !== source.tokenVersion ||
-								current.version !== source.version ||
-								current.workspaceId !== source.workspaceId ||
-								current.createdBySubject !== source.createdBySubject ||
-								current.teamId !== source.teamId
-							)
-								throw new UnauthorizedException(AUTH_ERROR);
+							this.assertCurrentSource(current, source, tokenHash);
 							const receipt = await tx.inboundReceipt.findUnique({
 								where: {
 									sourceId_externalCommandId: {

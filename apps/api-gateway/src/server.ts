@@ -32,9 +32,28 @@ import { logger as defaultLogger, type StructuredLogger } from './logger';
 const REFRESH_COOKIE_NAME = 'refreshToken';
 const CRM_SOURCE_INGEST_PATH =
 	/^\/api\/v1\/crm\/intake\/ingest\/[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const CRM_TILDA_SOURCE_INGEST_PATH =
+	/^\/api\/v1\/crm\/intake\/ingest\/[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\/tilda$/;
 const isCanonicalSourceToken = (token: string): boolean =>
 	/^[A-Za-z0-9_-]{43}$/.test(token) &&
 	Buffer.from(token, 'base64url').toString('base64url') === token;
+const readTildaSourceToken = (
+	rawHeaders: readonly string[]
+): string | undefined => {
+	let token: string | undefined;
+	for (let index = 0; index < rawHeaders.length; index += 2) {
+		const name = rawHeaders[index]?.toLowerCase();
+		if (name === 'authorization')
+			throw new JwtValidationError('Invalid source credential');
+		if (name !== 'x-wincrm-source-token') continue;
+		if (token !== undefined)
+			throw new JwtValidationError('Multiple source credentials');
+		token = rawHeaders[index + 1];
+		if (!token || !isCanonicalSourceToken(token))
+			throw new JwtValidationError('Invalid source credential');
+	}
+	return token;
+};
 const REFRESH_COOKIE_PATHS = new Set([
 	'/api/v1/auth/refresh',
 	'/api/v1/auth/logout'
@@ -589,6 +608,7 @@ const createUpstreamHeaders = (
 			lowerName.startsWith('x-forwarded-') ||
 			lowerName.startsWith('x-user') ||
 			lowerName.startsWith('x-auth') ||
+			lowerName === 'x-wincrm-source-token' ||
 			lowerName === 'x-winwidget-internal-token' ||
 			lowerName.startsWith('x-internal-')
 		) {
@@ -951,13 +971,18 @@ export const createGateway = (
 			}
 			routeId = route.id;
 			const sourceAuthentication = route.authPolicy === 'crm-source';
+			const tildaSourceAuthentication =
+				sourceAuthentication &&
+				CRM_TILDA_SOURCE_INGEST_PATH.test(target.rawPath);
 			// This is a deliberately narrow service-owned credential boundary, not
 			// a configurable way to bypass JWT checks on arbitrary API routes.
 			if (
 				sourceAuthentication &&
 				(route.pathPrefix !== CRM_SOURCE_INGEST_PREFIX ||
-					!CRM_SOURCE_INGEST_PATH.test(target.rawPath) ||
-					(request.method !== 'POST' && request.method !== 'OPTIONS'))
+					(!CRM_SOURCE_INGEST_PATH.test(target.rawPath) &&
+						!tildaSourceAuthentication) ||
+					(request.method !== 'POST' &&
+						(tildaSourceAuthentication || request.method !== 'OPTIONS')))
 			) {
 				sendError(
 					request,
@@ -1035,10 +1060,14 @@ export const createGateway = (
 			}
 
 			let bearerToken: string | undefined;
+			let tildaSourceToken: string | undefined;
 			try {
-				bearerToken = readBearerAuthorization(request.rawHeaders);
+				if (tildaSourceAuthentication)
+					tildaSourceToken = readTildaSourceToken(request.rawHeaders);
+				else bearerToken = readBearerAuthorization(request.rawHeaders);
 				if (
 					!bearerToken &&
+					!tildaSourceToken &&
 					(route.authPolicy === 'required' || sourceAuthentication) &&
 					request.method !== 'OPTIONS'
 				) {
@@ -1128,6 +1157,8 @@ export const createGateway = (
 						: request.headers.authorization
 					: undefined
 			);
+			if (tildaSourceToken)
+				upstreamHeaders['x-wincrm-source-token'] = tildaSourceToken;
 			const useTls = route.upstreamUrl.protocol === 'https:';
 			const requestFn = useTls ? httpsRequest : httpRequest;
 			const proxyRequest = requestFn(

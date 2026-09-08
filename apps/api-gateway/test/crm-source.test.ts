@@ -16,14 +16,15 @@ import {
 	createTestRoute,
 	listenServer,
 	makeRequest,
-	signAccessToken,
-	silentLogger
+	signAccessToken
 } from './helpers';
 
 const sourcePath = `${CRM_SOURCE_INGEST_PREFIX}/11111111-1111-4111-8111-111111111111`;
+const tildaPath = `${sourcePath}/tilda`;
 // Synthetic credentials only; no private fixture or production environment.
 const sourceKey = Buffer.alloc(32, 17).toString('base64url');
 const credentials = { authorization: `Bearer ${sourceKey}` };
+const tildaCredentials = { 'x-wincrm-source-token': sourceKey };
 
 describe('WinCRM source credential route configuration', () => {
 	const configFor = (pathPrefix: string) =>
@@ -69,6 +70,7 @@ describe('WinCRM source credential gateway boundary', () => {
 		body: string;
 	}[] = [];
 	let jwksCalls = 0;
+	const logs: unknown[] = [];
 	const upstream = createServer((request, response) => {
 		const chunks: Buffer[] = [];
 		request.on('data', chunk => chunks.push(Buffer.from(chunk)));
@@ -114,7 +116,11 @@ describe('WinCRM source credential gateway boundary', () => {
 				]
 			}),
 			{
-				logger: silentLogger,
+				logger: {
+					log(level, event, fields) {
+						logs.push({ level, event, fields });
+					}
+				},
 				fetch: createJwksFetch(
 					() => [signing.publicJwk],
 					() => true,
@@ -184,6 +190,164 @@ describe('WinCRM source credential gateway boundary', () => {
 			captured.at(-1)!.headers.authorization,
 			credentials.authorization
 		);
+	});
+
+	it('forwards only the Tilda source header and both media types unchanged without JWKS', async () => {
+		const before = jwksCalls;
+		for (const [contentType, body] of [
+			[
+				'application/x-www-form-urlencoded',
+				'Name=Synthetic+lead&formid=form123&tranid=123%3A456'
+			],
+			[
+				'application/json',
+				JSON.stringify({
+					Name: 'Synthetic lead',
+					formid: 'form123',
+					tranid: '123:456'
+				})
+			]
+		]) {
+			const response = await makeRequest(new URL(tildaPath, base), {
+				method: 'POST',
+				headers: {
+					...tildaCredentials,
+					'content-type': contentType,
+					'x-user-id': 'forged-owner',
+					'x-winwidget-internal-token': 'synthetic-forged-internal-token'
+				},
+				body
+			});
+			assert.equal(response.statusCode, 200);
+			const actual = captured.at(-1)!;
+			assert.equal(actual.url, tildaPath);
+			assert.equal(actual.body, body);
+			assert.equal(actual.headers['content-type'], contentType);
+			assert.equal(actual.headers['x-wincrm-source-token'], sourceKey);
+			assert.equal(actual.headers.authorization, undefined);
+			assert.equal(actual.headers['x-user-id'], undefined);
+			assert.equal(
+				actual.headers['x-winwidget-internal-token'],
+				undefined
+			);
+		}
+		assert.equal(jwksCalls, before);
+		assert.ok(!JSON.stringify(logs).includes(sourceKey));
+	});
+
+	it('rejects absent, malformed, duplicate and Bearer Tilda credentials without proxying or logging secrets', async () => {
+		const before = captured.length;
+		const jwksBefore = jwksCalls;
+		for (const headers of [
+			{},
+			credentials,
+			{ ...tildaCredentials, ...credentials },
+			{ authorization: `Bearer ${signAccessToken(signing)}` },
+			{ 'x-wincrm-source-token': '' },
+			{ 'x-wincrm-source-token': `Bearer ${sourceKey}` },
+			{ 'x-wincrm-source-token': `${sourceKey}=` },
+			{ 'x-wincrm-source-token': `${sourceKey.slice(0, -1)}F` },
+			{ 'x-wincrm-source-token': signAccessToken(signing) }
+		]) {
+			const response = await makeRequest(new URL(tildaPath, base), {
+				method: 'POST',
+				headers
+			});
+			assert.equal(response.statusCode, 401);
+		}
+		const duplicateStatus = await new Promise<number>(
+			(resolve, reject) => {
+				const request = httpRequest(
+					new URL(tildaPath, base),
+					{
+						method: 'POST',
+						headers: [
+							'X-WinCRM-Source-Token',
+							sourceKey,
+							'x-wincrm-source-token',
+							sourceKey,
+							'Host',
+							base.host,
+							'Content-Length',
+							'0'
+						]
+					},
+					response => {
+						response.resume();
+						response.once('end', () => resolve(response.statusCode ?? 0));
+					}
+				);
+				request.once('error', reject);
+				request.end();
+			}
+		);
+		assert.equal(duplicateStatus, 401);
+		assert.equal(captured.length, before);
+		assert.equal(jwksCalls, jwksBefore);
+		assert.ok(!JSON.stringify(logs).includes(sourceKey));
+	});
+
+	it('keeps the Tilda route POST-only and rejects query, encoded and nested paths before proxying', async () => {
+		const before = captured.length;
+		for (const [method, path] of [
+			['GET', tildaPath],
+			['OPTIONS', tildaPath],
+			['PUT', tildaPath],
+			['POST', `${tildaPath}/`],
+			['POST', `${tildaPath}/nested`],
+			['POST', `${tildaPath}?token=${sourceKey}`],
+			['POST', tildaPath.replace('/tilda', '/%74ilda')],
+			['POST', tildaPath.replace('4111', '5111')]
+		]) {
+			const response = await makeRequest(new URL(path, base), {
+				method,
+				headers: tildaCredentials
+			});
+			assert.equal(response.statusCode, 404);
+		}
+		assert.equal(captured.length, before);
+		assert.ok(!JSON.stringify(logs).includes(sourceKey));
+	});
+
+	it('never authorizes neighbouring routes or forwards the Tilda credential outside its exact route', async () => {
+		for (const path of [sourcePath, '/api/v1/crm/intake/inbox']) {
+			const before = captured.length;
+			assert.equal(
+				(
+					await makeRequest(new URL(path, base), {
+						method: 'POST',
+						headers: tildaCredentials
+					})
+				).statusCode,
+				401
+			);
+			assert.equal(captured.length, before);
+		}
+		for (const [path, headers] of [
+			[sourcePath, { ...credentials, ...tildaCredentials }],
+			[
+				'/api/v1/crm/intake/inbox',
+				{
+					authorization: `Bearer ${signAccessToken(signing)}`,
+					...tildaCredentials
+				}
+			],
+			['/api/v1/test', tildaCredentials]
+		] as const) {
+			assert.equal(
+				(
+					await makeRequest(new URL(path, base), {
+						method: 'POST',
+						headers
+					})
+				).statusCode,
+				200
+			);
+			assert.equal(
+				captured.at(-1)!.headers['x-wincrm-source-token'],
+				undefined
+			);
+		}
 	});
 
 	it('permits unauthenticated canonical preflight but not an unauthenticated POST', async () => {

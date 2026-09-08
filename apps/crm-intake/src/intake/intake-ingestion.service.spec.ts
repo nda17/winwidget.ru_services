@@ -92,6 +92,100 @@ function setup() {
 }
 
 describe('source-authenticated Intake ingress', () => {
+	it('authenticates the Tilda probe without creating an entry, receipt or audit', async () => {
+		const current = setup();
+		await expect(
+			current.service.ingestTilda(
+				current.source.id,
+				token,
+				{ test: 'test' },
+				'127.0.0.1'
+			)
+		).resolves.toEqual({ schemaVersion: 1, connected: true });
+		expect(current.authorization.authorizeSource).toHaveBeenCalledTimes(1);
+		expect(current.limits.consume).toHaveBeenCalledWith(
+			current.source.id,
+			'127.0.0.1'
+		);
+		expect(current.prisma.$transaction).not.toHaveBeenCalled();
+		expect(current.tx.inboxEntry.create).not.toHaveBeenCalled();
+		expect(current.tx.intakeActivity.create).not.toHaveBeenCalled();
+		expect(current.tx.inboundReceipt.create).not.toHaveBeenCalled();
+	});
+	it('rejects expired authority, revoked/rotated sources and dependency failures for Tilda probes', async () => {
+		const current = setup();
+		const probe = () =>
+			current.service.ingestTilda(
+				current.source.id,
+				token,
+				{ test: 'test' },
+				'127.0.0.1'
+			);
+		current.authorization.authorizeSource.mockResolvedValueOnce({
+			...current.access,
+			state: 'READ_ONLY'
+		});
+		await expect(probe()).rejects.toMatchObject({ status: 403 });
+		current.prisma.intakeSource.findUnique.mockResolvedValueOnce({
+			...current.source,
+			revokedAt: new Date()
+		});
+		await expect(probe()).rejects.toMatchObject({ status: 401 });
+		current.prisma.intakeSource.findUnique
+			.mockResolvedValueOnce(current.source)
+			.mockResolvedValueOnce({ ...current.source, tokenVersion: 2 });
+		await expect(probe()).rejects.toMatchObject({ status: 401 });
+		current.prisma.intakeSource.findUnique.mockRejectedValueOnce(
+			new Error('private DB details')
+		);
+		await expect(probe()).rejects.toMatchObject({
+			status: 503,
+			message: 'Intake connection could not be confirmed'
+		});
+		expect(current.tx.inboxEntry.create).not.toHaveBeenCalled();
+	});
+	it('persists Tilda forms once across retransmission and key rotation, with conflict on changed lead data', async () => {
+		const current = setup();
+		const body = {
+			tranid: '467251:8442970',
+			formid: 'form48844953',
+			Name: 'Анна',
+			Phone: '+7 (999) 123-45-67'
+		};
+		const send = (payload = body, key = token) =>
+			current.service.ingestTilda(
+				current.source.id,
+				key,
+				payload,
+				'127.0.0.1'
+			);
+		const first = await send();
+		current.tx.inboundReceipt.findUnique.mockResolvedValue(
+			current.tx.inboundReceipt.create.mock.calls[0][0].data
+		);
+		await expect(send()).resolves.toEqual(first);
+		const rotatedToken = randomBytes(32).toString('base64url');
+		const rotated = {
+			...current.source,
+			tokenVersion: 2,
+			version: 2,
+			tokenHash: sourceTokenHash(`Bearer ${rotatedToken}`)
+		};
+		current.prisma.intakeSource.findUnique.mockResolvedValue(rotated);
+		current.tx.intakeSource.findUnique.mockResolvedValue(rotated);
+		await expect(send(body, rotatedToken)).resolves.toEqual(first);
+		await expect(
+			send({ ...body, Name: 'Другой клиент' }, rotatedToken)
+		).rejects.toMatchObject({ status: 409 });
+		expect(current.tx.inboxEntry.create).toHaveBeenCalledTimes(1);
+		expect(
+			current.tx.inboxEntry.create.mock.calls[0][0].data
+		).toMatchObject({
+			name: 'Анна',
+			phone: '+79991234567',
+			origin: 'API'
+		});
+	});
 	it('derives tenant, actor and team only from the source and atomically stores NEW API entry, receipt and audit', async () => {
 		const current = setup();
 		const result = await current.invoke();

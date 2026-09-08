@@ -1,9 +1,21 @@
 import type { NestExpressApplication } from '@nestjs/platform-express';
-import { json, RequestHandler } from 'express';
+import { json, urlencoded, RequestHandler } from 'express';
 
 export function configureCrmIntakeBodyParser(app: NestExpressApplication) {
 	const csv = json({ limit: 1024 * 1024 });
+	const tilda = urlencoded({
+		extended: false,
+		limit: '32kb',
+		parameterLimit: 100
+	});
 	const scoped: RequestHandler = (request, response, next) => {
+		if (
+			request.method === 'POST' &&
+			/^\/api\/v1\/crm\/intake\/ingest\/[0-9a-f-]+\/tilda\/?$/i.test(
+				request.path
+			)
+		)
+			return tilda(request, response, next);
 		if (
 			request.method === 'POST' &&
 			/^\/api\/v1\/crm\/intake\/imports\/csv\/?$/.test(request.path)
