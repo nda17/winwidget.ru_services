@@ -1407,7 +1407,7 @@ jobs:
           done
 
   deploy-production:
-    name: Enable Tilda ingress in Gateway
+    name: Upgrade WinCRM with Tilda form intake
     needs:
       - billing-crm-policy-integration
       - billing-wincrm-commerce-integration
@@ -1427,9 +1427,10 @@ jobs:
     uses: nda17/winwidget.ru_infra/.github/workflows/deploy-production.yml@8393b7bcf5cafb5cf36a590ebf77e20760df2025
     with:
       services_revision: ${{ github.sha }}
-      release_scope: gateway-tilda-upgrade
-      expected_live_revision: '837113b9f9f303bd6c043c2a2e37b0791369d7a3'
-      expected_service_env_sha256: '2dbb73cd420be18899a350c6375bac07857c245a48b0937267a7ccdcd4bcff73'
+      release_scope: crm-upgrade
+      expected_live_revision: 'fc3669057a748c6cd2a6cfe89b0d6ccd9a23c681'
+      expected_service_env_sha256: 'a3c3b245a2fe17bb8f59d4e3baea72cb624d3a7ec838abffff72289b25704f51'
+      expected_crm_upgrade_baseline_sha256: '81a9319aa9da4953cd59ea824fa0087b30fc36e8e74fbe4c9f0fcc401f186b02'
     secrets:
       BACKEND_PRODUCTION_SSH_HOST: ${{ secrets.PRODUCTION_SSH_HOST }}
       BACKEND_PRODUCTION_SSH_PORT: ${{ secrets.PRODUCTION_SSH_PORT }}

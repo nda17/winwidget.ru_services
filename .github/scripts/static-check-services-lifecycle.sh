@@ -534,17 +534,18 @@ if (
 	infraReleaseReferences.length !== 1 ||
 	infraReleaseReferences.some(reference => reference[1] !== pinnedInfraRevision)
 ) {
-	throw new Error('Tilda Gateway upgrade must use one exact reviewed infra SHA');
+	throw new Error('Tilda CRM upgrade must use one exact reviewed infra SHA');
 }
-// Code-only Gateway upgrade; preserve routes, canonical env and all CRM/SLA peers.
-for (const [job, scope] of [['deploy-production', 'gateway-tilda-upgrade']]) {
+// Code-only CRM upgrade after Gateway rollout; preserve both reminders/SLA overlays.
+for (const [job, scope] of [['deploy-production', 'crm-upgrade']]) {
 	const block = servicesWorkflow.match(new RegExp('^  ' + job + ':\\n([\\s\\S]*?)(?=^  [a-z][a-z0-9-]*:|$(?![\\s\\S]))', 'm'))?.[1];
 	if (!block || !block.includes('release_scope: ' + scope) ||
 		!block.includes('services_revision: ${{ github.sha }}') ||
-		!block.includes("expected_live_revision: '837113b9f9f303bd6c043c2a2e37b0791369d7a3'") ||
-		!block.includes("expected_service_env_sha256: '2dbb73cd420be18899a350c6375bac07857c245a48b0937267a7ccdcd4bcff73'") ||
-		/expected_crm_\w+_baseline_sha256:|operations_evidence_sha256:/.test(block)) {
-		throw new Error('Tilda Gateway upgrade must pin its live revision and unchanged canonical env without foreign authority');
+		!block.includes("expected_live_revision: 'fc3669057a748c6cd2a6cfe89b0d6ccd9a23c681'") ||
+		!block.includes("expected_service_env_sha256: 'a3c3b245a2fe17bb8f59d4e3baea72cb624d3a7ec838abffff72289b25704f51'") ||
+		!block.includes("expected_crm_upgrade_baseline_sha256: '81a9319aa9da4953cd59ea824fa0087b30fc36e8e74fbe4c9f0fcc401f186b02'") ||
+		/expected_crm_(?!upgrade_)\w+_baseline_sha256:|operations_evidence_sha256:/.test(block)) {
+		throw new Error('Tilda CRM upgrade must pin its fresh 21-role baseline and unchanged CRM env without activation authority');
 	}
 }
 if (/release_scope: (?:crm-prepare|crm-databases|crm-runtime|all)\b/.test(servicesWorkflow)) {
