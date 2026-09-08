@@ -496,20 +496,12 @@ OWNER/CRM_ADMIN, личные — сам сотрудник; отправка т
 Перед включением producer выпустить совместимый reader и scoped broker ACL;
 реальную отправку проверять только на согласованных адресах/каналах.
 
-Для production остаётся отдельная конфигурационная активация напоминаний:
-после code-only обновления и миграций — optional broker-контракт
-`CRM_REMINDERS_RABBITMQ_CONTRACT=task-reminders-v1`, ND с прежними 12 и двумя
-новыми readers, отдельный процесс Sales reminders и затем enabled Sales API.
-Нужны двусторонне синхронизированные полные canonical/CRM/ND env, отдельный
-Rabbit principal и парные private HTTP credentials. Правила пользователей
-автоматически не включать. Подготовленные Compose overlays и broker bootstrap
-не являются готовым runtime activation controller.
-До активации дополнить последующий `crm-upgrade` marker-bound поддержкой
-нового процесса и обоих overlays: текущий code-only inventory ожидает прежний
-состав и не разрешает терять reminder env при следующем обновлении. Сохранить
-неизменный disabled путь, fresh baseline/lock, forward recovery без purge и
-неизменность соседних сервисов. Scope `all` и повтор initial provisioning
-не являются обходом этой незавершённой части выпуска.
+Осталось подтвердить реальные сообщения и отмену устаревших напоминаний
+на согласованных подтверждённых каналах. Наличие healthy Sales reminders,
+ND reader и broker ACL не является доказательством внешней доставки.
+Правила пользователей автоматически не включать. При следующем code-only
+обновлении сохранить активный reminder process, его env и прежние ND kinds;
+повтор initial provisioning, scope `all` и purge не являются recovery.
 
 ### P2 — Web Push в следующем релизе после CRM MVP
 
