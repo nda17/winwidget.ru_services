@@ -534,18 +534,18 @@ if (
 	infraReleaseReferences.length !== 1 ||
 	infraReleaseReferences.some(reference => reference[1] !== pinnedInfraRevision)
 ) {
-	throw new Error('CRM upgrade release must use one exact reviewed infra SHA');
+	throw new Error('Operations backup release must use one exact reviewed infra SHA');
 }
-// Code-only update after the completed base reminder activation.
-// Preserve existing configuration, credentials and neighboring processes.
-for (const [job, scope] of [['deploy-production', 'crm-upgrade']]) {
+// Update only Operations backup manifests after the CRM schema upgrade.
+// Preserve Operations schema, restore gates, configuration and all neighbors.
+for (const [job, scope] of [['deploy-production', 'operations-backup-runtime']]) {
 	const block = servicesWorkflow.match(new RegExp('^  ' + job + ':\\n([\\s\\S]*?)(?=^  [a-z][a-z0-9-]*:|$(?![\\s\\S]))', 'm'))?.[1];
 	if (!block || !block.includes('release_scope: ' + scope) ||
 		!block.includes('services_revision: ${{ github.sha }}') ||
-		!block.includes("expected_live_revision: '837113b9f9f303bd6c043c2a2e37b0791369d7a3'") ||
-		!block.includes("expected_service_env_sha256: '910c80c75219678eb94daf8e6cabc504f83c1e5fa5e6a1d00feba38edad430ff'") ||
-		!block.includes("expected_crm_upgrade_baseline_sha256: '4f9c5072a49d3b9d0099fc151237533dcdecb5d26e7a760a6671fad432e07273'")) {
-		throw new Error('CRM upgrade release must pin the Gateway revision, owner env and fresh exact baseline');
+		!block.includes("expected_live_revision: '3c09cc535256d54519997514e693f0b43c8de143'") ||
+		!block.includes("expected_service_env_sha256: 'bf85df42cd5785af7129279732cb9b6d342a9f29efddc6614c3de2fa5a744660'") ||
+		!block.includes("expected_operations_backup_baseline_sha256: '926cee26058d78ed72628f5e813c804135b28d7bbcc9ae2142731b23d4e3f55e'")) {
+		throw new Error('Operations backup release must pin its live revision, owner env and fresh exact baseline');
 	}
 }
 if (/release_scope: (?:crm-prepare|crm-databases|crm-runtime|all)\b/.test(servicesWorkflow)) {

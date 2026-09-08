@@ -1407,7 +1407,7 @@ jobs:
           done
 
   deploy-production:
-    name: Update CRM MVP applications
+    name: Update Operations CRM backup manifests
     needs:
       - billing-crm-policy-integration
       - billing-wincrm-commerce-integration
@@ -1427,10 +1427,10 @@ jobs:
     uses: nda17/winwidget.ru_infra/.github/workflows/deploy-production.yml@c3882a99f3f3fdc1822246e77882e9774533001c
     with:
       services_revision: ${{ github.sha }}
-      release_scope: crm-upgrade
-      expected_live_revision: '837113b9f9f303bd6c043c2a2e37b0791369d7a3'
-      expected_service_env_sha256: '910c80c75219678eb94daf8e6cabc504f83c1e5fa5e6a1d00feba38edad430ff'
-      expected_crm_upgrade_baseline_sha256: '4f9c5072a49d3b9d0099fc151237533dcdecb5d26e7a760a6671fad432e07273'
+      release_scope: operations-backup-runtime
+      expected_live_revision: '3c09cc535256d54519997514e693f0b43c8de143'
+      expected_service_env_sha256: 'bf85df42cd5785af7129279732cb9b6d342a9f29efddc6614c3de2fa5a744660'
+      expected_operations_backup_baseline_sha256: '926cee26058d78ed72628f5e813c804135b28d7bbcc9ae2142731b23d4e3f55e'
     secrets:
       BACKEND_PRODUCTION_SSH_HOST: ${{ secrets.PRODUCTION_SSH_HOST }}
       BACKEND_PRODUCTION_SSH_PORT: ${{ secrets.PRODUCTION_SSH_PORT }}
