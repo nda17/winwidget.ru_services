@@ -627,7 +627,9 @@ describe('NotificationDeliveryControlService', () => {
 						'subscription-expiry-telegram',
 						'wincrm-invitation-email',
 						'wincrm-task-reminder-email',
-						'wincrm-task-reminder-telegram'
+						'wincrm-task-reminder-telegram',
+						'wincrm-intake-sla-email',
+						'wincrm-intake-sla-telegram'
 					]
 				}
 			},

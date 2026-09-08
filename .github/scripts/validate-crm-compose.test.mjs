@@ -544,8 +544,23 @@ test('all structural inputs are documented and no placeholder can silently produ
 	const keys = [...template.matchAll(/\$\{([A-Z0-9_]+):[?-]/g)].map(
 		match => match[1]
 	);
+	// The same owner example documents the closed, opt-in SLA overlay too.
+	// Keep its exact inventory separate: these must not enter the base runtime.
+	const slaOverlayKeys = [
+		'CRM_INTAKE_SLA_ENABLED',
+		'CRM_INTAKE_SLA_RABBITMQ_CONTRACT',
+		'CRM_INTAKE_SLA_WORKER_DATABASE_URL',
+		'CRM_INTAKE_SLA_PUBLISHER_DATABASE_URL',
+		'CRM_INTAKE_SLA_WORKER_RABBITMQ_URL',
+		'CRM_INTAKE_SLA_PUBLISHER_RABBITMQ_URL',
+		'CRM_INTAKE_NOTIFICATION_DELIVERY_TOKEN',
+		'NOTIFICATION_DELIVERY_CRM_INTAKE_TOKEN',
+		'NOTIFICATION_DELIVERY_INTERNAL_BASE_URL'
+	];
+	for (const key of slaOverlayKeys)
+		assert.equal(keys.includes(key), false);
 	assert.deepEqual(
-		[...new Set(keys)].sort(),
+		[...new Set([...keys, ...slaOverlayKeys])].sort(),
 		Object.keys(environment).sort()
 	);
 	assert.equal(

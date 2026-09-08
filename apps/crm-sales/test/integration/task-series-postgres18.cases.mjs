@@ -10,6 +10,16 @@ const {
 	TaskSeriesGenerationService
 } = require('../../dist/src/recurring-tasks/task-series-generation.service.js');
 
+// Prisma exposes a trigger exception on model updates as UnknownRequestError,
+// whereas raw SQL carries SQLSTATE in meta.code. Require the exact guard too.
+const isSeriesIdentityViolation = error =>
+	(error?.meta?.code === 'P0001' ||
+		(error?.name === 'PrismaClientUnknownRequestError' &&
+			/code: "P0001"/.test(error.message))) &&
+	String(error.message).includes(
+		'Task series identity, calendar and consumed periods are immutable'
+	);
+
 /** Called only by the existing explicitly opted-in, localhost PostgreSQL 18
  * workflow harness. Reuses its restricted owner-scoped runtime role. */
 export async function taskSeriesPostgresCases(prisma) {
@@ -115,15 +125,17 @@ export async function taskSeriesPostgresCases(prisma) {
 			where: { id: created.series.id },
 			data: { nextIndex: 0 }
 		}),
-		error => error?.meta?.code === 'P0001'
+		isSeriesIdentityViolation
 	);
 	await assert.rejects(
 		prisma.taskSeries.update({
 			where: { id: created.series.id },
 			data: { frequency: 'WEEKLY' }
 		}),
-		error => error?.meta?.code === 'P0001'
+		isSeriesIdentityViolation
 	);
+	assert.equal((await read()).nextIndex, 8);
+	assert.equal((await read()).frequency, 'DAILY');
 	const occurrence = await prisma.taskSeriesOccurrence.findFirstOrThrow({
 		where: { workspaceId }
 	});
