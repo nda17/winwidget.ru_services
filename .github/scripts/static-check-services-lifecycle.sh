@@ -530,18 +530,18 @@ if (
 	infraReleaseReferences.length !== 1 ||
 	infraReleaseReferences.some(reference => reference[1] !== pinnedInfraRevision)
 ) {
-	throw new Error('Operations backup release must use one exact reviewed infra SHA');
+	throw new Error('CRM provider release must use one exact reviewed infra SHA');
 }
-// CRM hotfix is deployed. Upgrade only Operations with the four prepared
-// worker-only backup URLs, preserving all CRM runtimes and other neighbors.
-for (const [job, scope] of [['deploy-production', 'operations-backup-runtime']]) {
+// Activate the prepared DaData adapter on the existing Customers API image.
+// Preserve all other process configurations, images and database state.
+for (const [job, scope] of [['deploy-production', 'crm-customers-provider-config']]) {
 	const block = servicesWorkflow.match(new RegExp('^  ' + job + ':\\n([\\s\\S]*?)(?=^  [a-z][a-z0-9-]*:|$(?![\\s\\S]))', 'm'))?.[1];
 	if (!block || !block.includes('release_scope: ' + scope) ||
 		!block.includes('services_revision: ${{ github.sha }}') ||
-		!block.includes("expected_live_revision: '73b372fa04abb609b0c7d3d412fe6cab3f23f024'") ||
-		!block.includes("expected_service_env_sha256: 'bf85df42cd5785af7129279732cb9b6d342a9f29efddc6614c3de2fa5a744660'") ||
-		!block.includes("expected_operations_backup_baseline_sha256: '9dbf5f4461621a1926219f45ddedede923ad42ca6e12ea4eafba1a6f69de8495'")) {
-		throw new Error('Operations backup release must pin the live API revision, owner env and fresh exact baseline');
+		!block.includes("expected_live_revision: '837113b9f9f303bd6c043c2a2e37b0791369d7a3'") ||
+		!block.includes("expected_service_env_sha256: '76a40ffade8eb3cbaa97a36e74b4c87dd6fc3970ccb3b7af8e62e003d3e3c148'") ||
+		!block.includes("expected_crm_customers_provider_baseline_sha256: '929843c3776d0d5f02e2f6ac7d139c10416be93525513317b578bf4d13b08086'")) {
+		throw new Error('CRM provider release must pin the Gateway revision, owner env and fresh exact baseline');
 	}
 }
 if (/release_scope: (?:crm-prepare|crm-databases|crm-runtime|all)\b/.test(servicesWorkflow)) {
