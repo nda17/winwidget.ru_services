@@ -19,6 +19,7 @@ import {
 } from './reminder-recipients.client';
 import {
 	currentOccurrence,
+	assignmentOccurrence,
 	deliveryKey,
 	quietUntil,
 	reminderDeliveryEnabled,
@@ -52,6 +53,8 @@ const taskFingerprint = (task: Task) =>
 		task.title,
 		task.assignedToSubject,
 		task.assignedToMembershipId,
+		task.assignmentVersion,
+		task.assignmentAt,
 		task.teamId,
 		task.deal?.id,
 		task.deal?.version,
@@ -69,6 +72,22 @@ function config(row: ReminderRule): ReminderRuleV1 {
 	)
 		throw new Error('REMINDER_STORED_BINDING');
 	return rule;
+}
+function taskOccurrence(
+	rule: ReminderRuleV1,
+	row: ReminderRule,
+	task: Task
+) {
+	return rule.trigger.kind === 'ASSIGNED'
+		? task.assignmentVersion
+			? assignmentOccurrence(
+					rule,
+					task.assignmentAt,
+					row.updatedAt,
+					Date.now()
+				)
+			: null
+		: currentOccurrence(rule, task.dueAt, Date.now());
 }
 export function enqueueReminderJob(
 	tx: Prisma.TransactionClient,
@@ -131,8 +150,15 @@ export class ReminderDeliveryService {
 						? { id: { gt: job.cursor } }
 						: {}),
 				status: { in: ['OPEN', 'IN_PROGRESS'] },
-				// Maximum BEFORE offset is 30 days. Later tasks cannot have a due occurrence.
-				dueAt: { lte: new Date(Date.now() + 43_200 * 60_000) },
+				// Assignments are independent of deadlines, including tasks months ahead.
+				AND: [
+					{
+						OR: [
+							{ dueAt: { lte: new Date(Date.now() + 43_200 * 60_000) } },
+							{ assignmentAt: { not: null } }
+						]
+					}
+				],
 				OR: [{ dealId: null }, { deal: { is: { archivedAt: null } } }]
 			},
 			orderBy: { id: 'asc' },
@@ -195,7 +221,7 @@ export class ReminderDeliveryService {
 		stillOwned: () => boolean
 	) {
 		const rule = config(row);
-		const occurrence = currentOccurrence(rule, task.dueAt, Date.now());
+		const occurrence = taskOccurrence(rule, row, task);
 		if (
 			!rule.enabled ||
 			!active(task) ||
@@ -248,6 +274,10 @@ export class ReminderDeliveryService {
 									taskId: task.id,
 									ruleId: row.id,
 									taskVersion: task.version,
+									assignmentVersion:
+										rule.trigger.kind === 'ASSIGNED'
+											? task.assignmentVersion
+											: null,
 									ruleVersion: row.version,
 									occurrenceIndex: occurrence.index,
 									recipientSubject: item.binding.subject,
@@ -256,7 +286,10 @@ export class ReminderDeliveryService {
 									nominalAt: occurrence.nominalAt,
 									deduplicationKey: deliveryKey({
 										taskId: task.id,
-										taskVersion: task.version,
+										taskVersion:
+											rule.trigger.kind === 'ASSIGNED'
+												? task.assignmentVersion!
+												: task.version,
 										ruleId: row.id,
 										ruleVersion: row.version,
 										occurrenceIndex: occurrence.index,
@@ -359,13 +392,15 @@ export class ReminderDeliveryService {
 			!active(task) ||
 			task.workspaceId !== delivery.workspaceId ||
 			row.workspaceId !== delivery.workspaceId ||
-			task.version !== delivery.taskVersion ||
+			(delivery.assignmentVersion != null
+				? task.assignmentVersion !== delivery.assignmentVersion
+				: task.version !== delivery.taskVersion) ||
 			row.version !== delivery.ruleVersion ||
 			row.archivedAt
 		)
 			return suppress();
 		const rule = config(row);
-		const occurrence = currentOccurrence(rule, task.dueAt, Date.now());
+		const occurrence = taskOccurrence(rule, row, task);
 		const recipient: ReminderBinding = {
 			subject: delivery.recipientSubject,
 			membershipId: delivery.recipientMembershipId
@@ -373,6 +408,8 @@ export class ReminderDeliveryService {
 		if (
 			!rule.enabled ||
 			!rule.channels.includes(input.channel) ||
+			(rule.trigger.kind === 'ASSIGNED') !==
+				(delivery.assignmentVersion != null) ||
 			!occurrence ||
 			occurrence.index !== delivery.occurrenceIndex ||
 			occurrence.nominalAt.getTime() !== delivery.nominalAt.getTime() ||
@@ -413,7 +450,7 @@ export class ReminderDeliveryService {
 			{ isolationLevel: 'RepeatableRead' }
 		);
 		if (!current) return suppress();
-		const latest = currentOccurrence(rule, task.dueAt, Date.now());
+		const latest = taskOccurrence(rule, row, task);
 		if (!latest || latest.index !== delivery.occurrenceIndex)
 			return suppress();
 		const allowedAt = quietUntil(rule, Date.now());
@@ -425,6 +462,8 @@ export class ReminderDeliveryService {
 		return {
 			...envelope,
 			deliver: true as const,
+			schemaVersion:
+				rule.trigger.kind === 'ASSIGNED' ? (2 as const) : (1 as const),
 			retryAt: null,
 			destination: {
 				email: input.channel === 'EMAIL' ? item.email : null,
@@ -432,6 +471,9 @@ export class ReminderDeliveryService {
 					input.channel === 'TELEGRAM' ? item.telegramChatId : null
 			},
 			content: {
+				...(rule.trigger.kind === 'ASSIGNED'
+					? { trigger: 'ASSIGNED' as const }
+					: {}),
 				taskId: task.id,
 				title: task.title,
 				dueAt: task.dueAt.toISOString(),

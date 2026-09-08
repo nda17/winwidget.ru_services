@@ -5,6 +5,8 @@ import PaymentSucceededEmail from '../../emails/payment-succeeded.email';
 import SubscriptionExpiryReminderEmail from '../../emails/subscription-expiry-reminder.email';
 import WincrmInvitationEmail from '../../emails/wincrm-invitation.email';
 import WincrmTaskReminderEmail from '../../emails/wincrm-task-reminder.email';
+import WincrmIntakeSlaEmail from '../../emails/wincrm-intake-sla.email';
+import type { SlaContent } from '../messaging/wincrm-intake-sla.contract';
 import type { ReminderContent } from '../messaging/wincrm-task-reminder.contract';
 import { EMAIL_TRANSPORTER } from '../config/mailer.config';
 import { Inject, Injectable } from '@nestjs/common';
@@ -201,8 +203,30 @@ export class EmailService {
 				})
 			})
 		);
-		return this.sendEmail(to, 'Напоминание о задаче WinCRM', html, {
-			messageId: `<${eventId}.wincrm-task-reminder@winwidget.ru>`
-		});
+		return this.sendEmail(
+			to,
+			content.trigger === 'ASSIGNED'
+				? 'Назначение задачи WinCRM'
+				: 'Напоминание о задаче WinCRM',
+			html,
+			{
+				messageId: `<${eventId}.wincrm-task-reminder@winwidget.ru>`
+			}
+		);
+	}
+	sendWincrmIntakeSla(to: string, content: SlaContent, eventId: string) {
+		return this.sendEmail(
+			to,
+			'Обращение без ответа в WinCRM',
+			render(
+				WincrmIntakeSlaEmail({
+					...content,
+					dueAtLabel: new Date(content.dueAt).toLocaleString('ru-RU', {
+						timeZone: content.timeZone
+					})
+				})
+			),
+			{ messageId: `<${eventId}.wincrm-intake-sla@winwidget.ru>` }
+		);
 	}
 }

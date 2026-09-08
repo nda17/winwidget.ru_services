@@ -44,6 +44,21 @@ import { WidgetTransferProcessor } from './widget-transfers/widget-transfer.proc
 import { WidgetTransferRabbit } from './widget-transfers/widget-transfer.messaging';
 import { WidgetTransferWorker } from './widget-transfers/widget-transfer.worker';
 import { WidgetTransferPublisher } from './widget-transfers/widget-transfer.publisher';
+import { intakeSlaEnabled } from './sla/sla.contract';
+import { SlaController } from './sla/sla.controller';
+import { SlaService } from './sla/sla.service';
+import { SlaAuthorityClient } from './sla/sla-authority.client';
+import { SlaRabbit } from './sla/sla.messaging';
+import { SlaProcessor } from './sla/sla.processor';
+import { SlaWorker } from './sla/sla.worker';
+import { SlaPublisher } from './sla/sla.publisher';
+import { SlaRecipientsClient } from './sla/sla-recipients.client';
+import { SlaReadinessService } from './sla/sla-readiness.service';
+import { SlaDeliveryService } from './sla/sla-delivery.service';
+import {
+	SlaDeliveryController,
+	SlaDeliveryGuard
+} from './sla/sla-delivery.controller';
 
 const config = ConfigModule.forRoot({ isGlobal: true });
 const role = intakeProcessRole();
@@ -51,6 +66,10 @@ const api = role === 'api' || role === 'all';
 const worker = role === 'worker' || role === 'all';
 const publisher = role === 'publisher' || role === 'all';
 const widgets = widgetControlEnabled();
+const sla = intakeSlaEnabled();
+// Intentionally excluded from legacy "all"; activation uses independent principals.
+const slaWorker = sla && role === 'sla-worker';
+const slaPublisher = sla && role === 'sla-publisher';
 const transfers = widgetTransfersEnabled();
 const transferWorker =
 	transfers && (role === 'widget-transfer-worker' || role === 'all');
@@ -65,6 +84,7 @@ const controlPublisher =
 	imports: [config, CrmIntakePrismaModule],
 	controllers: [
 		CrmIntakeHealthController,
+		...(api && sla ? [SlaController, SlaDeliveryController] : []),
 		...(api && widgets ? [WidgetSourceController] : []),
 		...(api
 			? [
@@ -79,6 +99,14 @@ const controlPublisher =
 	],
 	providers: [
 		CrmIntakeHealthService,
+		...(sla && (api || slaWorker || slaPublisher)
+			? [SlaAuthorityClient, SlaRecipientsClient, SlaReadinessService]
+			: []),
+		...(sla && (api || slaPublisher) ? [SlaService] : []),
+		...(sla && api ? [SlaDeliveryService, SlaDeliveryGuard] : []),
+		...(slaWorker || slaPublisher ? [SlaRabbit] : []),
+		...(slaWorker ? [SlaProcessor, SlaWorker] : []),
+		...(slaPublisher ? [SlaPublisher] : []),
 		...(api || worker || controlWorker || transferWorker
 			? [IntakeAuthorizationClient]
 			: []),

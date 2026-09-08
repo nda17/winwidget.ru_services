@@ -1,0 +1,8 @@
+# Closed intake-sla-v1 reader overlay; retain every existing reminder consumer.
+services:
+  notification-delivery-worker:
+    environment:
+      CRM_INTAKE_INTERNAL_BASE_URL: http://127.0.0.1:5310
+      CRM_INTAKE_NOTIFICATION_DELIVERY_TOKEN: ${CRM_INTAKE_NOTIFICATION_DELIVERY_TOKEN:?CRM_INTAKE_NOTIFICATION_DELIVERY_TOKEN is required}
+      NOTIFICATION_DELIVERY_CRM_INTAKE_TOKEN: ${NOTIFICATION_DELIVERY_CRM_INTAKE_TOKEN:?NOTIFICATION_DELIVERY_CRM_INTAKE_TOKEN is required}
+      NOTIFICATION_DELIVERY_KINDS: email,telegram,payment-email,payment-telegram,limit-email,limit-telegram,campaign-email,campaign-telegram,daily-summary-delivery-telegram,subscription-expiry-email,subscription-expiry-telegram,wincrm-invitation-email,wincrm-task-reminder-email,wincrm-task-reminder-telegram,wincrm-intake-sla-email,wincrm-intake-sla-telegram

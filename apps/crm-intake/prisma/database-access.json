@@ -3,6 +3,12 @@
 	"service": "crm-intake",
 	"tables": {
 		"service_identity": ["SELECT"],
+		"sla_rules": ["SELECT", "INSERT", "UPDATE"],
+		"sla_commands": ["SELECT", "INSERT"],
+		"sla_jobs": ["SELECT", "INSERT", "UPDATE"],
+		"sla_notifications": ["SELECT", "INSERT"],
+		"sla_receipts": ["SELECT", "INSERT", "UPDATE"],
+		"sla_outbox": ["SELECT", "INSERT", "UPDATE"],
 		"_prisma_migrations": [],
 		"inbox_entries": ["SELECT", "INSERT", "UPDATE"],
 		"intake_sources": ["SELECT", "INSERT", "UPDATE"],
@@ -27,6 +33,8 @@
 	"sequences": {},
 	"types": [],
 	"routines": [
+		"cancel_entry_sla",
+		"sla_immutable",
 		"check_csv_import_integrity",
 		"widget_control_immutable",
 		"widget_control_integrity",

@@ -6,6 +6,8 @@ import {
 } from '@nestjs/common';
 import type { ConsumeMessage } from 'amqplib';
 import { randomUUID } from 'node:crypto';
+import { TaskSeriesGenerationService } from '../recurring-tasks/task-series-generation.service';
+import { SERIES_SCAN_PREFIX } from '../recurring-tasks/task-series.service';
 import { CrmSalesPrismaService } from '../prisma/crm-sales-prisma.service';
 import { UUID } from '../sales/sales-access';
 import {
@@ -37,7 +39,8 @@ export class ReminderRuntimeService
 		private readonly prisma: CrmSalesPrismaService,
 		private readonly rabbit: ReminderRabbitService,
 		private readonly delivery: ReminderDeliveryService,
-		private readonly readiness: ReminderReadinessService
+		private readonly readiness: ReminderReadinessService,
+		private readonly series: TaskSeriesGenerationService
 	) {}
 	async onModuleInit() {
 		if (!reminderDeliveryEnabled())
@@ -100,17 +103,18 @@ export class ReminderRuntimeService
 				}
 			});
 		}
-		// No producer activation before the compatible reader and both transports.
-		if (this.transportReady) {
-			await this.delivery.schedulePeriod();
-			for (let n = 0; n < 20 && !this.stopping; n++)
-				if (!(await this.publishOne())) break;
-		}
+		// Series retain their runtime switch and fresh Access authority, but do
+		// not depend on external delivery. Only internal wakes bypass its gate.
+		await this.series.schedulePeriod();
+		if (this.transportReady) await this.delivery.schedulePeriod();
+		for (let n = 0; n < 20 && !this.stopping; n++)
+			if (!(await this.publishOne())) break;
 		this.lastTick = Date.now();
 	}
 	async publishOne() {
 		const now = new Date();
 		const available = {
+			...(!this.transportReady ? { eventType: REMINDER_TICK } : {}),
 			availableAt: { lte: now },
 			OR: [
 				{ status: 'PENDING' },
@@ -283,11 +287,11 @@ export class ReminderRuntimeService
 		}, 15_000);
 		timer.unref();
 		try {
-			await this.delivery.processPage(
-				job,
-				leaseToken,
-				() => owned && !this.stopping
-			);
+			await (
+				job.periodKey.startsWith(SERIES_SCAN_PREFIX)
+					? this.series
+					: this.delivery
+			).processPage(job, leaseToken, () => owned && !this.stopping);
 			this.rabbit.ack(message);
 		} catch {
 			await this.prisma.$transaction(async tx => {

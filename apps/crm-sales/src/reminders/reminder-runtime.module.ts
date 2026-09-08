@@ -13,6 +13,8 @@ import { ReminderRecipientsClient } from './reminder-recipients.client';
 import { ReminderReadinessService } from './reminder-readiness.service';
 import { ReminderRabbitService } from './reminder-rabbit.service';
 import { ReminderRuntimeService } from './reminder-runtime.service';
+import { TaskSeriesGenerationService } from '../recurring-tasks/task-series-generation.service';
+import { TaskSeriesAuthorityClient } from '../recurring-tasks/task-series-authority.client';
 
 @Controller('health')
 class ReminderRuntimeHealthController {
@@ -54,7 +56,9 @@ class ReminderRuntimeHealthController {
 		ReminderReadinessService,
 		ReminderDeliveryService,
 		ReminderRabbitService,
-		ReminderRuntimeService
+		ReminderRuntimeService,
+		TaskSeriesGenerationService,
+		TaskSeriesAuthorityClient
 	]
 })
 export class ReminderRuntimeModule {}

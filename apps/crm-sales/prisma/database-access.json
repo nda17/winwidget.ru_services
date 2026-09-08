@@ -10,6 +10,10 @@
 		"pipeline_template_installation_commands": ["SELECT", "INSERT"],
 		"deals": ["SELECT", "INSERT", "UPDATE"],
 		"tasks": ["SELECT", "INSERT", "UPDATE"],
+		"task_notifications": ["SELECT", "INSERT", "UPDATE"],
+		"task_series": ["SELECT", "INSERT", "UPDATE"],
+		"task_series_commands": ["SELECT", "INSERT"],
+		"task_series_occurrences": ["SELECT", "INSERT"],
 		"deal_timeline": ["SELECT", "INSERT"],
 		"command_receipts": ["SELECT", "INSERT"],
 		"task_command_receipts": ["SELECT", "INSERT"],
@@ -28,8 +32,11 @@
 	"types": ["CrmPipelineStageState", "SalesTaskStatus"],
 	"routines": [
 		"check_sales_next_action",
+		"guard_task_series_identity",
 		"reject_intake_proof_mutation",
 		"reject_reminder_command_mutation",
-		"wake_task_reminders"
+		"wake_task_reminders",
+		"track_task_assignment",
+		"record_task_notifications"
 	]
 }

@@ -22,6 +22,7 @@ import { NotificationDeliveryOutcomeService } from './notification-delivery-outc
 import { NotificationDeliveryPrismaService } from './prisma/notification-delivery-prisma.service';
 import type { NotificationDeliverySkipReason } from './notification-delivery-adapter.service';
 import { WINCRM_TASK_REMINDER_KINDS } from '../messaging/messaging.constants';
+import { WINCRM_INTAKE_SLA_KINDS } from '../messaging/messaging.constants';
 
 const DELIVERY_RECEIPT_LEASE_MS = 10 * 60 * 1000;
 const DELIVERY_RECOVERY_GRACE_MS = 5_000;
@@ -197,7 +198,9 @@ export class NotificationDeliveryReceiptService {
 						reason
 					)) ||
 				(WINCRM_TASK_REMINDER_KINDS.some(kind => kind === consumer) &&
-					reason === 'TASK_REMINDER_UNAVAILABLE')
+					reason === 'TASK_REMINDER_UNAVAILABLE') ||
+				(WINCRM_INTAKE_SLA_KINDS.some(kind => kind === consumer) &&
+					reason === 'INTAKE_SLA_UNAVAILABLE')
 			)
 		)
 			throw new Error('Unsupported notification skip');

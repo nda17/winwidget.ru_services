@@ -45,6 +45,8 @@ jobs:
         run: node --test .github/scripts/validate-crm-compose.test.mjs
       - name: Verify opt-in CRM reminders overlays without starting services
         run: node --test .github/scripts/validate-crm-reminders-compose.test.mjs
+      - name: Verify opt-in CRM Intake SLA overlays without starting services
+        run: node --test .github/scripts/validate-crm-intake-sla-compose.test.mjs
       - name: Verify service-owned CRM database access contracts
         run: node --test deploy/crm/database-access.test.mjs
       - name: Verify CRM backup-only endpoints and immutable manifests
@@ -1151,13 +1153,13 @@ jobs:
               receipt_tables='crm_customers.customer_commands, crm_customers.customer_activities, crm_customers.intake_operation_slots, crm_customers.intake_operation_commands, crm_customers.export_audit'
               ;;
             crm-intake)
-              mutable_tables='crm_intake.inbox_entries, crm_intake.intake_sources, crm_intake.acceptances, crm_intake.acceptance_outbox, crm_intake.acceptance_receipts, crm_intake.managed_widget_sources, crm_intake.widget_control_jobs, crm_intake.widget_control_receipts, crm_intake.widget_control_outbox, crm_intake.widget_transfer_receipts, crm_intake.widget_transfer_outbox'
-              receipt_tables='crm_intake.intake_commands, crm_intake.intake_activities, crm_intake.inbound_receipts, crm_intake.csv_imports, crm_intake.csv_import_rows, crm_intake.export_audit, crm_intake.widget_entry_snapshots'
+              mutable_tables='crm_intake.inbox_entries, crm_intake.intake_sources, crm_intake.acceptances, crm_intake.acceptance_outbox, crm_intake.acceptance_receipts, crm_intake.managed_widget_sources, crm_intake.widget_control_jobs, crm_intake.widget_control_receipts, crm_intake.widget_control_outbox, crm_intake.widget_transfer_receipts, crm_intake.widget_transfer_outbox, crm_intake.sla_rules, crm_intake.sla_jobs, crm_intake.sla_receipts, crm_intake.sla_outbox'
+              receipt_tables='crm_intake.intake_commands, crm_intake.intake_activities, crm_intake.inbound_receipts, crm_intake.csv_imports, crm_intake.csv_import_rows, crm_intake.export_audit, crm_intake.widget_entry_snapshots, crm_intake.sla_commands, crm_intake.sla_notifications'
               docker exec "$POSTGRES_CONTAINER_ID" psql -U crm_domain_bootstrap_ci -d "$DOMAIN_DATABASE" -v ON_ERROR_STOP=1 -c 'GRANT SELECT, INSERT, UPDATE, DELETE ON crm_intake.ingestion_rate_buckets TO crm_domain_runtime_ci'
               ;;
             crm-sales)
-              mutable_tables='crm_sales.deals, crm_sales.tasks, crm_sales.reminder_rules, crm_sales.reminder_jobs, crm_sales.reminder_deliveries, crm_sales.reminder_outbox, crm_sales.reminder_runtime'
-              receipt_tables='crm_sales.deal_timeline, crm_sales.command_receipts, crm_sales.task_command_receipts, crm_sales.task_timeline, crm_sales.pipeline_template_installations, crm_sales.pipeline_template_installation_commands, crm_sales.intake_operation_slots, crm_sales.intake_operation_commands, crm_sales.export_audit, crm_sales.reminder_rule_commands'
+              mutable_tables='crm_sales.deals, crm_sales.tasks, crm_sales.task_notifications, crm_sales.task_series, crm_sales.reminder_rules, crm_sales.reminder_jobs, crm_sales.reminder_deliveries, crm_sales.reminder_outbox, crm_sales.reminder_runtime'
+              receipt_tables='crm_sales.deal_timeline, crm_sales.command_receipts, crm_sales.task_command_receipts, crm_sales.task_timeline, crm_sales.task_series_commands, crm_sales.task_series_occurrences, crm_sales.pipeline_template_installations, crm_sales.pipeline_template_installation_commands, crm_sales.intake_operation_slots, crm_sales.intake_operation_commands, crm_sales.export_audit, crm_sales.reminder_rule_commands'
               docker exec "$POSTGRES_CONTAINER_ID" psql -U crm_domain_bootstrap_ci -d "$DOMAIN_DATABASE" -v ON_ERROR_STOP=1 -c 'GRANT SELECT, INSERT, UPDATE, DELETE ON crm_sales.pipelines, crm_sales.pipeline_stages TO crm_domain_runtime_ci'
               ;;
             notification-delivery)

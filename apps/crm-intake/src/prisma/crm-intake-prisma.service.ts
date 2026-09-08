@@ -28,6 +28,15 @@ export function parseCrmIntakeDatabaseUrl(value?: string): string {
 	) {
 		throw new Error(DATABASE_URL_ERROR);
 	}
+	// New SLA processes have their own small pool; existing seven roles remain unchanged.
+	const role = process.env.CRM_INTAKE_PROCESS_ROLE;
+	if (role === 'sla-worker' || role === 'sla-publisher') {
+		parsed.searchParams.set(
+			'connection_limit',
+			role === 'sla-worker' ? '2' : '1'
+		);
+		return parsed.toString();
+	}
 	return databaseUrl;
 }
 

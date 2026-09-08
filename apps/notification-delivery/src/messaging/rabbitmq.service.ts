@@ -7,6 +7,7 @@ import {
 	DEFAULT_NOTIFICATION_DELIVERY_KINDS,
 	isWincrmInvitationDeliveryEnabled,
 	WINCRM_TASK_REMINDER_KINDS,
+	WINCRM_INTAKE_SLA_KINDS,
 	MESSAGING_QUEUE_NAMES,
 	MESSAGING_ROUTING_KEYS,
 	MessagingKind,
@@ -623,7 +624,10 @@ export class RabbitMqService
 				.get<string>('NOTIFICATION_DELIVERY_KINDS')
 				?.split(',')
 				.map(kind => kind.trim()) ?? [];
-		for (const kind of WINCRM_TASK_REMINDER_KINDS)
+		for (const kind of [
+			...WINCRM_TASK_REMINDER_KINDS,
+			...WINCRM_INTAKE_SLA_KINDS
+		])
 			if (configuredKinds.includes(kind)) topologyKinds.push(kind);
 		for (const kind of topologyKinds) {
 			const queue = MESSAGING_QUEUE_NAMES[kind];

@@ -25,7 +25,7 @@ export interface ReminderRuleV1 {
 	readonly enabled: boolean;
 	readonly channels: readonly ReminderChannel[];
 	readonly trigger: {
-		readonly kind: 'BEFORE_DUE' | 'AT_DUE' | 'AFTER_DUE';
+		readonly kind: 'BEFORE_DUE' | 'AT_DUE' | 'AFTER_DUE' | 'ASSIGNED';
 		readonly offsetMinutes: number;
 	};
 	/** Count includes the first occurrence; null is a single occurrence. */
@@ -228,11 +228,12 @@ export function parseReminderRule(
 	if (
 		trigger.kind !== 'BEFORE_DUE' &&
 		trigger.kind !== 'AT_DUE' &&
-		trigger.kind !== 'AFTER_DUE'
+		trigger.kind !== 'AFTER_DUE' &&
+		trigger.kind !== 'ASSIGNED'
 	)
 		invalid('unsupported trigger');
 	const offsetMinutes =
-		trigger.kind === 'AT_DUE'
+		trigger.kind === 'AT_DUE' || trigger.kind === 'ASSIGNED'
 			? integer(trigger.offsetMinutes, 0, 0)
 			: integer(trigger.offsetMinutes, 1, 43200);
 	const repeat =
@@ -246,6 +247,8 @@ export function parseReminderRule(
 					intervalMinutes: integer(repeat.intervalMinutes, 15, 43200),
 					count: integer(repeat.count, 2, 1000)
 				});
+	if (trigger.kind === 'ASSIGNED' && repeats !== null)
+		invalid('assignment notifications cannot repeat');
 	const quiet =
 		input.quietHours === null
 			? null

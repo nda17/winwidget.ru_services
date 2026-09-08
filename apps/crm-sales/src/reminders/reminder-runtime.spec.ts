@@ -79,11 +79,18 @@ function fixture() {
 		}),
 		schedulePeriod: jest.fn()
 	};
+	const series: any = {
+		processPage: jest.fn(async () => {
+			row.status = 'COMPLETED';
+		}),
+		schedulePeriod: jest.fn()
+	};
 	const service = new ReminderRuntimeService(
 		prisma,
 		rabbit,
 		delivery,
-		{} as never
+		{} as never,
+		series
 	);
 	const message: any = {
 		content: Buffer.from(
@@ -100,6 +107,7 @@ function fixture() {
 	};
 	return {
 		service,
+		series,
 		prisma,
 		rabbit,
 		delivery,
@@ -117,6 +125,66 @@ describe('Reminder push consumer durable claim/CAS and publisher', () => {
 		jest.setSystemTime(now);
 	});
 	afterEach(() => jest.useRealTimers());
+	it('keeps series wakes running during an external transport outage without publishing email/Telegram', async () => {
+		const h = fixture();
+		const transportReady = jest.fn(async () => false);
+		(h.service as any).readiness.transportReady = transportReady;
+		h.prisma.reminderRuntime = { upsert: jest.fn() };
+		const rows = [
+			'notification.wincrm.task-reminder.email.requested.v1',
+			'notification.wincrm.task-reminder.telegram.requested.v1',
+			REMINDER_TICK
+		].map(eventType => ({
+			id: randomUUID(),
+			messageId: randomUUID(),
+			eventType,
+			payload: {},
+			attempts: 0,
+			status: 'PENDING'
+		}));
+		h.prisma.reminderOutbox.findFirst = jest.fn(async ({ where }: any) =>
+			rows.find(
+				row =>
+					row.status === 'PENDING' &&
+					(!where.eventType || row.eventType === where.eventType)
+			)
+		);
+		h.prisma.reminderOutbox.updateMany = jest.fn(
+			async ({ where, data }: any) => {
+				const row = rows.find(row => row.id === where.id)!;
+				if (where.eventType && row.eventType !== where.eventType)
+					return { count: 0 };
+				Object.assign(row, data);
+				return { count: 1 };
+			}
+		);
+		await (h.service as any).runTick();
+		expect(h.series.schedulePeriod).toHaveBeenCalledTimes(1);
+		expect(h.delivery.schedulePeriod).not.toHaveBeenCalled();
+		expect(h.rabbit.publish).toHaveBeenCalledTimes(1);
+		expect(h.rabbit.publish).toHaveBeenCalledWith(
+			rows[2].messageId,
+			REMINDER_TICK,
+			rows[2].payload
+		);
+		expect(rows.slice(0, 2).map(row => row.status)).toEqual([
+			'PENDING',
+			'PENDING'
+		]);
+		transportReady.mockResolvedValue(true);
+		jest.setSystemTime(new Date(now.getTime() + 11000));
+		await (h.service as any).runTick();
+		expect(h.delivery.schedulePeriod).toHaveBeenCalledTimes(1);
+		expect(h.rabbit.publish).toHaveBeenCalledTimes(3);
+	});
+	it('dispatches recurring series scans to their generator before ACK, without misreading them as reminder scans', async () => {
+		const h = fixture();
+		h.row().periodKey = 'task-series-scan:minute:2026-09-08T12:00:00.000Z';
+		await h.service.handle(h.message);
+		expect(h.series.processPage).toHaveBeenCalledTimes(1);
+		expect(h.delivery.processPage).not.toHaveBeenCalled();
+		expect(h.rabbit.ack).toHaveBeenCalledTimes(1);
+	});
 	it('claims before work and ACKs only after durable completion', async () => {
 		const h = fixture();
 		h.delivery.processPage.mockImplementationOnce(

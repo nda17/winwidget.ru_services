@@ -6,17 +6,27 @@ export default function WincrmTaskReminderEmail({
 	taskId,
 	title,
 	dueAtLabel,
-	timeZone
+	timeZone,
+	trigger
 }: {
 	taskId: string;
 	title: string;
 	dueAtLabel: string;
 	timeZone: string;
+	trigger?: 'ASSIGNED';
 }) {
 	return (
 		<EmailLayout
-			preview="Напоминание о задаче WinCRM"
-			title="Напоминание о задаче"
+			preview={
+				trigger === 'ASSIGNED'
+					? 'Назначение задачи WinCRM'
+					: 'Напоминание о задаче WinCRM'
+			}
+			title={
+				trigger === 'ASSIGNED'
+					? 'Назначение задачи'
+					: 'Напоминание о задаче'
+			}
 			subtitle={`Срок: ${dueAtLabel} (${timeZone})`}
 			actionLabel="Открыть задачу"
 			actionHref={`https://crm.winwidget.ru/planner?task=${taskId}`}

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import {
 	mkdtempSync,
+	readFileSync,
 	cpSync,
 	rmSync,
 	symlinkSync,
@@ -79,6 +80,119 @@ for (const service of services) {
 		}
 	);
 }
+test('task series privileges agree in production manifest, immutable migration inventory and CI grants', () => {
+	const { contract, migrations } = readDatabaseAccess(
+		join(root, 'apps/crm-sales/prisma'),
+		'crm-sales'
+	);
+	assert.deepEqual(contract.tables.task_series, [
+		'SELECT',
+		'INSERT',
+		'UPDATE'
+	]);
+	for (const table of [
+		'task_series_commands',
+		'task_series_occurrences'
+	]) {
+		assert.deepEqual(contract.tables[table], ['SELECT', 'INSERT']);
+	}
+	assert.ok(contract.routines.includes('guard_task_series_identity'));
+	assert.deepEqual(
+		migrations.find(
+			item => item.name === '20260908120000_add_recurring_task_series'
+		),
+		{
+			name: '20260908120000_add_recurring_task_series',
+			checksum:
+				'9a03d38db5037068c19c606d16a2515e3088d51c3e2bd88d60aa8270c87eb318'
+		}
+	);
+	assert.ok(contract.routines.includes('track_task_assignment'));
+	assert.ok(contract.routines.includes('record_task_notifications'));
+	assert.deepEqual(contract.tables.task_notifications, [
+		'SELECT',
+		'INSERT',
+		'UPDATE'
+	]);
+	assert.deepEqual(
+		migrations.find(
+			item =>
+				item.name === '20260908130000_add_task_assignment_notifications'
+		),
+		{
+			name: '20260908130000_add_task_assignment_notifications',
+			checksum:
+				'c26b5649ceaace470fcfbe10d76013a7edb7d20192d71669eb999f114fc7c87e'
+		}
+	);
+	const workflow = readFileSync(
+		join(root, '.github/workflows/ci.yml'),
+		'utf8'
+	);
+	const block = workflow.match(
+		/            crm-sales\)\n([\s\S]*?)              ;;/
+	)?.[1];
+	assert.ok(block);
+	const mutable = block.match(/mutable_tables='([^']+)'/)?.[1].split(', ');
+	const receipt = block.match(/receipt_tables='([^']+)'/)?.[1].split(', ');
+	assert.ok(mutable.includes('crm_sales.task_series'));
+	assert.ok(mutable.includes('crm_sales.task_notifications'));
+	for (const table of [
+		'task_series_commands',
+		'task_series_occurrences'
+	]) {
+		assert.ok(receipt.includes('crm_sales.' + table));
+		assert.equal(mutable.includes('crm_sales.' + table), false);
+	}
+	assert.doesNotMatch(
+		databaseRuntimeGrantsSql(contract, migrations),
+		/GRANT EXECUTE|GRANT ALL/
+	);
+});
+
+test('Intake SLA grants and immutable migration agree with the CI database owner', () => {
+	const { contract, migrations } = readDatabaseAccess(
+		join(root, 'apps/crm-intake/prisma'),
+		'crm-intake'
+	);
+	const workflow = readFileSync(
+		join(root, '.github/workflows/ci.yml'),
+		'utf8'
+	);
+	const block = workflow.match(
+		/            crm-intake\)\n([\s\S]*?)              ;;/
+	)?.[1];
+	assert.ok(block);
+	const mutable = block.match(/mutable_tables='([^']+)'/)?.[1].split(', ');
+	const receipt = block.match(/receipt_tables='([^']+)'/)?.[1].split(', ');
+	for (const table of [
+		'sla_rules',
+		'sla_jobs',
+		'sla_receipts',
+		'sla_outbox'
+	]) {
+		assert.deepEqual(contract.tables[table], [
+			'SELECT',
+			'INSERT',
+			'UPDATE'
+		]);
+		assert.ok(mutable.includes('crm_intake.' + table));
+	}
+	for (const table of ['sla_commands', 'sla_notifications']) {
+		assert.deepEqual(contract.tables[table], ['SELECT', 'INSERT']);
+		assert.ok(receipt.includes('crm_intake.' + table));
+		assert.equal(mutable.includes('crm_intake.' + table), false);
+	}
+	assert.deepEqual(
+		migrations.find(item => item.name === '20260908150000_add_intake_sla'),
+		{
+			name: '20260908150000_add_intake_sla',
+			checksum:
+				'589b0303e2153e90d5a2edf6dc9655a1a4d96f59ade4f7057d17419bcd7b3234'
+		}
+	);
+});
+
 test('malformed contracts and secret inputs are rejected before SQL construction', () => {
 	const { contract, migrations } = readDatabaseAccess(
 		join(root, 'apps/crm-access/prisma'),

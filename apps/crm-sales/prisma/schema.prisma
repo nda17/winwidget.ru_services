@@ -141,6 +141,7 @@ model Deal {
   nextAction        SalesTask?            @relation("DealNextTask", fields: [nextTaskId, id, workspaceId], references: [id, dealId, workspaceId], onDelete: NoAction, onUpdate: NoAction, map: "deals_next_task_fkey")
   timeline          DealTimeline[]
   intakeOperations  IntakeOperationSlot[] @relation("IntakeDeal")
+  taskSeries        TaskSeries[]
 
   @@unique([id, workspaceId])
   @@unique([id, workspaceId, contactId])
@@ -162,6 +163,8 @@ model SalesTask {
   assignedToSubject String                @map("assigned_to_subject") @db.VarChar(256)
   completedAt       DateTime?             @map("completed_at")
   assignedToMembershipId String?          @map("assigned_to_membership_id") @db.Uuid
+  assignmentVersion Int?                 @map("assignment_version")
+  assignmentAt      DateTime?             @map("assignment_at")
   teamId            String?               @map("team_id") @db.Uuid
   createdAt         DateTime              @default(now()) @map("created_at")
   updatedAt         DateTime              @updatedAt @map("updated_at")
@@ -170,6 +173,7 @@ model SalesTask {
   intakeOperations  IntakeOperationSlot[] @relation("IntakeFirstTask")
   commands          TaskCommandReceipt[]
   timeline          TaskTimeline[]
+  recurrence        TaskSeriesOccurrence?
 
   @@unique([id, workspaceId])
   @@unique([id, dealId, workspaceId])
@@ -177,6 +181,92 @@ model SalesTask {
   @@index([workspaceId, teamId, status, dueAt, id], map: "tasks_team_workday_idx")
   @@index([workspaceId, assignedToSubject, status, dueAt, id], map: "tasks_assignee_workday_idx")
   @@map("tasks")
+  @@schema("crm_sales")
+}
+
+model TaskSeries {
+  id                     String @id @db.Uuid
+  workspaceId            String @map("workspace_id") @db.Uuid
+  version                Int @default(1)
+  creatorSubject         String @map("creator_subject") @db.VarChar(256)
+  creatorMembershipId    String? @map("creator_membership_id") @db.Uuid
+  title                  String @db.VarChar(200)
+  dealId                 String? @map("deal_id") @db.Uuid
+  teamId                 String? @map("team_id") @db.Uuid
+  assignedToSubject      String @map("assigned_to_subject") @db.VarChar(256)
+  assignedToMembershipId String? @map("assigned_to_membership_id") @db.Uuid
+  frequency              String @db.VarChar(8)
+  startDate              String @map("start_date") @db.Char(10)
+  localTime              String @map("local_time") @db.Char(5)
+  timeZone               String @map("time_zone") @db.VarChar(100)
+  status                 String @default("ACTIVE") @db.VarChar(16)
+  nextIndex              Int @default(0) @map("next_index")
+  nextRunAt              DateTime @map("next_run_at")
+  nextCheckAt            DateTime @default(now()) @map("next_check_at")
+  blockedReason          String? @map("blocked_reason") @db.VarChar(32)
+  createdAt              DateTime @default(now()) @map("created_at")
+  updatedAt              DateTime @updatedAt @map("updated_at")
+  commands               TaskSeriesCommand[]
+  occurrences            TaskSeriesOccurrence[]
+  deal                   Deal? @relation(fields: [dealId, workspaceId], references: [id, workspaceId], onDelete: Restrict, map: "task_series_deal_fkey")
+
+  @@unique([id, workspaceId])
+  @@index([workspaceId, status, createdAt, id], map: "task_series_list_idx")
+  @@index([status, nextRunAt, nextCheckAt, id], map: "task_series_schedule_idx")
+  @@map("task_series")
+  @@schema("crm_sales")
+}
+
+model TaskSeriesCommand {
+  commandId    String @id @map("command_id") @db.Uuid
+  workspaceId  String @map("workspace_id") @db.Uuid
+  actorSubject String @map("actor_subject") @db.VarChar(256)
+  requestHash  String @map("request_hash") @db.Char(64)
+  seriesId     String @map("series_id") @db.Uuid
+  before       Json?
+  result       Json
+  createdAt    DateTime @default(now()) @map("created_at")
+  series       TaskSeries @relation(fields: [seriesId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
+
+  @@index([workspaceId, seriesId, createdAt], map: "task_series_commands_history_idx")
+  @@map("task_series_commands")
+  @@schema("crm_sales")
+}
+
+model TaskSeriesOccurrence {
+  id           String @id @db.Uuid
+  workspaceId  String @map("workspace_id") @db.Uuid
+  seriesId     String @map("series_id") @db.Uuid
+  periodIndex  Int @map("period_index")
+  seriesVersion Int @map("series_version")
+  taskId       String @unique @map("task_id") @db.Uuid
+  dueAt        DateTime @map("due_at")
+  createdAt    DateTime @default(now()) @map("created_at")
+  series       TaskSeries @relation(fields: [seriesId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
+  task         SalesTask @relation(fields: [taskId, workspaceId], references: [id, workspaceId], onDelete: Restrict)
+
+  @@unique([seriesId, periodIndex], map: "task_series_period_key")
+  @@unique([taskId, workspaceId])
+  @@map("task_series_occurrences")
+  @@schema("crm_sales")
+}
+
+model TaskNotification {
+  id                    String @id @db.Uuid
+  workspaceId           String @map("workspace_id") @db.Uuid
+  taskId                String @map("task_id") @db.Uuid
+  recipientSubject      String @map("recipient_subject") @db.VarChar(256)
+  recipientMembershipId String? @map("recipient_membership_id") @db.Uuid
+  assignmentVersion     Int @map("assignment_version")
+  kind                  String @db.VarChar(16)
+  availableAt           DateTime @map("available_at")
+  readAt                DateTime? @map("read_at")
+  cancelledAt           DateTime? @map("cancelled_at")
+  createdAt             DateTime @default(now()) @map("created_at")
+
+  @@unique([taskId, assignmentVersion, kind], map: "task_notifications_occurrence_key")
+  @@index([workspaceId, recipientSubject, availableAt, id], map: "task_notifications_recipient_idx")
+  @@map("task_notifications")
   @@schema("crm_sales")
 }
 
@@ -275,6 +365,7 @@ model ReminderDelivery {
   taskId                String @map("task_id") @db.Uuid
   ruleId                String @map("rule_id") @db.Uuid
   taskVersion           Int @map("task_version")
+  assignmentVersion     Int? @map("assignment_version")
   ruleVersion           Int @map("rule_version")
   occurrenceIndex       Int @map("occurrence_index")
   recipientSubject      String @map("recipient_subject") @db.VarChar(256)

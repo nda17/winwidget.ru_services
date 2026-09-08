@@ -8,6 +8,8 @@ import { widgetControlEnabled } from '../widget-sources/widget-control.config';
 import { WidgetControlRabbit } from '../widget-sources/widget-control.messaging';
 import { WidgetTransferRabbit } from '../widget-transfers/widget-transfer.messaging';
 import { widgetTransfersEnabled } from '../widget-transfers/widget-transfer.config';
+import { intakeSlaEnabled } from '../sla/sla.contract';
+import { SlaRabbit } from '../sla/sla.messaging';
 import {
 	AcceptanceRabbit,
 	intakeProcessRole
@@ -22,7 +24,8 @@ export class CrmIntakeHealthService {
 		private readonly prisma: CrmIntakePrismaService,
 		@Optional() private readonly rabbit?: AcceptanceRabbit,
 		@Optional() private readonly widgetRabbit?: WidgetControlRabbit,
-		@Optional() private readonly transferRabbit?: WidgetTransferRabbit
+		@Optional() private readonly transferRabbit?: WidgetTransferRabbit,
+		@Optional() private readonly slaRabbit?: SlaRabbit
 	) {}
 
 	liveness() {
@@ -43,6 +46,20 @@ export class CrmIntakeHealthService {
 	async readiness() {
 		try {
 			await this.prisma.$queryRaw`SELECT 1`;
+			if (intakeSlaEnabled()) {
+				await this.prisma
+					.$queryRaw`SELECT workspace_id, version, enabled, config, owner_binding, effective_at FROM crm_intake.sla_rules LIMIT 0`;
+				await this.prisma
+					.$queryRaw`SELECT id, workspace_id, entry_id, rule_version, generation, active_event_id, due_at, status, breached_at, recipient_cursor FROM crm_intake.sla_jobs LIMIT 0`;
+				await this.prisma
+					.$queryRaw`SELECT id, workspace_id, job_id, recipient_subject, recipient_membership_id, channel, deduplication_key FROM crm_intake.sla_notifications LIMIT 0`;
+				await this.prisma
+					.$queryRaw`SELECT event_id, consumer, job_id, payload_hash, status, lease_token, lease_until, retry_attempt FROM crm_intake.sla_receipts LIMIT 0`;
+				await this.prisma
+					.$queryRaw`SELECT id, event_id, payload, route, status, lease_token, lease_until, available_at FROM crm_intake.sla_outbox LIMIT 0`;
+				await this.prisma
+					.$queryRaw`SELECT command_id, workspace_id, actor_subject, action, entity_id, request_hash, response FROM crm_intake.sla_commands LIMIT 0`;
+			}
 			// Reader schema stays required after transfers are disabled: received data remains readable.
 			await this.prisma
 				.$queryRaw`SELECT entry_id, workspace_id, source_id, transfer_id, event_id, payload, payload_hash, byte_count FROM crm_intake.widget_entry_snapshots LIMIT 0`;
@@ -103,6 +120,13 @@ export class CrmIntakeHealthService {
 			);
 		}
 		const role = intakeProcessRole();
+		if (
+			role.startsWith('sla-') &&
+			!this.slaRabbit?.ready(role === 'sla-worker')
+		)
+			throw new ServiceUnavailableException(
+				'CRM Intake SLA messaging is not ready'
+			);
 		if (
 			['worker', 'publisher', 'all'].includes(role) &&
 			!this.rabbit?.ready(role === 'worker' || role === 'all')

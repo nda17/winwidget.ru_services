@@ -29,6 +29,18 @@ async function bootstrap(): Promise<void> {
 	app.setGlobalPrefix('api/v1', {
 		exclude: [
 			{
+				path: 'internal/v1/crm-access/intake-sla-recipients',
+				method: RequestMethod.POST
+			},
+			{
+				path: 'internal/v1/crm-access/intake-sla-authority',
+				method: RequestMethod.POST
+			},
+			{
+				path: 'internal/v1/crm-access/task-series-authority',
+				method: RequestMethod.POST
+			},
+			{
 				path: 'internal/v1/crm-access/task-reminder-recipients',
 				method: RequestMethod.POST
 			},

@@ -31,6 +31,11 @@ import {
 import { ReminderDeliveryService } from './reminders/reminder-delivery.service';
 import { ReminderRecipientsClient } from './reminders/reminder-recipients.client';
 import { ReminderReadinessService } from './reminders/reminder-readiness.service';
+import { TaskSeriesController } from './recurring-tasks/task-series.controller';
+import { TaskSeriesService } from './recurring-tasks/task-series.service';
+import { TaskSeriesAuthorityClient } from './recurring-tasks/task-series-authority.client';
+import { TaskNotificationsController } from './task-notifications/task-notifications.controller';
+import { TaskNotificationsService } from './task-notifications/task-notifications.service';
 
 @Module({
 	imports: [
@@ -43,6 +48,8 @@ import { ReminderReadinessService } from './reminders/reminder-readiness.service
 		PipelineTemplateInstallationController,
 		SalesController,
 		WorkdayController,
+		TaskSeriesController,
+		TaskNotificationsController,
 		ReminderRulesController,
 		ReminderDeliveryController,
 		SalesExportController,
@@ -55,6 +62,9 @@ import { ReminderReadinessService } from './reminders/reminder-readiness.service
 		PipelineTemplateInstallationService,
 		SalesService,
 		WorkdayService,
+		TaskSeriesService,
+		TaskNotificationsService,
+		TaskSeriesAuthorityClient,
 		ReminderRulesService,
 		ReminderActorClient,
 		ReminderDeliveryGuard,

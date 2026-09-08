@@ -1,5 +1,6 @@
 # Explicit reminder activation overlay for docker-compose.crm.yml only.
-# Never include in the ordinary code-only CRM rollout.
+# Initial activation requires its separate scope. After activation, code-only
+# upgrades retain this overlay only with the approved task-reminders-v1 marker.
 services:
   crm-sales-api:
     environment:

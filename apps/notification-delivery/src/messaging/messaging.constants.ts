@@ -28,6 +28,14 @@ export const WINCRM_TASK_REMINDER_KINDS = [
 	'wincrm-task-reminder-email',
 	'wincrm-task-reminder-telegram'
 ] as const;
+export const WINCRM_INTAKE_SLA_EMAIL_EVENT_TYPE =
+	'notification.wincrm.intake-sla.email.requested.v1';
+export const WINCRM_INTAKE_SLA_TELEGRAM_EVENT_TYPE =
+	'notification.wincrm.intake-sla.telegram.requested.v1';
+export const WINCRM_INTAKE_SLA_KINDS = [
+	'wincrm-intake-sla-email',
+	'wincrm-intake-sla-telegram'
+] as const;
 export const NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE =
 	'notification.delivery.outcome.v1';
 export const REPORTING_NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE =
@@ -58,7 +66,8 @@ export const DEFAULT_NOTIFICATION_DELIVERY_KINDS = [
 export const NOTIFICATION_DELIVERY_KINDS = [
 	...DEFAULT_NOTIFICATION_DELIVERY_KINDS,
 	'wincrm-invitation-email',
-	...WINCRM_TASK_REMINDER_KINDS
+	...WINCRM_TASK_REMINDER_KINDS,
+	...WINCRM_INTAKE_SLA_KINDS
 ] as const;
 
 export type NotificationDeliveryKind =
@@ -76,6 +85,8 @@ export const isWincrmInvitationDeliveryEnabled = (
 		.some(kind => kind.trim() === 'wincrm-invitation-email') === true;
 
 export const MESSAGING_ROUTING_KEYS: Record<MessagingKind, string> = {
+	'wincrm-intake-sla-email': WINCRM_INTAKE_SLA_EMAIL_EVENT_TYPE,
+	'wincrm-intake-sla-telegram': WINCRM_INTAKE_SLA_TELEGRAM_EVENT_TYPE,
 	email: 'lead.integration.email.v2',
 	telegram: 'lead.integration.telegram.v2',
 	'payment-email': PAYMENT_SUCCEEDED_EVENT_TYPE,
@@ -96,6 +107,10 @@ export const MESSAGING_ROUTING_KEYS: Record<MessagingKind, string> = {
 };
 
 export const MESSAGING_QUEUE_NAMES: Record<MessagingKind, string> = {
+	'wincrm-intake-sla-email':
+		'winwidget.notification.wincrm.intake-sla.email',
+	'wincrm-intake-sla-telegram':
+		'winwidget.notification.wincrm.intake-sla.telegram',
 	email: 'winwidget.lead-integration.email',
 	telegram: 'winwidget.lead-integration.telegram',
 	'payment-email': 'winwidget.payment-notification.email',

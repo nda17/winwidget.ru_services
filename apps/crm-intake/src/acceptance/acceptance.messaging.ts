@@ -10,6 +10,7 @@ import {
 } from 'amqp-connection-manager';
 import type { ConfirmChannel, ConsumeMessage } from 'amqplib';
 import { randomUUID } from 'node:crypto';
+import { intakeSlaEnabled } from '../sla/sla.contract';
 import {
 	parseAcceptanceEvent,
 	type AcceptanceEvent
@@ -23,7 +24,9 @@ export type IntakeProcessRole =
 	| 'widget-control-worker'
 	| 'widget-control-publisher'
 	| 'widget-transfer-worker'
-	| 'widget-transfer-publisher';
+	| 'widget-transfer-publisher'
+	| 'sla-worker'
+	| 'sla-publisher';
 export function intakeProcessRole(): IntakeProcessRole {
 	const role = process.env.CRM_INTAKE_PROCESS_ROLE || 'api';
 	if (
@@ -35,7 +38,9 @@ export function intakeProcessRole(): IntakeProcessRole {
 			'widget-control-worker',
 			'widget-control-publisher',
 			'widget-transfer-worker',
-			'widget-transfer-publisher'
+			'widget-transfer-publisher',
+			'sla-worker',
+			'sla-publisher'
 		].includes(role)
 	)
 		throw new Error(
@@ -56,6 +61,8 @@ export function intakeProcessRole(): IntakeProcessRole {
 		throw new Error(
 			'Widget transfer process requires both managed Widgets and transfers enabled'
 		);
+	if (role.startsWith('sla-') && !intakeSlaEnabled())
+		throw new Error('SLA process requires CRM_INTAKE_SLA_ENABLED=true');
 	return role as IntakeProcessRole;
 }
 export const ACCEPTANCE_EXCHANGE = 'winwidget.crm-intake.events';

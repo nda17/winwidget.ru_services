@@ -426,6 +426,8 @@ exactFiles('.github/scripts', [
 	'test-crm-bootstrap-failure.mjs',
 	'validate-crm-compose.mjs',
 	'validate-crm-compose.test.mjs',
+	'validate-crm-intake-sla-compose.mjs',
+	'validate-crm-intake-sla-compose.test.mjs',
 	'validate-crm-reminders-compose.mjs',
 	'validate-crm-reminders-compose.test.mjs',
 	'validate-production-compose.cjs',
@@ -435,7 +437,9 @@ exactFiles('.github/scripts', [
 exactFiles('deploy', [
 	'docker-compose.prod.yml',
 	'docker-compose.crm.yml',
+	'docker-compose.crm-intake-sla.yml',
 	'docker-compose.crm-reminders.yml',
+	'docker-compose.notification-intake-sla.yml',
 	'docker-compose.notification-reminders.yml'
 ]);
 

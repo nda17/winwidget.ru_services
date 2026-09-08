@@ -17,6 +17,10 @@ import {
 	WINCRM_TASK_REMINDER_EMAIL_EVENT_TYPE,
 	WINCRM_TASK_REMINDER_TELEGRAM_EVENT_TYPE
 } from './messaging.constants';
+import {
+	WINCRM_INTAKE_SLA_EMAIL_EVENT_TYPE,
+	WINCRM_INTAKE_SLA_TELEGRAM_EVENT_TYPE
+} from './messaging.constants';
 
 export const PLAN_VALUES = ['TRIAL', 'EASY', 'HARD'] as const;
 export type Plan = (typeof PLAN_VALUES)[number];
@@ -330,6 +334,7 @@ export interface WincrmInvitationEmailRequestedEventPayload {
 }
 
 export type NotificationDeliveryEventPayload =
+	| WincrmIntakeSlaEventPayload
 	| WincrmTaskReminderEventPayload
 	| WincrmInvitationEmailRequestedEventPayload
 	| LeadIntegrationEventPayloadV2
@@ -353,6 +358,19 @@ export interface WincrmTaskReminderEventPayload {
 	occurredAt: string;
 	reference: {
 		type: 'wincrm-task-reminder';
+		id: string;
+		workspaceId: string;
+	};
+}
+export interface WincrmIntakeSlaEventPayload {
+	schemaVersion: 1;
+	eventId: string;
+	eventType:
+		| typeof WINCRM_INTAKE_SLA_EMAIL_EVENT_TYPE
+		| typeof WINCRM_INTAKE_SLA_TELEGRAM_EVENT_TYPE;
+	occurredAt: string;
+	reference: {
+		type: 'wincrm-intake-sla';
 		id: string;
 		workspaceId: string;
 	};

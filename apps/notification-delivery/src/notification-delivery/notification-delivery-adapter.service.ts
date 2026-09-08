@@ -28,18 +28,22 @@ import {
 import { NotificationDeliveryEventPayload } from './notification-delivery-contract';
 import { NotificationDeliveryPrismaService } from './prisma/notification-delivery-prisma.service';
 import { TelegramInfoTransportService } from '../telegram/telegram-info-transport.service';
-import { Injectable } from '@nestjs/common';
+import { Injectable, Optional } from '@nestjs/common';
 import { NotificationDeliveryReceiptStatus } from '@prisma/notification-delivery-client';
 import { WincrmInvitationContextService } from './wincrm-invitation-context.service';
 import { assertWincrmInvitationEvent } from '../messaging/wincrm-invitation.contract';
 import { assertWincrmTaskReminderEvent } from '../messaging/wincrm-task-reminder.contract';
 import { WincrmTaskReminderContextService } from './wincrm-task-reminder-context.service';
 import { WINCRM_TASK_REMINDER_EMAIL_EVENT_TYPE } from '../messaging/messaging.constants';
+import { WINCRM_INTAKE_SLA_EMAIL_EVENT_TYPE } from '../messaging/messaging.constants';
+import { assertWincrmIntakeSlaEvent } from '../messaging/wincrm-intake-sla.contract';
+import { WincrmIntakeSlaContextService } from './wincrm-intake-sla-context.service';
 
 export type NotificationDeliverySkipReason =
 	| 'INVITATION_EXPIRED'
 	| 'INVITATION_UNAVAILABLE'
-	| 'TASK_REMINDER_UNAVAILABLE';
+	| 'TASK_REMINDER_UNAVAILABLE'
+	| 'INTAKE_SLA_UNAVAILABLE';
 export type NotificationDeliveryResult =
 	| void
 	| {
@@ -55,7 +59,8 @@ export class NotificationDeliveryAdapterService {
 		private readonly telegram: TelegramInfoTransportService,
 		private readonly prisma: NotificationDeliveryPrismaService,
 		private readonly invitationContext: WincrmInvitationContextService,
-		private readonly reminderContext: WincrmTaskReminderContextService
+		private readonly reminderContext: WincrmTaskReminderContextService,
+		@Optional() private readonly slaContext?: WincrmIntakeSlaContextService
 	) {}
 
 	async deliver(
@@ -65,6 +70,52 @@ export class NotificationDeliveryAdapterService {
 		lockToken?: string
 	): Promise<NotificationDeliveryResult> {
 		switch (kind) {
+			case 'wincrm-intake-sla-email':
+			case 'wincrm-intake-sla-telegram': {
+				assertWincrmIntakeSlaEvent(event);
+				if (
+					!lockToken ||
+					event.eventId !== eventId ||
+					!this.slaContext ||
+					(kind === 'wincrm-intake-sla-email') !==
+						(event.eventType === WINCRM_INTAKE_SLA_EMAIL_EVENT_TYPE)
+				)
+					throw new Error(
+						'WinCRM Intake SLA requires a matching active claim'
+					);
+				const context = await this.slaContext.resolve(event);
+				if (!context.deliver)
+					return { status: 'SKIPPED', reason: 'INTAKE_SLA_UNAVAILABLE' };
+				const claim =
+					await this.prisma.notificationDeliveryReceipt.findFirst({
+						where: {
+							eventId,
+							consumer: kind,
+							status: NotificationDeliveryReceiptStatus.PROCESSING,
+							lockToken,
+							leaseExpiresAt: { gt: new Date() }
+						},
+						select: { leaseExpiresAt: true }
+					});
+				if (
+					!claim?.leaseExpiresAt ||
+					claim.leaseExpiresAt.getTime() <= Date.now()
+				)
+					throw new Error('WinCRM Intake SLA claim is no longer active');
+				if (context.channel === 'EMAIL')
+					await this.emailService.sendWincrmIntakeSla(
+						context.destination.email!,
+						context.content,
+						eventId
+					);
+				else
+					await this.telegram.sendMessage(
+						context.destination.telegramChatId!,
+						`Обращение без ответа в WinCRM\n${context.content.title}\nСрок взятия в работу: ${new Date(context.content.dueAt).toLocaleString('ru-RU', { timeZone: context.content.timeZone })} (${context.content.timeZone})\nhttps://crm.winwidget.ru/inbox?entry=${context.content.entryId}`,
+						{ parseMode: null }
+					);
+				return;
+			}
 			case 'wincrm-task-reminder-email':
 			case 'wincrm-task-reminder-telegram': {
 				assertWincrmTaskReminderEvent(event);
@@ -109,7 +160,7 @@ export class NotificationDeliveryAdapterService {
 				else
 					await this.telegram.sendMessage(
 						context.destination.telegramChatId!,
-						`Напоминание о задаче WinCRM\n${context.content.title}\nСрок: ${new Date(context.content.dueAt).toLocaleString('ru-RU', { timeZone: context.content.timeZone })} (${context.content.timeZone})\nhttps://crm.winwidget.ru/planner?task=${context.content.taskId}`,
+						`${context.content.trigger === 'ASSIGNED' ? 'Назначение задачи WinCRM' : 'Напоминание о задаче WinCRM'}\n${context.content.title}\nСрок: ${new Date(context.content.dueAt).toLocaleString('ru-RU', { timeZone: context.content.timeZone })} (${context.content.timeZone})\nhttps://crm.winwidget.ru/planner?task=${context.content.taskId}`,
 						{ parseMode: null }
 					);
 				return;

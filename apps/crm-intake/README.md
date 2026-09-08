@@ -31,6 +31,155 @@ node .github/scripts/test-crm-bootstrap-failure.mjs crm-intake
 остановку. Она не заменяет проверку точного Docker-образа, поздней готовности
 RabbitMQ, restart policy и восстановления очередей перед rollout.
 
+## SLA входящих: первый ответ и уведомления
+
+Миграция `20260908150000_add_intake_sla` добавляет только Intake-owned
+`sla_rules`, append-only `sla_commands` (журнал команд), `sla_jobs`,
+`sla_receipts`, `sla_outbox`, append-only `sla_notifications`. Существующие источники, видимость обращений,
+назначения и семь процессов не меняются. Runtime/API SLA по умолчанию
+выключены (`CRM_INTAKE_SLA_ENABLED` отсутствует или `false`). Состояние
+`BREACHED` означает нарушение срока, **не отправленное уведомление**.
+
+Контракт настройки: `GET/POST /api/v1/crm/intake/sla/rule`. Чтение —
+OWNER/CRM_ADMIN с `intake:read`, включая READ_ONLY; изменение — те же роли
+с `intake:write` и ACTIVE/GRACE. POST требует `Idempotency-Key=commandId` и
+`{schemaVersion:1, workspaceId, commandId, expectedVersion, config}`;
+при первом сохранении `expectedVersion=0`. `config` содержит `enabled`,
+`workingMinutes` (1–1440), `timeZone` (IANA), `weekdays` (1=пн…7=вс),
+`workStart/workEnd` (`HH:mm`, один интервал в день не менее 30 минут),
+`responsibleBinding` (`{subject,membershipId}` или null), `notifyManagers`,
+`channels` (`EMAIL`/`TELEGRAM`). Это metadata получателя, не изменение
+`createdBySubject`, отдела или прав на обращение. Пример: 60 рабочих минут,
+Europe/Moscow, пн–пт 09:00–18:00; заявка в пятницу в 17:30 просрочится
+в понедельник в 09:30. DST gap сдвигает локальную границу вперёд, fold
+использует раннюю границу; считаются реальные минуты внутри рабочего окна.
+
+GET/POST возвращают `{schemaVersion:1,workspaceId,rule,deliveryEnabled}`,
+где `rule=null|{version,config,effectiveAt}`. `deliveryEnabled` проверяется
+живым authenticated readiness ND, а не наличием значения настройки.
+При недоступном reader включение правила отклоняется; отключение доступно.
+`GET /api/v1/crm/intake/sla/inbox-status?workspaceId=UUID&entryIds=UUID,UUID`
+принимает 1–100 уникальных ID и возвращает только доступные текущему сотруднику:
+`{schemaVersion:1,workspaceId,deliveryEnabled,items:[{entryId,state,dueAt}]}`.
+Состояния: `PENDING`, `BREACHED`, `STOPPED`, `NOT_TRACKED`; dueAt ISO или null.
+UI использует этот scoped ответ, не считает просрочку из браузерных часов.
+
+Каждое сохранение создаёт новую версию правила для **новых** обращений,
+поступивших после `effectiveAt`; отменяет задания предыдущей версии.
+Автоматического охвата истории нет. Publisher ограниченно подбирает NEW
+обращения и в одной транзакции создаёт job + Outbox, уникальные по
+`workspaceId + entryId + ruleVersion`. Срок хранится в `availableAt`, поэтому
+worker получает push только при наступлении срока. После простоя получается
+одно актуальное нарушение по обращению, не серия напоминаний за каждый период.
+DB-trigger атомарно отменяет задания при выходе обращения из NEW и при
+первом durable acceptance-request (его транзакция увеличивает entry.version,
+оставляя status=NEW до завершения workflow). Это SLA первого взятия в работу,
+не SLA завершения acceptance: отмена workflow не запускает его заново.
+
+Два новых process roles того же Intake image: `sla-worker` (5317, PG pool 2)
+и `sla-publisher` (5318, PG pool 1). Они не входят в старый `all`.
+Отдельный `CRM_INTAKE_SLA_RABBITMQ_URL` нужен каждому процессу; fallback на
+acceptance/Widgets principal отсутствует. Transport: direct exchanges
+`winwidget.crm-intake.sla.events` / `winwidget.crm-intake.sla.dead-letter`,
+queue `winwidget.crm-intake.sla.v1` / `.dead-letter`, exact routing key
+`crm.intake.sla.evaluate.v1`. JSON содержит только
+`{schemaVersion:1,eventId,workspaceId,jobId,generation}`; без PII или credentials.
+Topology provisioner отдельный; runtime assert выключен, если
+`CRM_INTAKE_SLA_RABBITMQ_ASSERT_TOPOLOGY` отсутствует/false. Publisher — confirm,
+mandatory return, durable DB retry без транспортного лимита. Worker — push,
+receipt `eventId + crm-intake-sla-evaluate-v1`, lease 120 секунд/renew 20 секунд,
+CAS recovery, ack после commit; retry 30с/5мин/30мин, затем собственная DLQ.
+`POST /api/v1/crm/intake/sla/jobs/:id/retry` принимает обычный versioned Intake
+command (`expectedVersion` = generation); новый event + audit создаются
+атомарно, только для DEAD, с текущими manager/write правами.
+
+Access предоставляет отдельный private
+`POST /internal/v1/crm-access/intake-sla-authority` только pairwise crm-intake:
+`{schemaVersion:1,purpose:"INTAKE_SLA",workspaceId,actorSubject,expectedBinding}`.
+`expectedBinding:null` разрешает получить binding текущего writer; сохранённое
+значение проверяет точный subject+membership. Ответ содержит только
+`{schemaVersion:1,workspaceId,allowed,binding}`. READ_ONLY, пониженная роль и
+заменённое membership не разрешают новое нарушение; dependency error вызывает
+retry, а не подменяется успешным пустым результатом. Это только rule authority;
+INTAKE_ACCEPT и Sales task-reminder endpoints не используются.
+
+Отдельный `POST /internal/v1/crm-access/intake-sla-recipients` принимает
+`{schemaVersion:1,purpose:"INTAKE_SLA",workspaceId,ruleOwnerBinding,
+entry:{id,createdBySubject,teamId},responsibleBinding,notifyManagers,
+recipientBinding,cursor}`. Cursor/null ограничивает страницу 100 получателями;
+точечный recipientBinding/null повторно проверяет адресата перед отправкой.
+Ответ `{schemaVersion:1,workspaceId,allowed,items,nextCursor}` содержит
+`items:[{binding:{subject,membershipId},email,telegramChatId}]`. Сохраняются
+ALL/OWN/TEAM права, точный membership, текущая оплаченная доступность и только
+подтверждённые Identity-каналы; назначение SLA не расширяет entry visibility.
+После внешних чтений локальные права и Identity directory проверяются повторно.
+
+Worker атомарно создаёт `sla_notifications` (уникальная пара job+binding+канал),
+ND Outbox и следующую страницу job. В broker только opaque reference:
+`{schemaVersion:1,eventId,eventType,occurredAt,
+reference:{type:"wincrm-intake-sla",id:eventId,workspaceId}}`.
+Два eventType: `notification.wincrm.intake-sla.email.requested.v1` и
+`notification.wincrm.intake-sla.telegram.requested.v1`, exchange `winwidget.events`.
+ND kinds `wincrm-intake-sla-email`, `wincrm-intake-sla-telegram` **не входят в
+defaults**; новый reader не изменяет Widgets или Sales/ASSIGNED уведомления.
+
+ND захватывает свой существующий durable delivery receipt, затем запрашивает
+`POST /internal/v1/notification-delivery/intake-sla/:id/delivery-context`
+в Intake API с `{schemaVersion:1,eventId,workspaceId,channel}`. Caller только
+`notification-delivery`, loopback socket и отдельный pairwise token.
+Intake дважды читает текущие rule/job/entry/acceptance вокруг свежего Access
+recipient authorization; READ_ONLY, старый rule/membership, взятое в работу
+или закрытое обращение дают `deliver:false`. ND ещё раз проверяет свой
+PROCESSING token/lease перед провайдером. Отправляет существующим SMTP/TG
+адаптером и фирменным EmailLayout; ссылка открывает текущую scoped карточку
+`/inbox?entry=UUID`. At-least-once допускает дубль после внешнего успеха и
+crash до фиксации receipt; exactly-once SMTP/Telegram не обещается.
+
+### Точный контракт подключения для release owner
+
+1. Проверить новую миграцию/constraints/acceptance trigger на изолированном
+   PG18, затем inventory/grants: `sla_rules/jobs/receipts/outbox` SELECT/INSERT/
+   UPDATE; `sla_commands/notifications` SELECT/INSERT. Другие grants неизменны.
+2. Развернуть Access + Intake/ND readers до producer. Добавить private ingress
+   для двух новых Access endpoints и Intake context, не public Gateway route.
+   Public `/api/v1/crm/intake/sla/*` использует существующий Intake Gateway.
+3. Добавить разные секреты `CRM_INTAKE_NOTIFICATION_DELIVERY_TOKEN` (ND→Intake)
+   и `NOTIFICATION_DELIVERY_CRM_INTAKE_TOKEN` (Intake→ND); не alias Sales/Access.
+   ND получает `CRM_INTAKE_INTERNAL_BASE_URL`; Intake API и новые роли —
+   `NOTIFICATION_DELIVERY_INTERNAL_BASE_URL`, `CRM_ACCESS_INTERNAL_BASE_URL`
+   и существующий `CRM_ACCESS_CRM_INTAKE_TOKEN`. Никаких новых Identity ключей.
+4. В существующем vhost `winwidget` provisioner создаёт SLA direct exchanges/
+   queues выше. Новые независимые principals: `winwidget-crm-intake-sla-worker`
+   (read только SLA main queue, configure/write пустые) и
+   `winwidget-crm-intake-sla-publisher` (write только SLA events, SLA dead-letter,
+   winwidget.events; read/configure пустые). Topic ACL winwidget.events:
+   только два exact SLA eventType. Старые семь Intake principals не менять.
+5. ND topology: для каждого канала EMAIL/TELEGRAM базовая очередь
+   `winwidget.notification.wincrm.intake-sla.email|telegram`, её `.dead-letter`
+   и `.retry-v2.1`…`.retry-v2.3` по существующему ND `RETRY_DELAYS_MS`.
+   Bindings и manual retry строго через существующие `MESSAGING_*` helpers,
+   без нового retry engine. Добавить только эти names в ND exact ACL, сохранить
+   прежние права. ND process kinds дополнить обоими SLA kinds; readiness
+   `GET /internal/v1/crm-intake/sla/readiness` требует actual consumers обоих.
+6. Compose overlay должен добавить только `crm-intake-sla-worker` и
+   `crm-intake-sla-publisher`: существующие `CRM_INTAKE_IMAGE/REVISION`,
+   host network, user 1001:1001, read_only, tmpfs /tmp, cap_drop ALL,
+   no-new-privileges, restart unless-stopped, stop_grace_period 45s,
+   worker/publisher resource caps из базового Compose, без mounts/новой БД.
+   Process role/port = sla-worker/5317 и sla-publisher/5318; DB owner тот же,
+   connection_limit 2/1 соответственно, pool_timeout=10. Свою URL брокера
+   маппить в `CRM_INTAKE_SLA_RABBITMQ_URL`; assert=false. Обе роли требуют
+   `CRM_INTAKE_SLA_ENABLED=true` и ND readiness ещё до consume/scheduling.
+   API flag=true включать после их health/consumer proof; старые процессы
+   сохраняют env. Публичные настройки при flag=false возвращают 404 и UI
+   показывает «SLA не активирован», не имитирует работающую рассылку.
+
+Production env/Infra в кодовом этапе не меняются. Полные owner env файлы,
+SHA/immutable images и scoped activation согласует release owner через CI/CD.
+Targeted проверки: Intake `pnpm typecheck`, `pnpm test -- src/sla`; Access
+`pnpm test -- intake-sla`; ND `pnpm test -- wincrm-intake-sla wincrm-task-reminder`.
+Эти проверки не доказывают production-активацию или фактическую доставку.
+
 ## Граница владения
 
 - сервис владеет только PostgreSQL-схемой `crm_intake` и собственной БД;

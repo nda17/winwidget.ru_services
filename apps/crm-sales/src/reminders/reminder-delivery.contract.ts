@@ -29,6 +29,8 @@ export function currentOccurrence(
 	dueAt: Date,
 	now: number
 ) {
+	// Assignment occurrences have their own persisted clock, never the deadline.
+	if (rule.trigger.kind === 'ASSIGNED') return null;
 	const offset = rule.trigger.offsetMinutes * 60_000;
 	const anchor =
 		dueAt.getTime() +
@@ -45,6 +47,27 @@ export function currentOccurrence(
 	return {
 		index,
 		nominalAt: new Date(anchor + index * interval),
+		notBefore: quietUntil(rule, now)
+	};
+}
+export function assignmentOccurrence(
+	rule: ReminderRuleV1,
+	assignedAt: Date | null,
+	ruleUpdatedAt: Date,
+	now: number
+) {
+	if (
+		rule.trigger.kind !== 'ASSIGNED' ||
+		!assignedAt ||
+		!Number.isFinite(assignedAt.getTime()) ||
+		!Number.isFinite(ruleUpdatedAt.getTime()) ||
+		assignedAt.getTime() < ruleUpdatedAt.getTime() ||
+		assignedAt.getTime() > now
+	)
+		return null;
+	return {
+		index: 0,
+		nominalAt: assignedAt,
 		notBefore: quietUntil(rule, now)
 	};
 }

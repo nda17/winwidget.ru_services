@@ -29,6 +29,11 @@ import {
 } from './messaging.constants';
 import { assertWincrmInvitationEvent } from './wincrm-invitation.contract';
 import { assertWincrmTaskReminderEvent } from './wincrm-task-reminder.contract';
+import { assertWincrmIntakeSlaEvent } from './wincrm-intake-sla.contract';
+import {
+	WINCRM_INTAKE_SLA_EMAIL_EVENT_TYPE,
+	WINCRM_INTAKE_SLA_TELEGRAM_EVENT_TYPE
+} from './messaging.constants';
 
 const UUID_PATTERN =
 	/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -882,6 +887,12 @@ const resolveExpectedKind = (
 			return payload.eventType === WINCRM_TASK_REMINDER_EMAIL_EVENT_TYPE
 				? 'wincrm-task-reminder-email'
 				: 'wincrm-task-reminder-telegram';
+		case WINCRM_INTAKE_SLA_EMAIL_EVENT_TYPE:
+		case WINCRM_INTAKE_SLA_TELEGRAM_EVENT_TYPE:
+			assertWincrmIntakeSlaEvent(payload);
+			return payload.eventType === WINCRM_INTAKE_SLA_EMAIL_EVENT_TYPE
+				? 'wincrm-intake-sla-email'
+				: 'wincrm-intake-sla-telegram';
 		case WINCRM_INVITATION_EMAIL_EVENT_TYPE:
 			assertWincrmInvitationEvent(payload);
 			return 'wincrm-invitation-email';
@@ -936,7 +947,9 @@ export function assertMessagingEventContract(
 	if (
 		(expectedKind === 'wincrm-invitation-email' ||
 			expectedKind === 'wincrm-task-reminder-email' ||
-			expectedKind === 'wincrm-task-reminder-telegram') &&
+			expectedKind === 'wincrm-task-reminder-telegram' ||
+			expectedKind === 'wincrm-intake-sla-email' ||
+			expectedKind === 'wincrm-intake-sla-telegram') &&
 		payload.eventId !== metadata.messageId
 	) {
 		throw new Error('WinCRM eventId must match the AMQP messageId');

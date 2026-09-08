@@ -1,0 +1,121 @@
+# Closed intake-sla-v1 activation overlay, only on the existing CRM/reminders topology.
+# Its release controller enables the API only after the two SLA roles are healthy.
+services:
+  crm-intake-api:
+    environment:
+      CRM_INTAKE_SLA_ENABLED: 'true'
+      CRM_INTAKE_NOTIFICATION_DELIVERY_TOKEN: ${CRM_INTAKE_NOTIFICATION_DELIVERY_TOKEN:?CRM_INTAKE_NOTIFICATION_DELIVERY_TOKEN is required}
+      NOTIFICATION_DELIVERY_CRM_INTAKE_TOKEN: ${NOTIFICATION_DELIVERY_CRM_INTAKE_TOKEN:?NOTIFICATION_DELIVERY_CRM_INTAKE_TOKEN is required}
+      NOTIFICATION_DELIVERY_INTERNAL_BASE_URL: http://127.0.0.1:4401
+
+  crm-intake-sla-worker:
+    profiles: [crm-intake-sla]
+    image: ${CRM_INTAKE_IMAGE:?CRM_INTAKE_IMAGE is required}
+    command: ['node', 'dist/src/main.js']
+    network_mode: host
+    user: '1001:1001'
+    read_only: true
+    tmpfs: ['/tmp:rw,nosuid,nodev,noexec,size=64m']
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 128
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 45s
+    labels:
+      com.winwidget.owner: crm-intake
+      com.winwidget.purpose: sla-worker
+      com.winwidget.singleton: 'true'
+    environment:
+      NODE_ENV: production
+      MODE: production
+      APP_REVISION: ${CRM_INTAKE_REVISION:?CRM_INTAKE_REVISION is required}
+      CRM_INTAKE_LISTEN_HOST: 127.0.0.1
+      CORS_ALLOWED_ORIGINS: https://crm.winwidget.ru
+      CRM_INTAKE_PROCESS_ROLE: sla-worker
+      CRM_INTAKE_PORT: '5317'
+      CRM_INTAKE_DATABASE_URL: ${CRM_INTAKE_SLA_WORKER_DATABASE_URL:?CRM_INTAKE_SLA_WORKER_DATABASE_URL is required}
+      CRM_ACCESS_INTERNAL_BASE_URL: ${CRM_ACCESS_INTERNAL_BASE_URL:-http://127.0.0.1:5300}
+      CRM_ACCESS_CRM_INTAKE_TOKEN: ${CRM_ACCESS_CRM_INTAKE_TOKEN:?CRM_ACCESS_CRM_INTAKE_TOKEN is required}
+      CRM_INTAKE_SLA_ENABLED: 'true'
+      CRM_INTAKE_NOTIFICATION_DELIVERY_TOKEN: ${CRM_INTAKE_NOTIFICATION_DELIVERY_TOKEN:?CRM_INTAKE_NOTIFICATION_DELIVERY_TOKEN is required}
+      NOTIFICATION_DELIVERY_CRM_INTAKE_TOKEN: ${NOTIFICATION_DELIVERY_CRM_INTAKE_TOKEN:?NOTIFICATION_DELIVERY_CRM_INTAKE_TOKEN is required}
+      NOTIFICATION_DELIVERY_INTERNAL_BASE_URL: http://127.0.0.1:4401
+      CRM_INTAKE_SLA_RABBITMQ_URL: ${CRM_INTAKE_SLA_WORKER_RABBITMQ_URL:?CRM_INTAKE_SLA_WORKER_RABBITMQ_URL is required}
+      CRM_INTAKE_SLA_RABBITMQ_ASSERT_TOPOLOGY: 'false'
+    mem_limit: ${CRM_WORKER_MEMORY_LIMIT:?CRM_WORKER_MEMORY_LIMIT is required}
+    memswap_limit: ${CRM_WORKER_MEMORY_LIMIT:?CRM_WORKER_MEMORY_LIMIT is required}
+    cpus: ${CRM_WORKER_CPUS:?CRM_WORKER_CPUS is required}
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:5317/health/ready',{signal:AbortSignal.timeout(2000)}).then(r=>process.exit(r.status===200?0:1)).catch(()=>process.exit(1))"
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 45s
+
+  crm-intake-sla-publisher:
+    profiles: [crm-intake-sla]
+    image: ${CRM_INTAKE_IMAGE:?CRM_INTAKE_IMAGE is required}
+    command: ['node', 'dist/src/main.js']
+    network_mode: host
+    user: '1001:1001'
+    read_only: true
+    tmpfs: ['/tmp:rw,nosuid,nodev,noexec,size=64m']
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 128
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 45s
+    labels:
+      com.winwidget.owner: crm-intake
+      com.winwidget.purpose: sla-publisher
+      com.winwidget.singleton: 'true'
+    environment:
+      NODE_ENV: production
+      MODE: production
+      APP_REVISION: ${CRM_INTAKE_REVISION:?CRM_INTAKE_REVISION is required}
+      CRM_INTAKE_LISTEN_HOST: 127.0.0.1
+      CORS_ALLOWED_ORIGINS: https://crm.winwidget.ru
+      CRM_INTAKE_PROCESS_ROLE: sla-publisher
+      CRM_INTAKE_PORT: '5318'
+      CRM_INTAKE_DATABASE_URL: ${CRM_INTAKE_SLA_PUBLISHER_DATABASE_URL:?CRM_INTAKE_SLA_PUBLISHER_DATABASE_URL is required}
+      CRM_ACCESS_INTERNAL_BASE_URL: ${CRM_ACCESS_INTERNAL_BASE_URL:-http://127.0.0.1:5300}
+      CRM_ACCESS_CRM_INTAKE_TOKEN: ${CRM_ACCESS_CRM_INTAKE_TOKEN:?CRM_ACCESS_CRM_INTAKE_TOKEN is required}
+      CRM_INTAKE_SLA_ENABLED: 'true'
+      CRM_INTAKE_NOTIFICATION_DELIVERY_TOKEN: ${CRM_INTAKE_NOTIFICATION_DELIVERY_TOKEN:?CRM_INTAKE_NOTIFICATION_DELIVERY_TOKEN is required}
+      NOTIFICATION_DELIVERY_CRM_INTAKE_TOKEN: ${NOTIFICATION_DELIVERY_CRM_INTAKE_TOKEN:?NOTIFICATION_DELIVERY_CRM_INTAKE_TOKEN is required}
+      NOTIFICATION_DELIVERY_INTERNAL_BASE_URL: http://127.0.0.1:4401
+      CRM_INTAKE_SLA_RABBITMQ_URL: ${CRM_INTAKE_SLA_PUBLISHER_RABBITMQ_URL:?CRM_INTAKE_SLA_PUBLISHER_RABBITMQ_URL is required}
+      CRM_INTAKE_SLA_RABBITMQ_ASSERT_TOPOLOGY: 'false'
+    mem_limit: ${CRM_PUBLISHER_MEMORY_LIMIT:?CRM_PUBLISHER_MEMORY_LIMIT is required}
+    memswap_limit: ${CRM_PUBLISHER_MEMORY_LIMIT:?CRM_PUBLISHER_MEMORY_LIMIT is required}
+    cpus: ${CRM_PUBLISHER_CPUS:?CRM_PUBLISHER_CPUS is required}
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:5318/health/ready',{signal:AbortSignal.timeout(2000)}).then(r=>process.exit(r.status===200?0:1)).catch(()=>process.exit(1))"
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 45s

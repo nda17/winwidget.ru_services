@@ -120,12 +120,18 @@ const mutableTables = {
 		'widget_control_receipts',
 		'widget_control_outbox',
 		'widget_transfer_receipts',
-		'widget_transfer_outbox'
+		'widget_transfer_outbox',
+		'sla_rules',
+		'sla_jobs',
+		'sla_receipts',
+		'sla_outbox'
 	],
 	'crm-customers': ['contacts', 'companies'],
 	'crm-sales': [
 		'deals',
 		'tasks',
+		'task_series',
+		'task_notifications',
 		'reminder_rules',
 		'reminder_jobs',
 		'reminder_deliveries',
@@ -142,7 +148,9 @@ const appendOnlyTables = {
 		'csv_imports',
 		'csv_import_rows',
 		'export_audit',
-		'widget_entry_snapshots'
+		'widget_entry_snapshots',
+		'sla_commands',
+		'sla_notifications'
 	],
 	'crm-customers': [
 		'customer_commands',
@@ -156,6 +164,8 @@ const appendOnlyTables = {
 		'command_receipts',
 		'task_command_receipts',
 		'task_timeline',
+		'task_series_commands',
+		'task_series_occurrences',
 		'reminder_rule_commands',
 		'pipeline_template_installations',
 		'pipeline_template_installation_commands',

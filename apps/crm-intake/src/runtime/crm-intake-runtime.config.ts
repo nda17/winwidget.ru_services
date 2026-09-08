@@ -11,22 +11,28 @@ export function parseCrmIntakePort(
 		| 'widget-control-worker'
 		| 'widget-control-publisher'
 		| 'widget-transfer-worker'
-		| 'widget-transfer-publisher' = 'api'
+		| 'widget-transfer-publisher'
+		| 'sla-worker'
+		| 'sla-publisher' = 'api'
 ): number {
 	const expected =
-		role === 'worker'
-			? 5311
-			: role === 'publisher'
-				? 5312
-				: role === 'widget-control-worker'
-					? 5313
-					: role === 'widget-control-publisher'
-						? 5314
-						: role === 'widget-transfer-worker'
-							? 5315
-							: role === 'widget-transfer-publisher'
-								? 5316
-								: 5310;
+		role === 'sla-worker'
+			? 5317
+			: role === 'sla-publisher'
+				? 5318
+				: role === 'worker'
+					? 5311
+					: role === 'publisher'
+						? 5312
+						: role === 'widget-control-worker'
+							? 5313
+							: role === 'widget-control-publisher'
+								? 5314
+								: role === 'widget-transfer-worker'
+									? 5315
+									: role === 'widget-transfer-publisher'
+										? 5316
+										: 5310;
 	if (value === undefined) return expected;
 	const port = Number(value);
 	if (!Number.isInteger(port) || port !== expected) {

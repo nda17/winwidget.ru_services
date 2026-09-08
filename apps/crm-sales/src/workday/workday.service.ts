@@ -61,7 +61,7 @@ export function workdayScope(
 		]
 	};
 }
-function taskDto(task: TaskRow) {
+export function taskDto(task: TaskRow) {
 	return {
 		id: task.id,
 		workspaceId: task.workspaceId,

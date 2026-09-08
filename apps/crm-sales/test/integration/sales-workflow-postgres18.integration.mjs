@@ -2,6 +2,7 @@ import 'reflect-metadata';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { createRequire } from 'node:module';
+import { taskSeriesPostgresCases } from './task-series-postgres18.cases.mjs';
 
 const require = createRequire(import.meta.url);
 const { PrismaClient } = require('@prisma/crm-sales-client');
@@ -1801,6 +1802,270 @@ try {
 				delete process.env.CRM_TASK_REMINDERS_ENABLED;
 			else process.env.CRM_TASK_REMINDERS_ENABLED = previousEnabled;
 		}
+	}
+	await taskSeriesPostgresCases(prisma);
+	// Assignment clock and transactional wake use the actual restricted runtime role.
+	{
+		const workspaceId = randomUUID(),
+			ruleId = randomUUID();
+		const configuration = {
+			schemaVersion: 1,
+			id: ruleId,
+			scope: 'PERSONAL',
+			ownerBinding: { subject: 'assignment-owner', membershipId: null },
+			title: 'Assignment only',
+			enabled: true,
+			channels: ['EMAIL'],
+			trigger: { kind: 'ASSIGNED', offsetMinutes: 0 },
+			repeats: null,
+			timeZone: 'UTC',
+			quietHours: null,
+			recipients: { kind: 'SELF' }
+		};
+		await prisma.reminderRule.create({
+			data: {
+				id: ruleId,
+				workspaceId,
+				scope: 'PERSONAL',
+				ownerSubject: 'assignment-owner',
+				configuration
+			}
+		});
+		let task = await prisma.salesTask.create({
+			data: {
+				workspaceId,
+				title: 'Assignment fixture',
+				dueAt: new Date('2027-01-01T12:00:00Z'),
+				assignedToSubject: 'assignment-owner'
+			}
+		});
+		assert.equal(task.assignmentVersion, 1);
+		assert.ok(task.assignmentAt instanceof Date);
+		const assignmentAt = task.assignmentAt;
+		const deliveryId = randomUUID();
+		await prisma.reminderDelivery.create({
+			data: {
+				id: deliveryId,
+				deduplicationKey: deliveryId.replaceAll('-', '').repeat(2),
+				workspaceId,
+				taskId: task.id,
+				ruleId,
+				taskVersion: task.version,
+				assignmentVersion: 1,
+				ruleVersion: 1,
+				occurrenceIndex: 0,
+				recipientSubject: 'assignment-owner',
+				channel: 'EMAIL',
+				nominalAt: assignmentAt
+			}
+		});
+		const jobsBefore = await prisma.reminderJob.count({
+			where: { workspaceId }
+		});
+		task = await prisma.salesTask.update({
+			where: { id: task.id },
+			data: {
+				title: 'Edited without reassignment',
+				version: { increment: 1 },
+				assignmentVersion: 99,
+				assignmentAt: new Date(0)
+			}
+		});
+		assert.equal(
+			task.assignmentVersion,
+			1,
+			'clock cannot be forged by task writers'
+		);
+		assert.deepEqual(task.assignmentAt, assignmentAt);
+		assert.equal(
+			(
+				await prisma.reminderDelivery.findUniqueOrThrow({
+					where: { id: deliveryId }
+				})
+			).status,
+			'PENDING'
+		);
+		assert.equal(
+			await prisma.reminderJob.count({ where: { workspaceId } }),
+			jobsBefore + 1
+		);
+		await assert.rejects(
+			prisma.$transaction(async tx => {
+				await tx.salesTask.update({
+					where: { id: task.id },
+					data: {
+						assignedToSubject: 'other',
+						version: { increment: 1 }
+					}
+				});
+				throw new Error('assignment rollback fixture');
+			}),
+			/assignment rollback fixture/
+		);
+		assert.equal(
+			(
+				await prisma.salesTask.findUniqueOrThrow({
+					where: { id: task.id }
+				})
+			).assignmentVersion,
+			1
+		);
+		assert.equal(
+			(
+				await prisma.reminderDelivery.findUniqueOrThrow({
+					where: { id: deliveryId }
+				})
+			).status,
+			'PENDING'
+		);
+		assert.equal(
+			await prisma.reminderJob.count({ where: { workspaceId } }),
+			jobsBefore + 1
+		);
+		task = await prisma.salesTask.update({
+			where: { id: task.id },
+			data: {
+				assignedToMembershipId: randomUUID(),
+				version: { increment: 1 }
+			}
+		});
+		assert.equal(
+			task.assignmentVersion,
+			2,
+			'membership rebinding is a new assignment'
+		);
+		assert.equal(
+			(
+				await prisma.reminderDelivery.findUniqueOrThrow({
+					where: { id: deliveryId }
+				})
+			).status,
+			'CANCELLED'
+		);
+		task = await prisma.salesTask.update({
+			where: { id: task.id },
+			data: {
+				assignedToSubject: 'other',
+				version: { increment: 1 }
+			}
+		});
+		assert.equal(task.assignmentVersion, 3);
+	}
+	{
+		const {
+			TaskNotificationsService
+		} = require('../../dist/src/task-notifications/task-notifications.service.js');
+		const workspaceId = randomUUID();
+		const current = {
+			schemaVersion: 1,
+			workspaceId,
+			subject: 'center-owner',
+			role: 'OWNER',
+			state: 'READ_ONLY',
+			dataScope: 'ALL',
+			teamIds: [],
+			permissions: ['sales:read']
+		};
+		const center = new TaskNotificationsService(
+			prisma,
+			{ authorize: async () => current },
+			{
+				verify: async () => ({
+					subject: current.subject,
+					membershipId: null
+				})
+			}
+		);
+		const query = {
+			workspaceId,
+			page: 1,
+			pageSize: 20,
+			unreadOnly: 'false'
+		};
+		const task = await prisma.salesTask.create({
+			data: {
+				workspaceId,
+				title: 'In-app task',
+				assignedToSubject: current.subject,
+				dueAt: new Date(Date.now() + 86400000)
+			}
+		});
+		let list = await center.list(current, query, 'Bearer fixture');
+		assert.equal(
+			list.total,
+			1,
+			'DUE must remain hidden before its deadline'
+		);
+		assert.equal(list.items[0].kind, 'ASSIGNED');
+		const assignedId = list.items[0].id;
+		const read = { workspaceId, actorMembershipId: null, read: true };
+		const first = await center.setRead(
+			current,
+			assignedId,
+			read,
+			'Bearer fixture'
+		);
+		assert.deepEqual(
+			await center.setRead(current, assignedId, read, 'Bearer fixture'),
+			first
+		);
+		assert.equal(
+			(await center.list(current, query, 'Bearer fixture')).unreadCount,
+			0
+		);
+		await center.setRead(
+			current,
+			assignedId,
+			{ ...read, read: false },
+			'Bearer fixture'
+		);
+		await prisma.salesTask.update({
+			where: { id: task.id },
+			data: {
+				dueAt: new Date(Date.now() - 1000),
+				version: { increment: 1 }
+			}
+		});
+		list = await center.list(current, query, 'Bearer fixture');
+		assert.equal(list.total, 2);
+		const dueId = list.items.find(item => item.kind === 'DUE').id;
+		await center.setRead(current, dueId, read, 'Bearer fixture');
+		await prisma.salesTask.update({
+			where: { id: task.id },
+			data: { status: 'COMPLETED', version: { increment: 1 } }
+		});
+		assert.equal(
+			(await center.list(current, query, 'Bearer fixture')).total,
+			0
+		);
+		await prisma.salesTask.update({
+			where: { id: task.id },
+			data: { status: 'OPEN', version: { increment: 1 } }
+		});
+		list = await center.list(current, query, 'Bearer fixture');
+		assert.equal(list.total, 1);
+		assert.equal(list.unreadCount, 1);
+		assert.equal(
+			list.items[0].id,
+			dueId,
+			'reopen restores DUE only, without another ASSIGNED'
+		);
+		await prisma.salesTask.update({
+			where: { id: task.id },
+			data: { assignedToSubject: 'other', version: { increment: 1 } }
+		});
+		assert.equal(
+			(await center.list(current, query, 'Bearer fixture')).total,
+			0
+		);
+		await assert.rejects(
+			center.setRead(current, dueId, read, 'Bearer fixture'),
+			error => error.getStatus?.() === 404
+		);
+		await assert.rejects(
+			prisma.$executeRaw`DELETE FROM crm_sales.task_notifications WHERE FALSE`,
+			error => error?.meta?.code === '42501'
+		);
 	}
 	console.log(
 		'CRM Sales PostgreSQL 18 workflow, tenant scope, replay, CAS and next-action invariants passed'

@@ -128,6 +128,110 @@ model ServiceIdentity {
   @@schema("crm_intake")
 }
 
+model SlaRule {
+  workspaceId  String   @id @map("workspace_id") @db.Uuid
+  version      Int      @default(1)
+  enabled      Boolean  @default(false)
+  config       Json
+  ownerBinding Json     @map("owner_binding")
+  effectiveAt  DateTime @map("effective_at")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  @@map("sla_rules")
+  @@schema("crm_intake")
+}
+
+model SlaCommand {
+  commandId    String   @id @map("command_id") @db.Uuid
+  workspaceId  String   @map("workspace_id") @db.Uuid
+  actorSubject String   @map("actor_subject") @db.VarChar(256)
+  action       String   @db.VarChar(24)
+  entityId     String   @map("entity_id") @db.Uuid
+  requestHash  String   @map("request_hash") @db.Char(64)
+  response     Json
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  @@index([workspaceId, createdAt, commandId])
+  @@map("sla_commands")
+  @@schema("crm_intake")
+}
+
+model SlaJob {
+  id            String    @id @default(uuid()) @db.Uuid
+  workspaceId   String    @map("workspace_id") @db.Uuid
+  entryId       String    @map("entry_id") @db.Uuid
+  ruleVersion   Int       @map("rule_version")
+  generation    Int       @default(1)
+  recipientCursor String? @map("recipient_cursor") @db.Uuid
+  activeEventId String    @unique @map("active_event_id") @db.Uuid
+  dueAt         DateTime  @map("due_at")
+  status        String    @default("PENDING") @db.VarChar(24)
+  breachedAt    DateTime? @map("breached_at")
+  createdAt     DateTime  @default(now()) @map("created_at")
+  updatedAt     DateTime  @updatedAt @map("updated_at")
+
+  @@unique([workspaceId, entryId, ruleVersion])
+  @@unique([workspaceId, id])
+  @@index([workspaceId, status, dueAt, id])
+  @@map("sla_jobs")
+  @@schema("crm_intake")
+}
+
+model SlaNotification {
+  id String @id @default(uuid()) @db.Uuid
+  workspaceId String @map("workspace_id") @db.Uuid
+  jobId String @map("job_id") @db.Uuid
+  recipientSubject String @map("recipient_subject") @db.VarChar(256)
+  recipientMembershipId String? @map("recipient_membership_id") @db.Uuid
+  channel String @db.VarChar(16)
+  deduplicationKey String @unique @map("deduplication_key") @db.Char(64)
+  createdAt DateTime @default(now()) @map("created_at")
+  @@index([workspaceId, jobId])
+  @@map("sla_notifications")
+  @@schema("crm_intake")
+}
+
+model SlaReceipt {
+  eventId      String    @map("event_id") @db.Uuid
+  consumer     String    @db.VarChar(64)
+  workspaceId  String    @map("workspace_id") @db.Uuid
+  jobId        String    @map("job_id") @db.Uuid
+  payloadHash  String    @map("payload_hash") @db.Char(64)
+  status       String    @db.VarChar(24)
+  leaseToken   String?   @map("lease_token") @db.Uuid
+  leaseUntil   DateTime? @map("lease_until")
+  retryAttempt Int       @default(0) @map("retry_attempt")
+  createdAt    DateTime  @default(now()) @map("created_at")
+  updatedAt    DateTime  @updatedAt @map("updated_at")
+
+  @@id([eventId, consumer])
+  @@index([status, leaseUntil])
+  @@map("sla_receipts")
+  @@schema("crm_intake")
+}
+
+model SlaOutbox {
+  id               String    @id @default(uuid()) @db.Uuid
+  eventId          String    @map("event_id") @db.Uuid
+  deduplicationKey String    @unique @map("deduplication_key") @db.VarChar(256)
+  route            String    @default("MAIN") @db.VarChar(16)
+  payload          Json
+  status           String    @default("PENDING") @db.VarChar(16)
+  availableAt      DateTime  @default(now()) @map("available_at")
+  leaseToken       String?   @map("lease_token") @db.Uuid
+  leaseUntil       DateTime? @map("lease_until")
+  attempts         Int       @default(0)
+  retryAttempt     Int       @default(0) @map("retry_attempt")
+  lastErrorCode    String?   @map("last_error_code") @db.VarChar(64)
+  publishedAt      DateTime? @map("published_at")
+  createdAt        DateTime  @default(now()) @map("created_at")
+
+  @@index([status, availableAt, id])
+  @@map("sla_outbox")
+  @@schema("crm_intake")
+}
+
 model InboxEntry {
   id               String          @id @default(uuid()) @db.Uuid
   workspaceId      String          @map("workspace_id") @db.Uuid

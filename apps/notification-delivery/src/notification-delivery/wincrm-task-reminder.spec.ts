@@ -156,6 +156,32 @@ describe('Task reminder broker/context contract', () => {
 			)
 		).toMatchObject({ deliver: false });
 	});
+	it('accepts strict assignment context v2 while preserving the exact legacy v1 shape', () => {
+		const assigned = {
+			...context(),
+			schemaVersion: 2,
+			content: { ...context().content, trigger: 'ASSIGNED' }
+		};
+		expect(
+			parseReminderDeliveryContext(assigned, event, 'EMAIL')
+		).toMatchObject({
+			schemaVersion: 2,
+			content: { trigger: 'ASSIGNED' }
+		});
+		for (const value of [
+			{ ...assigned, schemaVersion: 1 },
+			{ ...assigned, schemaVersion: 3 },
+			{ ...assigned, content: context().content },
+			{ ...assigned, content: { ...assigned.content, trigger: 'AT_DUE' } },
+			{
+				...assigned,
+				content: { ...assigned.content, destination: 'injected' }
+			}
+		])
+			expect(() =>
+				parseReminderDeliveryContext(value, event, 'EMAIL')
+			).toThrow();
+	});
 	it.each([
 		{ eventId: event.reference.id },
 		{ workspaceId: event.eventId },
@@ -366,6 +392,48 @@ describe('Task reminder adapter uses fresh context and current lease (fake trans
 		expect(value.sendMessage.mock.calls[0][1]).toContain(
 			`https://crm.winwidget.ru/planner?task=${context().content.taskId}`
 		);
+	});
+	it('renders assignment wording through the same branded email and leased Telegram adapters', async () => {
+		const value = setup();
+		value.resolve.mockResolvedValue({
+			...context(),
+			schemaVersion: 2,
+			content: { ...context().content, trigger: 'ASSIGNED' }
+		});
+		await value.adapter.deliver(
+			'wincrm-task-reminder-email',
+			event,
+			event.eventId,
+			'claim'
+		);
+		expect(value.sendMail.mock.calls[0][0].subject).toBe(
+			'Назначение задачи WinCRM'
+		);
+		expect(value.sendMail.mock.calls[0][0].html).toContain(
+			'Назначение задачи'
+		);
+		expect(value.sendMail.mock.calls[0][0].html).toContain(
+			'&lt;script&gt;'
+		);
+		value.resolve.mockResolvedValue({
+			...context(),
+			schemaVersion: 2,
+			channel: 'TELEGRAM',
+			destination: { email: null, telegramChatId: '123' },
+			content: { ...context().content, trigger: 'ASSIGNED' }
+		});
+		await value.adapter.deliver(
+			'wincrm-task-reminder-telegram',
+			{ ...event, eventType: TELEGRAM },
+			event.eventId,
+			'claim'
+		);
+		expect(value.sendMessage.mock.calls[0][1]).toMatch(
+			/^Назначение задачи WinCRM\n/
+		);
+		expect(value.sendMessage.mock.calls[0][2]).toEqual({
+			parseMode: null
+		});
 	});
 	it.each([null, { leaseExpiresAt: new Date(0) }])(
 		'never sends after the claim is lost/expired',

@@ -19,6 +19,11 @@ import { Module, OnApplicationShutdown } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { WincrmInvitationContextService } from './wincrm-invitation-context.service';
 import { WincrmTaskReminderContextService } from './wincrm-task-reminder-context.service';
+import { WincrmIntakeSlaContextService } from './wincrm-intake-sla-context.service';
+import {
+	WincrmIntakeSlaReadinessController,
+	WincrmIntakeSlaReadinessGuard
+} from './wincrm-intake-sla-readiness.controller';
 import {
 	WincrmTaskReminderReadinessController,
 	WincrmTaskReminderReadinessGuard
@@ -35,10 +40,13 @@ import {
 	],
 	controllers: [
 		NotificationDeliveryHealthController,
+		WincrmIntakeSlaReadinessController,
 		WincrmTaskReminderReadinessController
 	],
 	providers: [
 		WincrmInvitationContextService,
+		WincrmIntakeSlaContextService,
+		WincrmIntakeSlaReadinessGuard,
 		WincrmTaskReminderContextService,
 		WincrmTaskReminderReadinessGuard,
 		NotificationDeliveryAdapterService,

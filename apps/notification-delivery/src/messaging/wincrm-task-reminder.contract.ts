@@ -17,13 +17,14 @@ const uuid = (value: unknown): value is string =>
 	);
 export type ReminderChannel = 'EMAIL' | 'TELEGRAM';
 export interface ReminderContent {
+	trigger?: 'ASSIGNED';
 	taskId: string;
 	title: string;
 	dueAt: string;
 	timeZone: string;
 }
 export type ReminderDeliveryContext = {
-	schemaVersion: 1;
+	schemaVersion: 1 | 2;
 	eventId: string;
 	reminderId: string;
 	workspaceId: string;
@@ -88,7 +89,7 @@ export function parseReminderDeliveryContext(
 			'destination',
 			'content'
 		]) ||
-		value.schemaVersion !== 1 ||
+		(value.schemaVersion !== 1 && value.schemaVersion !== 2) ||
 		value.eventId !== event.eventId ||
 		value.reminderId !== event.reference.id ||
 		value.workspaceId !== event.reference.workspaceId ||
@@ -117,7 +118,14 @@ export function parseReminderDeliveryContext(
 					!/^-?[1-9][0-9]{0,19}$/.test(
 						value.destination.telegramChatId
 					)) ||
-			!exact(value.content, ['taskId', 'title', 'dueAt', 'timeZone']) ||
+			!exact(
+				value.content,
+				value.schemaVersion === 1
+					? ['taskId', 'title', 'dueAt', 'timeZone']
+					: ['taskId', 'title', 'dueAt', 'timeZone', 'trigger']
+			) ||
+			(value.schemaVersion === 2 &&
+				value.content.trigger !== 'ASSIGNED') ||
 			!uuid(value.content.taskId) ||
 			typeof value.content.title !== 'string' ||
 			!value.content.title.trim() ||

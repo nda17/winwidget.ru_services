@@ -44,6 +44,11 @@ import { CrmWorkspaceBrandingController } from './branding/workspace-branding.co
 import { CrmWorkspaceBrandingService } from './branding/workspace-branding.service';
 import { TaskReminderRecipientsController } from './team/task-reminder-recipients.controller';
 import { TaskReminderRecipientsService } from './team/task-reminder-recipients.service';
+import { TaskSeriesAuthorityController } from './team/task-series-authority.controller';
+import { TaskSeriesAuthorityService } from './team/task-series-authority.service';
+import { IntakeSlaAuthorityController } from './team/intake-sla-authority.controller';
+import { IntakeSlaAuthorityService } from './team/intake-sla-authority.service';
+import { IntakeSlaRecipientsService } from './team/intake-sla-recipients.service';
 
 const role = parseCrmAccessRole(process.env.CRM_ACCESS_PROCESS_ROLE);
 
@@ -66,6 +71,8 @@ const role = parseCrmAccessRole(process.env.CRM_ACCESS_PROCESS_ROLE);
 					CrmAssigneeController,
 					CrmAssigneeAuthorizationController,
 					TaskReminderRecipientsController,
+					TaskSeriesAuthorityController,
+					IntakeSlaAuthorityController,
 					CrmBillingController,
 					BillingOperationController
 				]
@@ -84,6 +91,9 @@ const role = parseCrmAccessRole(process.env.CRM_ACCESS_PROCESS_ROLE);
 		CrmWorkspaceBrandingService,
 		CrmAssigneeService,
 		TaskReminderRecipientsService,
+		TaskSeriesAuthorityService,
+		IntakeSlaAuthorityService,
+		IntakeSlaRecipientsService,
 		IdentityInvitationClient,
 		CrmTeamAdmissionService,
 		CrmTeamRabbitService,

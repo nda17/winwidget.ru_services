@@ -258,7 +258,7 @@
 			]
 		},
 		"crm-intake": {
-			"manifestSha256": "2f71331c820106a3ad8098eaabcb6d300b006cac3b1af40e49cd604a597aa04c",
+			"manifestSha256": "be05aa9dae1dc37ec139f3deca44975d25d765568a711a7c18957401e08bb9be",
 			"migrations": [
 				{
 					"name": "20260902010000_init_crm_intake",
@@ -291,6 +291,10 @@
 				{
 					"name": "20260907030000_add_widget_transfer_inbox",
 					"checksum": "97fd90ca0052f9a51390f04dc267805de7326035c4effb922d2b2bcf61067299"
+				},
+				{
+					"name": "20260908150000_add_intake_sla",
+					"checksum": "589b0303e2153e90d5a2edf6dc9655a1a4d96f59ade4f7057d17419bcd7b3234"
 				}
 			]
 		},
@@ -324,7 +328,7 @@
 			]
 		},
 		"crm-sales": {
-			"manifestSha256": "03a6683dd2c3edcdacacaa99777c011cb85754cb379deb5c40c8c2145bc5a9be",
+			"manifestSha256": "69a0cb6be857019f95a0c7bb20f97a282670e27637b0bc2f2ed4fdb297c5fa3e",
 			"migrations": [
 				{
 					"name": "20260902012000_init_crm_sales",
@@ -373,6 +377,18 @@
 				{
 					"name": "20260908090000_allow_task_reopen_after_deal_close",
 					"checksum": "7e5c9fb33cc6451ef5d2fb974e9bf1b018827bbdd0d0d518d60015220280a650"
+				},
+				{
+					"name": "20260908120000_add_recurring_task_series",
+					"checksum": "9a03d38db5037068c19c606d16a2515e3088d51c3e2bd88d60aa8270c87eb318"
+				},
+				{
+					"name": "20260908130000_add_task_assignment_notifications",
+					"checksum": "c26b5649ceaace470fcfbe10d76013a7edb7d20192d71669eb999f114fc7c87e"
+				},
+				{
+					"name": "20260908140000_add_task_notification_center",
+					"checksum": "799490bcf980d282ef48041934b8728dc6554d0db267455051b145fb0b7eef8a"
 				}
 			]
 		}

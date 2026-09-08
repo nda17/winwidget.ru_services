@@ -3,12 +3,13 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
 	currentOccurrence,
+	assignmentOccurrence,
 	deliveryKey,
 	reminderDeliveryEnabled,
 	remindersRole
 } from './reminder-delivery.contract';
 import { ReminderDeliveryService } from './reminder-delivery.service';
-import type { ReminderRuleV1 } from './reminder-rule';
+import { parseReminderRule, type ReminderRuleV1 } from './reminder-rule';
 
 const now = new Date('2026-09-07T12:00:00.000Z');
 const workspaceId = randomUUID(),
@@ -41,6 +42,8 @@ function fixture() {
 		title: 'Связаться с клиентом',
 		assignedToSubject: 'owner',
 		assignedToMembershipId: null,
+		assignmentVersion: 1,
+		assignmentAt: new Date(now),
 		teamId: null
 	};
 	let row: any = {
@@ -51,6 +54,7 @@ function fixture() {
 		ownerSubject: 'owner',
 		ownerMembershipId: null,
 		configuration: rule(),
+		updatedAt: new Date(now.getTime() - 1000),
 		archivedAt: null
 	};
 	let delivery: any = {
@@ -279,6 +283,151 @@ describe('Sales durable reminder generation and send-time authority', () => {
 			null,
 			null
 		]);
+	});
+	it('ASSIGNED is an explicit zero-offset, non-repeating trigger, never a deadline reminder', () => {
+		const assigned = {
+			...rule(),
+			trigger: { kind: 'ASSIGNED' as const, offsetMinutes: 0 }
+		};
+		expect(parseReminderRule(assigned).trigger.kind).toBe('ASSIGNED');
+		expect(currentOccurrence(assigned, now, now.getTime())).toBeNull();
+		for (const patch of [
+			{ trigger: { kind: 'ASSIGNED', offsetMinutes: 1 } },
+			{ repeats: { count: 2, intervalMinutes: 15 } }
+		])
+			expect(() => parseReminderRule({ ...assigned, ...patch })).toThrow();
+		expect(
+			assignmentOccurrence(assigned, null, now, now.getTime())
+		).toBeNull();
+		expect(
+			assignmentOccurrence(
+				assigned,
+				now,
+				new Date(now.getTime() + 1),
+				now.getTime()
+			)
+		).toBeNull();
+	});
+	it('assignment delivery ignores deadline and deduplicates title/deadline edits by assignment epoch', async () => {
+		const h = fixture();
+		h.row().configuration.trigger = { kind: 'ASSIGNED', offsetMinutes: 0 };
+		h.task().dueAt = new Date('2027-01-01T12:00:00.000Z');
+		await (h.service as any).generate(h.task(), h.row(), () => true);
+		expect(h.created).toHaveLength(2);
+		expect(h.created[0]).toMatchObject({
+			taskVersion: 2,
+			assignmentVersion: 1,
+			nominalAt: now
+		});
+		h.task().version++;
+		h.task().title = 'Новый текст';
+		h.task().dueAt = new Date('2027-02-01T12:00:00.000Z');
+		await (h.service as any).generate(h.task(), h.row(), () => true);
+		expect(h.created).toHaveLength(2);
+		expect(h.outbox).toHaveLength(2);
+		h.setDelivery(h.created.find(item => item.channel === 'EMAIL'));
+		const delivery = h.delivery();
+		delivery.status = 'PENDING';
+		expect(
+			await h.service.context(delivery.id, {
+				eventId: delivery.id,
+				workspaceId,
+				channel: 'EMAIL'
+			})
+		).toMatchObject({
+			schemaVersion: 2,
+			deliver: true,
+			content: { trigger: 'ASSIGNED', title: 'Новый текст' }
+		});
+		h.task().assignmentVersion++;
+		expect(
+			await h.service.context(delivery.id, {
+				eventId: delivery.id,
+				workspaceId,
+				channel: 'EMAIL'
+			})
+		).toMatchObject({ deliver: false });
+	});
+	it.each([
+		'historical',
+		'enabled-after-assignment',
+		'disabled',
+		'completed',
+		'quiet',
+		'revoked',
+		'no-confirmed-channels'
+	])('never produces assignment notices for %s', async reason => {
+		const h = fixture();
+		h.row().configuration.trigger = { kind: 'ASSIGNED', offsetMinutes: 0 };
+		if (reason === 'historical') {
+			h.task().assignmentVersion = null;
+			h.task().assignmentAt = null;
+		}
+		if (reason === 'enabled-after-assignment')
+			h.row().updatedAt = new Date(now.getTime() + 1);
+		if (reason === 'disabled') h.row().configuration.enabled = false;
+		if (reason === 'completed') h.task().status = 'COMPLETED';
+		if (reason === 'quiet')
+			h.row().configuration.quietHours = { start: '14:00', end: '16:00' };
+		if (reason === 'revoked')
+			h.recipients.read.mockResolvedValue({
+				allowed: false,
+				items: [],
+				nextCursor: null
+			});
+		if (reason === 'no-confirmed-channels')
+			h.recipients.read.mockResolvedValue({
+				allowed: true,
+				items: [
+					{
+						binding: { subject: 'owner', membershipId: null },
+						email: null,
+						telegramChatId: null
+					}
+				],
+				nextCursor: null
+			});
+		await (h.service as any).generate(h.task(), h.row(), () => true);
+		expect(h.created).toHaveLength(0);
+		expect(h.outbox).toHaveLength(0);
+	});
+	it('assignment wakes and recovery pages include tasks beyond the due-reminder horizon', async () => {
+		const h = fixture();
+		await h.service.processPage(
+			{ id: randomUUID(), taskId, workspaceId } as never,
+			randomUUID(),
+			() => true
+		);
+		expect(
+			h.prisma.salesTask.findMany.mock.calls[0][0].where.AND[0].OR
+		).toContainEqual({ assignmentAt: { not: null } });
+	});
+	it('assignment send-time still requires current authority and rejects mixed legacy/new contexts', async () => {
+		const h = fixture();
+		h.row().configuration.trigger = { kind: 'ASSIGNED', offsetMinutes: 0 };
+		const input = {
+			eventId: deliveryId,
+			workspaceId,
+			channel: 'EMAIL' as const
+		};
+		expect(await h.service.context(deliveryId, input)).toMatchObject({
+			deliver: false
+		});
+		h.delivery().assignmentVersion = 1;
+		h.recipients.read.mockResolvedValueOnce({
+			allowed: false,
+			items: [],
+			nextCursor: null
+		});
+		expect(await h.service.context(deliveryId, input)).toMatchObject({
+			deliver: false
+		});
+		h.recipients.read.mockRejectedValueOnce(
+			new Error('authority unavailable')
+		);
+		await expect(h.service.context(deliveryId, input)).rejects.toThrow(
+			'authority unavailable'
+		);
 	});
 	it('does not generate an unavailable channel or during quiet hours', async () => {
 		const h = fixture();
