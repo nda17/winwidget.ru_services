@@ -1407,7 +1407,7 @@ jobs:
           done
 
   deploy-production:
-    name: Activate CRM task reminders
+    name: Update CRM MVP applications
     needs:
       - billing-crm-policy-integration
       - billing-wincrm-commerce-integration
@@ -1427,10 +1427,10 @@ jobs:
     uses: nda17/winwidget.ru_infra/.github/workflows/deploy-production.yml@1a3cd1dd276f249a415c90f51c4084e69257e6da
     with:
       services_revision: ${{ github.sha }}
-      release_scope: crm-reminders-activate
+      release_scope: crm-upgrade
       expected_live_revision: '837113b9f9f303bd6c043c2a2e37b0791369d7a3'
       expected_service_env_sha256: '910c80c75219678eb94daf8e6cabc504f83c1e5fa5e6a1d00feba38edad430ff'
-      expected_crm_reminders_baseline_sha256: '73f379bf3413a7a14fcb669d9603c44381680ee3f72722ee18687d79c707fba2'
+      expected_crm_upgrade_baseline_sha256: '4f9c5072a49d3b9d0099fc151237533dcdecb5d26e7a760a6671fad432e07273'
     secrets:
       BACKEND_PRODUCTION_SSH_HOST: ${{ secrets.PRODUCTION_SSH_HOST }}
       BACKEND_PRODUCTION_SSH_PORT: ${{ secrets.PRODUCTION_SSH_PORT }}
