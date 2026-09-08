@@ -1407,7 +1407,7 @@ jobs:
           done
 
   deploy-production:
-    name: Update Operations CRM backup manifests
+    name: Activate CRM Intake SLA
     needs:
       - billing-crm-policy-integration
       - billing-wincrm-commerce-integration
@@ -1427,10 +1427,10 @@ jobs:
     uses: nda17/winwidget.ru_infra/.github/workflows/deploy-production.yml@992e85c562dc1e65d383ff295b350ccd5e982849
     with:
       services_revision: ${{ github.sha }}
-      release_scope: operations-backup-runtime
-      expected_live_revision: '3c09cc535256d54519997514e693f0b43c8de143'
-      expected_service_env_sha256: 'bf85df42cd5785af7129279732cb9b6d342a9f29efddc6614c3de2fa5a744660'
-      expected_operations_backup_baseline_sha256: '926cee26058d78ed72628f5e813c804135b28d7bbcc9ae2142731b23d4e3f55e'
+      release_scope: crm-intake-sla-activate
+      expected_live_revision: '837113b9f9f303bd6c043c2a2e37b0791369d7a3'
+      expected_service_env_sha256: 'a3c3b245a2fe17bb8f59d4e3baea72cb624d3a7ec838abffff72289b25704f51'
+      expected_crm_reminders_baseline_sha256: '623e94de4212b876017b388f43a7af71c4ca8c97950edde5154823fd41f4fe04'
     secrets:
       BACKEND_PRODUCTION_SSH_HOST: ${{ secrets.PRODUCTION_SSH_HOST }}
       BACKEND_PRODUCTION_SSH_PORT: ${{ secrets.PRODUCTION_SSH_PORT }}
