@@ -1424,7 +1424,7 @@ jobs:
       - service-integration
       - widgets-integration
     if: github.event_name == 'push' && github.ref == 'refs/heads/prod'
-    uses: nda17/winwidget.ru_infra/.github/workflows/deploy-production.yml@9f9ac13b6be691fc6dbc7c773d5d5abfb76b0fd1
+    uses: nda17/winwidget.ru_infra/.github/workflows/deploy-production.yml@1a3cd1dd276f249a415c90f51c4084e69257e6da
     with:
       services_revision: ${{ github.sha }}
       release_scope: crm-reminders-activate
