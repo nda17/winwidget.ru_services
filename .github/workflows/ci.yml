@@ -1407,7 +1407,7 @@ jobs:
           done
 
   deploy-production:
-    name: Activate CRM Intake SLA
+    name: Enable Tilda ingress in Gateway
     needs:
       - billing-crm-policy-integration
       - billing-wincrm-commerce-integration
@@ -1424,13 +1424,12 @@ jobs:
       - service-integration
       - widgets-integration
     if: github.event_name == 'push' && github.ref == 'refs/heads/prod'
-    uses: nda17/winwidget.ru_infra/.github/workflows/deploy-production.yml@992e85c562dc1e65d383ff295b350ccd5e982849
+    uses: nda17/winwidget.ru_infra/.github/workflows/deploy-production.yml@1a0ece4272e3a3d38ad7fb62247d2a1507fe262d
     with:
       services_revision: ${{ github.sha }}
-      release_scope: crm-intake-sla-activate
+      release_scope: gateway-tilda-upgrade
       expected_live_revision: '837113b9f9f303bd6c043c2a2e37b0791369d7a3'
-      expected_service_env_sha256: 'a3c3b245a2fe17bb8f59d4e3baea72cb624d3a7ec838abffff72289b25704f51'
-      expected_crm_reminders_baseline_sha256: '623e94de4212b876017b388f43a7af71c4ca8c97950edde5154823fd41f4fe04'
+      expected_service_env_sha256: '2dbb73cd420be18899a350c6375bac07857c245a48b0937267a7ccdcd4bcff73'
     secrets:
       BACKEND_PRODUCTION_SSH_HOST: ${{ secrets.PRODUCTION_SSH_HOST }}
       BACKEND_PRODUCTION_SSH_PORT: ${{ secrets.PRODUCTION_SSH_PORT }}

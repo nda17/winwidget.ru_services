@@ -474,7 +474,7 @@ if (!servicesWorkflow.includes('node .github/scripts/test-crm-bootstrap-failure.
 	throw new Error('CRM bounded bootstrap process gate is missing');
 }
 const pinnedInfraRevision =
-	'992e85c562dc1e65d383ff295b350ccd5e982849';
+	'1a0ece4272e3a3d38ad7fb62247d2a1507fe262d';
 for (const evidence of [
 	"cancel-in-progress: ${{ github.ref != 'refs/heads/prod' }}",
 	'operations-control-ledger:',
@@ -534,18 +534,17 @@ if (
 	infraReleaseReferences.length !== 1 ||
 	infraReleaseReferences.some(reference => reference[1] !== pinnedInfraRevision)
 ) {
-	throw new Error('CRM Intake SLA activation must use one exact reviewed infra SHA');
+	throw new Error('Tilda Gateway upgrade must use one exact reviewed infra SHA');
 }
-// Activate only Intake SLA after its readers, migrations and backup inventory.
-// Preserve existing reminders, payments, runtime images and all neighbors.
-for (const [job, scope] of [['deploy-production', 'crm-intake-sla-activate']]) {
+// Code-only Gateway upgrade; preserve routes, canonical env and all CRM/SLA peers.
+for (const [job, scope] of [['deploy-production', 'gateway-tilda-upgrade']]) {
 	const block = servicesWorkflow.match(new RegExp('^  ' + job + ':\\n([\\s\\S]*?)(?=^  [a-z][a-z0-9-]*:|$(?![\\s\\S]))', 'm'))?.[1];
 	if (!block || !block.includes('release_scope: ' + scope) ||
 		!block.includes('services_revision: ${{ github.sha }}') ||
 		!block.includes("expected_live_revision: '837113b9f9f303bd6c043c2a2e37b0791369d7a3'") ||
-		!block.includes("expected_service_env_sha256: 'a3c3b245a2fe17bb8f59d4e3baea72cb624d3a7ec838abffff72289b25704f51'") ||
-		!block.includes("expected_crm_reminders_baseline_sha256: '623e94de4212b876017b388f43a7af71c4ca8c97950edde5154823fd41f4fe04'")) {
-		throw new Error('CRM Intake SLA activation must pin its live Gateway revision, owner env and write-once SLA baseline');
+		!block.includes("expected_service_env_sha256: '2dbb73cd420be18899a350c6375bac07857c245a48b0937267a7ccdcd4bcff73'") ||
+		/expected_crm_\w+_baseline_sha256:|operations_evidence_sha256:/.test(block)) {
+		throw new Error('Tilda Gateway upgrade must pin its live revision and unchanged canonical env without foreign authority');
 	}
 }
 if (/release_scope: (?:crm-prepare|crm-databases|crm-runtime|all)\b/.test(servicesWorkflow)) {
