@@ -2032,7 +2032,11 @@ try {
 		await center.setRead(current, dueId, read, 'Bearer fixture');
 		await prisma.salesTask.update({
 			where: { id: task.id },
-			data: { status: 'COMPLETED', version: { increment: 1 } }
+			data: {
+				status: 'COMPLETED',
+				completedAt: new Date(),
+				version: { increment: 1 }
+			}
 		});
 		assert.equal(
 			(await center.list(current, query, 'Bearer fixture')).total,
@@ -2040,7 +2044,11 @@ try {
 		);
 		await prisma.salesTask.update({
 			where: { id: task.id },
-			data: { status: 'OPEN', version: { increment: 1 } }
+			data: {
+				status: 'OPEN',
+				completedAt: null,
+				version: { increment: 1 }
+			}
 		});
 		list = await center.list(current, query, 'Bearer fixture');
 		assert.equal(list.total, 1);
