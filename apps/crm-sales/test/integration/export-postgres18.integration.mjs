@@ -358,6 +358,7 @@ try {
 		);
 		for (const table of [
 			'export_audit',
+			'task_notifications',
 			'tasks',
 			'deals',
 			'pipeline_template_installations',
