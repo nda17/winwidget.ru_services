@@ -133,6 +133,77 @@ function harness(access = actor) {
 }
 
 describe('workday task commands', () => {
+	it.each(['WON', 'LOST'])(
+		'reopens and completes an existing task on a %s deal without changing its result',
+		async status => {
+			const { service, tx, setRow } = harness();
+			const deal = {
+				id: dealId,
+				workspaceId,
+				status,
+				archivedAt: null,
+				version: 5,
+				nextTaskId: null
+			};
+			setRow({ dealId, deal, status: 'COMPLETED', completedAt: now });
+			for (const [index, target] of [
+				'OPEN',
+				'IN_PROGRESS',
+				'COMPLETED',
+				'IN_PROGRESS'
+			].entries()) {
+				const result = (await service.status(
+					actor,
+					taskId,
+					{
+						...base,
+						commandId: `33333333-3333-4333-8333-${String(index).padStart(12, '0')}`,
+						expectedVersion: index + 1,
+						status: target as SetTaskStatusDto['status']
+					},
+					'Bearer fixture'
+				)) as {
+					task: {
+						status: string;
+						version: number;
+						completedAt: string | null;
+						dueAt: string;
+						assignedToSubject: string;
+						dealId: string | null;
+					};
+				};
+				expect(result.task.status).toBe(target);
+				expect(result.task.version).toBe(index + 2);
+				expect(result.task.completedAt === null).toBe(
+					target !== 'COMPLETED'
+				);
+				expect(result.task.dueAt).toBe(dueAt);
+				expect(result.task.assignedToSubject).toBe(
+					original.assignedToSubject
+				);
+				expect(result.task.dealId).toBe(dealId);
+			}
+			expect(tx.deal.updateMany).not.toHaveBeenCalled();
+			expect(tx.taskTimeline.create).toHaveBeenCalledTimes(4);
+			expect(tx.taskCommandReceipt.create).toHaveBeenCalledTimes(4);
+		}
+	);
+	it('still rejects status changes for archived deals', async () => {
+		const { service, tx, setRow } = harness();
+		setRow({
+			dealId,
+			deal: { id: dealId, workspaceId, status: 'WON', archivedAt: now }
+		});
+		await expect(
+			service.status(
+				actor,
+				taskId,
+				{ ...base, expectedVersion: 1, status: 'OPEN' },
+				'Bearer fixture'
+			)
+		).rejects.toBeInstanceOf(ConflictException);
+		expect(tx.salesTask.updateMany).not.toHaveBeenCalled();
+	});
 	it('creates a real standalone task with an immutable receipt and audit in the same transaction', async () => {
 		const { service, tx, directory } = harness();
 		const result = (await service.create(

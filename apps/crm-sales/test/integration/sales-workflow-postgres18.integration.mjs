@@ -366,6 +366,66 @@ try {
 	assert.equal(current.status, 'WON');
 	assert.equal(current.nextTask, null);
 	assert.equal(current.version, 3);
+	// Resuming a task must not reverse the won deal or touch its commercial result.
+	const closedDealBefore = await prisma.deal.findUnique({
+		where: { id: current.id }
+	});
+	const completedTask = await prisma.salesTask.findFirst({
+		where: { dealId: current.id, status: 'COMPLETED' },
+		orderBy: { id: 'asc' }
+	});
+	assert.ok(completedTask);
+	const reopenedWorkday = new WorkdayService(
+		prisma,
+		{ authorize: async () => access },
+		{}
+	);
+	let taskVersion = completedTask.version;
+	for (const status of [
+		'OPEN',
+		'IN_PROGRESS',
+		'COMPLETED',
+		'OPEN',
+		'COMPLETED'
+	]) {
+		const command = {
+			schemaVersion: 1,
+			workspaceId: access.workspaceId,
+			commandId: randomUUID(),
+			expectedVersion: taskVersion,
+			status
+		};
+		const changed = await reopenedWorkday.status(
+			access,
+			completedTask.id,
+			command,
+			'Bearer fixture'
+		);
+		assert.equal(changed.task.status, status);
+		assert.equal(changed.task.version, ++taskVersion);
+		assert.equal(changed.task.dueAt, completedTask.dueAt.toISOString());
+		assert.equal(
+			changed.task.assignedToSubject,
+			completedTask.assignedToSubject
+		);
+		assert.equal(
+			changed.task.completedAt === null,
+			['OPEN', 'IN_PROGRESS'].includes(status)
+		);
+		assert.deepEqual(
+			await reopenedWorkday.status(
+				access,
+				completedTask.id,
+				command,
+				'Bearer fixture'
+			),
+			changed
+		);
+		assert.deepEqual(
+			await prisma.deal.findUnique({ where: { id: current.id } }),
+			closedDealBefore
+		);
+	}
 	assert.equal(
 		await prisma.salesTask.count({
 			where: { dealId: current.id, status: 'OPEN' }

@@ -359,7 +359,12 @@ export class WorkdayService {
 							if (!deal) missing();
 						}
 						if (deal) {
-							if (deal.status !== 'OPEN' || deal.archivedAt)
+							// A task may need more work after its deal was won/lost.
+							// Status changes must not reopen or otherwise mutate that deal.
+							if (
+								deal.archivedAt ||
+								(deal.status !== 'OPEN' && kind !== 'STATUS_CHANGED')
+							)
 								conflict('crm_task_deal_closed');
 							await tx.$queryRaw(
 								Prisma.sql`SELECT id FROM crm_sales.deals WHERE id=${deal.id}::uuid AND workspace_id=${access.workspaceId}::uuid FOR UPDATE`
@@ -436,7 +441,7 @@ export class WorkdayService {
 							if (updated.count !== 1) conflict();
 							task = await this.visible(tx, access, id);
 						}
-						if (deal) {
+						if (deal?.status === 'OPEN') {
 							const selected = await tx.salesTask.findFirst({
 								where: {
 									workspaceId: access.workspaceId,
