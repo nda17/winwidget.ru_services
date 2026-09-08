@@ -944,6 +944,21 @@ storage с атомарными counters и TTL. Сохранить buckets по
 и login identity, определить fail-open/fail-closed и проверить рестарт,
 конкуренцию и балансировку между replicas.
 
+### P1 — не удалять refresh-cookie при временном сбое Identity
+
+В `apps/identity/src/auth/auth.controller.ts` обработчик `/auth/refresh`
+удаляет refresh-cookie при любом исключении, кроме
+`refresh_rotation_in_progress`. Поэтому временный внутренний сбой, например
+ошибка PostgreSQL, может превратить повторяемую ошибку в потерю входа на
+следующем запросе. Frontend-продление access token не устраняет это условие.
+
+При отдельной согласованной правке Identity разделить подтверждённый отзыв/
+истечение сессии и временные ошибки: очищать cookie только при доказанном
+отказе авторизации, сохранять при временной недоступности. До изменения
+согласовать совместимость Widgets/CRM и проверить initial login, logout,
+отзыв, concurrent rotation, истечение и восстановление после `5xx` без
+реальных платежей или ослабления серверной проверки refresh-token.
+
 ### P1 — штатная и аварийная ротация Identity signing keys
 
 Текущий keyset нельзя менять ad hoc. Нужен reviewed action, который атомарно
