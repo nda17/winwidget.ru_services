@@ -47,6 +47,15 @@ BEGIN
       END IF;
     ELSIF deal_record.archived_at IS NOT NULL AND active_count <> 0 THEN
       RAISE EXCEPTION 'Archived deal cannot retain an active task';
+    ELSIF deal_record.status <> 'OPEN' AND TG_TABLE_NAME = 'tasks' AND TG_OP <> 'DELETE' THEN
+      -- Reopening existing work is not permission to insert or move an active
+      -- task into a closed deal. Keep those previous database guards intact.
+      IF NEW.deal_id = affected.id AND NEW.workspace_id = affected.workspace_id
+        AND NEW.status IN ('OPEN', 'IN_PROGRESS')
+        AND (TG_OP = 'INSERT' OR NEW.deal_id IS DISTINCT FROM OLD.deal_id
+          OR NEW.workspace_id IS DISTINCT FROM OLD.workspace_id) THEN
+        RAISE EXCEPTION 'Cannot add an active task to a closed deal';
+      END IF;
     END IF;
   END LOOP;
   RETURN NULL;
