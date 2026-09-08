@@ -1405,7 +1405,7 @@ jobs:
           done
 
   deploy-production:
-    name: Activate CRM company lookup provider
+    name: Activate CRM task reminders
     needs:
       - billing-crm-policy-integration
       - billing-wincrm-commerce-integration
@@ -1425,10 +1425,10 @@ jobs:
     uses: nda17/winwidget.ru_infra/.github/workflows/deploy-production.yml@b96e9acd876087edf2a4a37aa1bcf2efdfe77d99
     with:
       services_revision: ${{ github.sha }}
-      release_scope: crm-customers-provider-config
+      release_scope: crm-reminders-activate
       expected_live_revision: '837113b9f9f303bd6c043c2a2e37b0791369d7a3'
-      expected_service_env_sha256: '76a40ffade8eb3cbaa97a36e74b4c87dd6fc3970ccb3b7af8e62e003d3e3c148'
-      expected_crm_customers_provider_baseline_sha256: '929843c3776d0d5f02e2f6ac7d139c10416be93525513317b578bf4d13b08086'
+      expected_service_env_sha256: '910c80c75219678eb94daf8e6cabc504f83c1e5fa5e6a1d00feba38edad430ff'
+      expected_crm_reminders_baseline_sha256: '73f379bf3413a7a14fcb669d9603c44381680ee3f72722ee18687d79c707fba2'
     secrets:
       BACKEND_PRODUCTION_SSH_HOST: ${{ secrets.PRODUCTION_SSH_HOST }}
       BACKEND_PRODUCTION_SSH_PORT: ${{ secrets.PRODUCTION_SSH_PORT }}
