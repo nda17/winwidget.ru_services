@@ -1422,7 +1422,7 @@ jobs:
       - service-integration
       - widgets-integration
     if: github.event_name == 'push' && github.ref == 'refs/heads/prod'
-    uses: nda17/winwidget.ru_infra/.github/workflows/deploy-production.yml@87ee9e36cf451d5b9ecd7f29604d9f19febb143a
+    uses: nda17/winwidget.ru_infra/.github/workflows/deploy-production.yml@de0aa987eb07bff62d0398c07eecc32930ad162c
     with:
       services_revision: ${{ github.sha }}
       release_scope: crm-commerce-activate
