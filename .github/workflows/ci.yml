@@ -1405,7 +1405,7 @@ jobs:
           done
 
   deploy-production:
-    name: Upgrade WinCRM and companion service code
+    name: Enable Operations backups for CRM databases
     needs:
       - billing-crm-policy-integration
       - billing-wincrm-commerce-integration
@@ -1425,10 +1425,10 @@ jobs:
     uses: nda17/winwidget.ru_infra/.github/workflows/deploy-production.yml@ee61c47936aa68507ee21b5f85a6bf0ce47719f5
     with:
       services_revision: ${{ github.sha }}
-      release_scope: crm-upgrade
-      expected_live_revision: '837113b9f9f303bd6c043c2a2e37b0791369d7a3'
-      expected_service_env_sha256: '73b86415a52f7b9756acd7d24efae98187d80de684f1eeb40b9fcfd465e7fccd'
-      expected_crm_upgrade_baseline_sha256: '885d0cc8379185920c0ac227aa47e61f1371716beaa7fb39db226595730b769b'
+      release_scope: operations-backup-runtime
+      expected_live_revision: '73b372fa04abb609b0c7d3d412fe6cab3f23f024'
+      expected_service_env_sha256: 'bf85df42cd5785af7129279732cb9b6d342a9f29efddc6614c3de2fa5a744660'
+      expected_operations_backup_baseline_sha256: '9dbf5f4461621a1926219f45ddedede923ad42ca6e12ea4eafba1a6f69de8495'
     secrets:
       BACKEND_PRODUCTION_SSH_HOST: ${{ secrets.PRODUCTION_SSH_HOST }}
       BACKEND_PRODUCTION_SSH_PORT: ${{ secrets.PRODUCTION_SSH_PORT }}
