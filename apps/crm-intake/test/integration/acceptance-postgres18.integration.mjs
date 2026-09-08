@@ -22,6 +22,7 @@ const { AcceptancePublisher } =
 	await import('../../dist/src/acceptance/acceptance.publisher.js');
 const { AcceptanceWorker } =
 	await import('../../dist/src/acceptance/acceptance.worker.js');
+const { SlaService } = await import('../../dist/src/sla/sla.service.js');
 const {
 	AcceptanceRabbit,
 	ACCEPTANCE_EXCHANGE,
@@ -558,6 +559,8 @@ try {
 			'CRM Intake real RabbitMQ: owned push consume, confirm+mandatory, duplicate delivery, durable receipts, PG-delayed retry across publisher restart and drain passed'
 		);
 	}
+	// SLA fixtures enqueue their own acceptance request: run only after the existing publisher/drain assertions.
+	await verifySlaPostgres();
 	console.log(
 		'CRM Intake PG18 acceptance: atomic intent/outbox, competing claims, crash/expired completion, partial recovery, tombstones, reviewed restart, CAS and retry passed'
 	);
@@ -570,6 +573,14 @@ try {
 		await inspector?.close();
 		await migrator.$transaction(async tx => {
 			const where = { workspaceId };
+			await tx.slaNotification.deleteMany({ where });
+			await tx.slaReceipt.deleteMany({ where });
+			await tx.slaOutbox.deleteMany({
+				where: { payload: { path: ['workspaceId'], equals: workspaceId } }
+			});
+			await tx.slaJob.deleteMany({ where });
+			await tx.slaCommand.deleteMany({ where });
+			await tx.slaRule.deleteMany({ where });
 			await tx.acceptanceReceipt.deleteMany({ where });
 			await tx.acceptanceOutbox.deleteMany({
 				where: { payload: { path: ['workspaceId'], equals: workspaceId } }
@@ -583,6 +594,280 @@ try {
 		await Promise.all([runtime.$disconnect(), migrator.$disconnect()]);
 	}
 }
+
+async function verifySlaPostgres() {
+	// Real runtime principal: the six additive tables retain exact mutable/append-only grants.
+	const mutable = ['sla_rules', 'sla_jobs', 'sla_receipts', 'sla_outbox'];
+	for (const table of [...mutable, 'sla_commands', 'sla_notifications']) {
+		const [grants] = await runtime.$queryRawUnsafe(
+			`SELECT has_table_privilege(current_user,$1,'SELECT') AS readable,
+			 has_table_privilege(current_user,$1,'INSERT') AS insertable,
+			 has_table_privilege(current_user,$1,'UPDATE') AS updatable,
+			 has_table_privilege(current_user,$1,'DELETE') AS deletable,
+			 has_table_privilege(current_user,$1,'TRUNCATE') AS truncatable`,
+			`crm_intake.${table}`
+		);
+		assert.deepEqual(grants, {
+			readable: true,
+			insertable: true,
+			updatable: mutable.includes(table),
+			deletable: false,
+			truncatable: false
+		});
+		await assert.rejects(
+			runtime.$executeRawUnsafe(
+				`DELETE FROM crm_intake.${table} WHERE false`
+			),
+			error => error?.meta?.code === '42501'
+		);
+		if (!mutable.includes(table))
+			await assert.rejects(
+				runtime.$executeRawUnsafe(
+					`UPDATE crm_intake.${table} SET workspace_id=workspace_id WHERE false`
+				),
+				error => error?.meta?.code === '42501'
+			);
+	}
+	const authority = {
+		owner: async (workspace, subject) => {
+			assert.equal(workspace, workspaceId);
+			assert.equal(subject, context.subject);
+			return { subject, membershipId: null };
+		}
+	};
+	const readiness = { ready: async () => true };
+	const sla = new SlaService(runtime, authority, readiness);
+	const config = {
+		enabled: true,
+		workingMinutes: 60,
+		timeZone: 'UTC',
+		weekdays: [1, 2, 3, 4, 5, 6, 7],
+		workStart: '00:00',
+		workEnd: '23:59',
+		responsibleBinding: null,
+		notifyManagers: true,
+		channels: ['EMAIL']
+	};
+	const save = { ...command(0), config };
+
+	// Persisted rule/command replay and role/workspace guards, not mocked Prisma rows.
+	const saved = await sla.save(context, save);
+	assert.deepEqual(await sla.save(context, save), saved);
+	await assert.rejects(
+		sla.save(context, {
+			...save,
+			config: { ...config, workingMinutes: 30 }
+		}),
+		status(409)
+	);
+	for (const denied of [
+		{ ...context, state: 'READ_ONLY' },
+		{ ...context, role: 'MANAGER' },
+		{ ...context, workspaceId: randomUUID() }
+	])
+		await assert.rejects(sla.save(denied, save), status(403));
+	assert.equal(
+		await runtime.slaCommand.count({ where: { workspaceId } }),
+		1
+	);
+	const createEntry = (subject, offset) =>
+		runtime.inboxEntry.create({
+			data: {
+				workspaceId,
+				title: 'PG SLA Inbox',
+				name: 'PG SLA contact',
+				origin: 'MANUAL',
+				createdBySubject: subject,
+				receivedAt: new Date(Date.parse(saved.rule.effectiveAt) + offset)
+			}
+		});
+	const historical = await createEntry(context.subject, -60000);
+	const own = await createEntry(context.subject, 1);
+	const other = await createEntry('other-owner', 2);
+	let insertedDelegate = null;
+	const faultAfterInsert = delegateName =>
+		new Proxy(runtime, {
+			get(target, key) {
+				if (key !== '$transaction') return target[key];
+				return (callback, options) =>
+					target.$transaction(
+						tx =>
+							callback(
+								new Proxy(tx, {
+									get(current, property) {
+										if (property !== delegateName)
+											return current[property];
+										return new Proxy(current[property], {
+											get(delegate, operation) {
+												if (operation !== 'createMany')
+													return delegate[operation];
+												return async args => {
+													await delegate.createMany(args);
+													insertedDelegate = delegateName;
+													throw new Error('SLA_TEST_AFTER_INSERT');
+												};
+											}
+										});
+									}
+								})
+							),
+						options
+					);
+			}
+		});
+	const outboxWhere = {
+		payload: { path: ['workspaceId'], equals: workspaceId }
+	};
+
+	// A failure after the real Outbox INSERT rolls back the new job; replay schedules only new entries once.
+	await assert.rejects(
+		new SlaService(
+			faultAfterInsert('slaOutbox'),
+			authority,
+			readiness
+		).schedule(),
+		/SLA_TEST_AFTER_INSERT/
+	);
+	assert.equal(insertedDelegate, 'slaOutbox');
+	assert.equal(await runtime.slaJob.count({ where: { workspaceId } }), 0);
+	assert.equal(await runtime.slaOutbox.count({ where: outboxWhere }), 0);
+	assert.equal(await sla.schedule(), 2);
+	assert.equal(await sla.schedule(), 0);
+	assert.equal(
+		await runtime.slaJob.count({ where: { entryId: historical.id } }),
+		0
+	);
+	const jobs = await runtime.slaJob.findMany({ where: { workspaceId } });
+	assert.equal(jobs.length, 2);
+	assert.equal(await runtime.slaOutbox.count({ where: outboxWhere }), 2);
+	for (const job of jobs) {
+		const event = await runtime.slaOutbox.findUniqueOrThrow({
+			where: { deduplicationKey: `${job.activeEventId}:MAIN:0` }
+		});
+		assert.equal(event.status, 'PENDING');
+		assert.equal(event.availableAt.getTime(), job.dueAt.getTime());
+		assert.deepEqual(event.payload, {
+			schemaVersion: 1,
+			eventId: job.activeEventId,
+			workspaceId,
+			jobId: job.id,
+			generation: 1
+		});
+	}
+	const ownJob = jobs.find(job => job.entryId === own.id);
+	const otherJob = jobs.find(job => job.entryId === other.id);
+	assert.ok(ownJob && otherJob);
+	const dto = {
+		...command(1),
+		contact: { mode: 'CREATE_FROM_ENTRY' },
+		deal: {
+			title: 'PG SLA acceptance',
+			currency: 'RUB',
+			amountMinor: 0,
+			pipelineId: randomUUID(),
+			stageId: randomUUID(),
+			nextTask: { title: 'Call', dueAt: '2026-09-01T00:00:00.000Z' }
+		}
+	};
+
+	// The real acceptance INSERT + entry.version trigger cancels SLA in the same commit, never on rollback.
+	await assert.rejects(
+		new AcceptanceService(faultAfterInsert('acceptanceOutbox')).accept(
+			context,
+			own.id,
+			dto
+		),
+		status(503)
+	);
+	assert.equal(insertedDelegate, 'acceptanceOutbox');
+	assert.equal(
+		await runtime.acceptance.count({ where: { entryId: own.id } }),
+		0
+	);
+	assert.equal(
+		await runtime.intakeCommand.count({
+			where: { commandId: dto.commandId }
+		}),
+		0
+	);
+	assert.equal(
+		(await runtime.inboxEntry.findUniqueOrThrow({ where: { id: own.id } }))
+			.version,
+		1
+	);
+	assert.equal(
+		(await runtime.slaJob.findUniqueOrThrow({ where: { id: ownJob.id } }))
+			.status,
+		'PENDING'
+	);
+	const accepted = await service.accept(context, own.id, dto);
+	assert.deepEqual(await service.accept(context, own.id, dto), accepted);
+	const afterAcceptance = await runtime.inboxEntry.findUniqueOrThrow({
+		where: { id: own.id }
+	});
+	assert.equal(afterAcceptance.status, 'NEW');
+	assert.equal(afterAcceptance.version, 2);
+	assert.equal(
+		(await runtime.slaJob.findUniqueOrThrow({ where: { id: ownJob.id } }))
+			.status,
+		'CANCELLED'
+	);
+	assert.equal(
+		(
+			await runtime.slaJob.findUniqueOrThrow({
+				where: { id: otherJob.id }
+			})
+		).status,
+		'PENDING'
+	);
+	assert.equal(await sla.schedule(), 0);
+
+	// SQL binding constraints and actual scoped reads cannot expose or attach another workspace's job.
+	await assert.rejects(
+		runtime.$executeRawUnsafe(
+			'UPDATE crm_intake.sla_jobs SET entry_id=$1::uuid WHERE id=$2::uuid',
+			historical.id,
+			otherJob.id
+		),
+		error =>
+			(error?.meta?.code === 'P0001' ||
+				(error?.name === 'PrismaClientUnknownRequestError' &&
+					/code: "P0001"/.test(error.message))) &&
+			String(error?.meta?.message ?? error?.message).includes(
+				'immutable SLA job binding'
+			)
+	);
+	await assert.rejects(
+		runtime.slaNotification.create({
+			data: {
+				workspaceId: randomUUID(),
+				jobId: otherJob.id,
+				recipientSubject: context.subject,
+				channel: 'EMAIL',
+				deduplicationKey: 'a'.repeat(64)
+			}
+		}),
+		error => error?.code === 'P2003'
+	);
+	const ids = [own.id, other.id];
+	const personal = await sla.inboxStatus(
+		{ ...context, dataScope: 'OWN', state: 'READ_ONLY' },
+		ids
+	);
+	assert.deepEqual(
+		personal.items.map(item => [item.entryId, item.state]),
+		[[own.id, 'STOPPED']]
+	);
+	assert.deepEqual(
+		(await sla.inboxStatus({ ...context, workspaceId: randomUUID() }, ids))
+			.items,
+		[]
+	);
+	console.log(
+		'CRM Intake SLA PG18: grants, rule replay/scope, atomic scheduling, acceptance cancellation/rollback and immutable workspace bindings passed'
+	);
+}
+
 async function intent() {
 	const entry = await runtime.inboxEntry.create({
 		data: {
