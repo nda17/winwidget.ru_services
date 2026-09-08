@@ -1424,7 +1424,7 @@ jobs:
       - service-integration
       - widgets-integration
     if: github.event_name == 'push' && github.ref == 'refs/heads/prod'
-    uses: nda17/winwidget.ru_infra/.github/workflows/deploy-production.yml@1a0ece4272e3a3d38ad7fb62247d2a1507fe262d
+    uses: nda17/winwidget.ru_infra/.github/workflows/deploy-production.yml@8393b7bcf5cafb5cf36a590ebf77e20760df2025
     with:
       services_revision: ${{ github.sha }}
       release_scope: gateway-tilda-upgrade
