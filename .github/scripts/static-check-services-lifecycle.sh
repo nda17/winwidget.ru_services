@@ -530,18 +530,18 @@ if (
 	infraReleaseReferences.length !== 1 ||
 	infraReleaseReferences.some(reference => reference[1] !== pinnedInfraRevision)
 ) {
-	throw new Error('CRM commerce activation must use one exact reviewed infra SHA');
+	throw new Error('CRM upgrade must use one exact reviewed infra SHA');
 }
-// CRM is already live. This configuration-only activation preserves exact
-// deployed images; it does not replay provisioning or upgrade service code.
-for (const [job, scope] of [['deploy-production', 'crm-commerce-activate']]) {
+// Commerce activation is complete. Upgrade only the reviewed service groups
+// without changing owner env, payment flags, database containers or neighbors.
+for (const [job, scope] of [['deploy-production', 'crm-upgrade']]) {
 	const block = servicesWorkflow.match(new RegExp('^  ' + job + ':\\n([\\s\\S]*?)(?=^  [a-z][a-z0-9-]*:|$(?![\\s\\S]))', 'm'))?.[1];
 	if (!block || !block.includes('release_scope: ' + scope) ||
 		!block.includes('services_revision: ${{ github.sha }}') ||
 		!block.includes("expected_live_revision: '837113b9f9f303bd6c043c2a2e37b0791369d7a3'") ||
 		!block.includes("expected_service_env_sha256: '73b86415a52f7b9756acd7d24efae98187d80de684f1eeb40b9fcfd465e7fccd'") ||
-		!block.includes("expected_crm_commerce_baseline_sha256: '2392ddf7b8b588cb1131da0e5aa9f751e763fb1a07b1245443a83c11bb06f64e'")) {
-		throw new Error('CRM commerce activation must pin its live Gateway revision, CRM env and exact baseline');
+		!block.includes("expected_crm_upgrade_baseline_sha256: '885d0cc8379185920c0ac227aa47e61f1371716beaa7fb39db226595730b769b'")) {
+		throw new Error('CRM upgrade must pin its live Gateway revision, CRM env and exact baseline');
 	}
 }
 if (/release_scope: (?:crm-prepare|crm-databases|crm-runtime|all)\b/.test(servicesWorkflow)) {
