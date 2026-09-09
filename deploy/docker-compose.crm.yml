@@ -132,6 +132,7 @@ services:
       <<: *crm-access-env
       CRM_ACCESS_PROCESS_ROLE: api
       CRM_ACCESS_PORT: '5300'
+      CRM_ACCESS_SUPPORT_TOKEN: ${CRM_ACCESS_SUPPORT_TOKEN:-}
       CRM_ACCESS_DATABASE_URL: ${CRM_ACCESS_API_DATABASE_URL:?CRM_ACCESS_API_DATABASE_URL is required}
     mem_limit: ${CRM_API_MEMORY_LIMIT:?CRM_API_MEMORY_LIMIT is required}
     memswap_limit: ${CRM_API_MEMORY_LIMIT:?CRM_API_MEMORY_LIMIT is required}

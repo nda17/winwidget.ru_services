@@ -1,3 +1,11 @@
+import {
+	assertSupportNotificationEvent,
+	SupportNotificationSkipReason,
+	supportConversationUrl
+} from '../messaging/support-notification.contract';
+import { SUPPORT_NOTIFICATION_EVENT_TYPES } from '../messaging/messaging.constants';
+import { SupportNotificationContextService } from './support-notification-context.service';
+import { TelegramSupportTransportService } from '../telegram/telegram-support-transport.service';
 import { EmailService } from '../email/email.service';
 import {
 	CampaignEmailNotificationRequestedEventPayload,
@@ -40,6 +48,7 @@ import { assertWincrmIntakeSlaEvent } from '../messaging/wincrm-intake-sla.contr
 import { WincrmIntakeSlaContextService } from './wincrm-intake-sla-context.service';
 
 export type NotificationDeliverySkipReason =
+	| SupportNotificationSkipReason
 	| 'INVITATION_EXPIRED'
 	| 'INVITATION_UNAVAILABLE'
 	| 'TASK_REMINDER_UNAVAILABLE'
@@ -60,7 +69,12 @@ export class NotificationDeliveryAdapterService {
 		private readonly prisma: NotificationDeliveryPrismaService,
 		private readonly invitationContext: WincrmInvitationContextService,
 		private readonly reminderContext: WincrmTaskReminderContextService,
-		@Optional() private readonly slaContext?: WincrmIntakeSlaContextService
+		@Optional()
+		private readonly slaContext?: WincrmIntakeSlaContextService,
+		@Optional()
+		private readonly supportContext?: SupportNotificationContextService,
+		@Optional()
+		private readonly supportTelegram?: TelegramSupportTransportService
 	) {}
 
 	async deliver(
@@ -70,6 +84,63 @@ export class NotificationDeliveryAdapterService {
 		lockToken?: string
 	): Promise<NotificationDeliveryResult> {
 		switch (kind) {
+			case 'support-team-email':
+			case 'support-team-telegram':
+			case 'support-client-email': {
+				assertSupportNotificationEvent(event);
+				if (
+					!lockToken ||
+					event.eventId !== eventId ||
+					event.eventType !== SUPPORT_NOTIFICATION_EVENT_TYPES[kind] ||
+					!this.supportContext
+				)
+					throw new Error(
+						'Support notification requires a matching active claim'
+					);
+				const context = await this.supportContext.resolve(event, kind);
+				if (!context.deliver)
+					return { status: 'SKIPPED', reason: context.reason };
+				const claim =
+					await this.prisma.notificationDeliveryReceipt.findFirst({
+						where: {
+							eventId,
+							consumer: kind,
+							status: NotificationDeliveryReceiptStatus.PROCESSING,
+							lockToken,
+							leaseExpiresAt: { gt: new Date() }
+						},
+						select: { leaseExpiresAt: true }
+					});
+				if (
+					!claim?.leaseExpiresAt ||
+					claim.leaseExpiresAt.getTime() <= Date.now() + 15000
+				)
+					throw new Error(
+						'Support notification claim is no longer active'
+					);
+				if ('email' in context.destination) {
+					await this.emailService.sendSupportNotification(
+						context.destination.email,
+						context.content,
+						kind === 'support-client-email',
+						eventId
+					);
+				} else {
+					if (!this.supportTelegram)
+						throw new Error(
+							'Support Telegram transport is not configured'
+						);
+					await this.supportTelegram.sendMessage(
+						context.destination.telegramChatId,
+						`${context.content.notificationType === 'NEW_CONVERSATION' ? 'Новое обращение в поддержку' : 'Новое сообщение в поддержке'} №${context.content.conversationNumber}\n${supportConversationUrl(context.content, false)}`,
+						{
+							messageThreadId: context.destination.messageThreadId,
+							parseMode: null
+						}
+					);
+				}
+				return;
+			}
 			case 'wincrm-intake-sla-email':
 			case 'wincrm-intake-sla-telegram': {
 				assertWincrmIntakeSlaEvent(event);

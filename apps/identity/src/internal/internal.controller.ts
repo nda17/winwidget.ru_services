@@ -20,6 +20,7 @@ import {
 	Equals,
 	IsArray,
 	IsIn,
+	IsOptional,
 	IsString,
 	IsUUID,
 	Matches,
@@ -64,6 +65,19 @@ export class CrmSourceContextDto {
 	subject!: string;
 }
 
+export class SupportAuthorContextDto {
+	@Equals(1) schemaVersion!: 1;
+	@IsOptional() @IsUUID('4') workspaceId?: string;
+}
+
+export class SupportRecipientContextDto {
+	@Equals(1) schemaVersion!: 1;
+	@IsString()
+	@MaxLength(256)
+	@Matches(/^[^\s\x00-\x1f\x7f]{1,256}$/)
+	subject!: string;
+}
+
 @Controller('internal/v1')
 @UseGuards(IdentityInternalGuard)
 @UsePipes(
@@ -92,6 +106,45 @@ export class IdentityInternalController {
 	)
 	introspect(@Headers('authorization') authorization?: string) {
 		return this.internal.introspect(authorization);
+	}
+
+	@Post('support/author-context')
+	@HttpCode(200)
+	@Header('Cache-Control', 'no-store')
+	@InternalServices('support')
+	supportAuthorContext(
+		@Headers('authorization') authorization: string | undefined,
+		@Body() dto: SupportAuthorContextDto,
+		@Req() request: Request
+	) {
+		this.exactSupportBody(request.body, ['schemaVersion', 'workspaceId']);
+		return this.internal.supportAuthorContext(
+			authorization,
+			dto.workspaceId
+		);
+	}
+
+	@Post('support/recipient-context')
+	@HttpCode(200)
+	@Header('Cache-Control', 'no-store')
+	@InternalServices('support')
+	supportRecipientContext(
+		@Body() dto: SupportRecipientContextDto,
+		@Req() request: Request
+	) {
+		this.exactSupportBody(request.body, ['schemaVersion', 'subject']);
+		return this.internal.supportRecipientContext(dto.subject);
+	}
+
+	private exactSupportBody(value: unknown, allowed: string[]): void {
+		if (
+			!value ||
+			typeof value !== 'object' ||
+			Array.isArray(value) ||
+			Object.keys(value).some(key => !allowed.includes(key))
+		) {
+			throw new BadRequestException('Invalid support context');
+		}
 	}
 
 	@Post('crm-access/auth-context')

@@ -1,3 +1,19 @@
+export const SUPPORT_NOTIFICATION_KINDS = [
+	'support-team-email',
+	'support-team-telegram',
+	'support-client-email'
+] as const;
+export type SupportNotificationKind =
+	(typeof SUPPORT_NOTIFICATION_KINDS)[number];
+export const SUPPORT_NOTIFICATION_EVENT_TYPES = {
+	'support-team-email': 'notification.support.team.email.requested.v1',
+	'support-team-telegram':
+		'notification.support.team.telegram.requested.v1',
+	'support-client-email': 'notification.support.client.email.requested.v1'
+} as const;
+export const SUPPORT_NOTIFICATION_OUTCOME_EVENT_TYPE =
+	'support.notification.delivery.outcome.v1';
+
 export const OUTBOX_EVENT_TYPE = 'lead.integration.requested.v2';
 export const PAYMENT_SUCCEEDED_EVENT_TYPE = 'payment.succeeded.v1';
 export const PAYMENT_TELEGRAM_NOTIFICATION_EVENT_TYPE =
@@ -65,6 +81,7 @@ export const DEFAULT_NOTIFICATION_DELIVERY_KINDS = [
 // New product delivery is opt-in; existing deployments retain their consumers.
 export const NOTIFICATION_DELIVERY_KINDS = [
 	...DEFAULT_NOTIFICATION_DELIVERY_KINDS,
+	...SUPPORT_NOTIFICATION_KINDS,
 	'wincrm-invitation-email',
 	...WINCRM_TASK_REMINDER_KINDS,
 	...WINCRM_INTAKE_SLA_KINDS
@@ -85,6 +102,7 @@ export const isWincrmInvitationDeliveryEnabled = (
 		.some(kind => kind.trim() === 'wincrm-invitation-email') === true;
 
 export const MESSAGING_ROUTING_KEYS: Record<MessagingKind, string> = {
+	...SUPPORT_NOTIFICATION_EVENT_TYPES,
 	'wincrm-intake-sla-email': WINCRM_INTAKE_SLA_EMAIL_EVENT_TYPE,
 	'wincrm-intake-sla-telegram': WINCRM_INTAKE_SLA_TELEGRAM_EVENT_TYPE,
 	email: 'lead.integration.email.v2',
@@ -107,6 +125,9 @@ export const MESSAGING_ROUTING_KEYS: Record<MessagingKind, string> = {
 };
 
 export const MESSAGING_QUEUE_NAMES: Record<MessagingKind, string> = {
+	'support-team-email': 'winwidget.notification.support.team.email',
+	'support-team-telegram': 'winwidget.notification.support.team.telegram',
+	'support-client-email': 'winwidget.notification.support.client.email',
 	'wincrm-intake-sla-email':
 		'winwidget.notification.wincrm.intake-sla.email',
 	'wincrm-intake-sla-telegram':

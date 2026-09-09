@@ -1,3 +1,4 @@
+import { SUPPORT_NOTIFICATION_OUTCOME_EVENT_TYPE } from '../messaging/messaging.constants';
 import {
 	CAMPAIGN_NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE,
 	DEAD_LETTER_EXCHANGE,
@@ -336,9 +337,11 @@ export class NotificationDeliveryOutboxPublisherService
 	private getValidationError(event: ClaimedOutboxEvent): string | null {
 		const isStrictOutcomeRoute =
 			event.exchange === NotificationDeliveryExchange.EVENTS &&
-			((event.eventType === TELEGRAM_DESTINATION_UNAVAILABLE_EVENT_TYPE &&
-				event.routingKey ===
-					TELEGRAM_DESTINATION_UNAVAILABLE_EVENT_TYPE) ||
+			((event.eventType === SUPPORT_NOTIFICATION_OUTCOME_EVENT_TYPE &&
+				event.routingKey === SUPPORT_NOTIFICATION_OUTCOME_EVENT_TYPE) ||
+				(event.eventType === TELEGRAM_DESTINATION_UNAVAILABLE_EVENT_TYPE &&
+					event.routingKey ===
+						TELEGRAM_DESTINATION_UNAVAILABLE_EVENT_TYPE) ||
 				(event.eventType === NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE &&
 					event.routingKey === NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE) ||
 				(event.eventType ===

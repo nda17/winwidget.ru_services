@@ -1,4 +1,8 @@
 import {
+	isSupportNotificationKind,
+	SUPPORT_NOTIFICATION_SKIP_REASONS
+} from '../messaging/support-notification.contract';
+import {
 	getManualRetryRoutingKey,
 	NotificationDeliveryKind
 } from '../messaging/messaging.constants';
@@ -189,10 +193,16 @@ export class NotificationDeliveryReceiptService {
 		eventId: string,
 		consumer: NotificationDeliveryKind,
 		lockToken: string,
-		reason: NotificationDeliverySkipReason
+		reason: NotificationDeliverySkipReason,
+		payload?: NotificationDeliveryEventPayload
 	): Promise<void> {
 		if (
 			!(
+				(isSupportNotificationKind(consumer) &&
+					payload &&
+					SUPPORT_NOTIFICATION_SKIP_REASONS.some(
+						item => item === reason
+					)) ||
 				(consumer === 'wincrm-invitation-email' &&
 					['INVITATION_EXPIRED', 'INVITATION_UNAVAILABLE'].includes(
 						reason
@@ -235,6 +245,16 @@ export class NotificationDeliveryReceiptService {
 				});
 			if (closed.count !== 1)
 				throw new Error('Notification skip claim was lost');
+			if (isSupportNotificationKind(consumer) && payload)
+				await this.outcomes.createDeliveryOutcome(transaction, {
+					kind: consumer,
+					eventId,
+					payload,
+					status: 'SKIPPED',
+					failure: null,
+					skipReason:
+						reason as (typeof SUPPORT_NOTIFICATION_SKIP_REASONS)[number]
+				});
 			await transaction.notificationDeliveryFailure.updateMany({
 				where: { eventId, consumer, resolvedAt: null },
 				data: {

@@ -39,7 +39,7 @@ export class TelegramApiError extends Error {
 export class TelegramInfoTransportService {
 	private readonly messageTimeoutMs = 10_000;
 
-	constructor(private readonly configService: ConfigService) {}
+	constructor(protected readonly configService: ConfigService) {}
 
 	assertConfigured(): void {
 		this.getToken();
@@ -87,7 +87,7 @@ export class TelegramInfoTransportService {
 		);
 	}
 
-	private getToken(): string {
+	protected getToken(): string {
 		const token = this.configService
 			.get<string>('TELEGRAM_INFO_BOT_TOKEN')
 			?.trim();

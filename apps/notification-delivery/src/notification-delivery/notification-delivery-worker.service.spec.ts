@@ -1,4 +1,9 @@
 import {
+	SUPPORT_NOTIFICATION_EVENT_TYPES,
+	SUPPORT_NOTIFICATION_KINDS,
+	SupportNotificationKind
+} from '../messaging/messaging.constants';
+import {
 	NotificationDeliveryExchange,
 	NotificationDeliveryReceiptStatus,
 	Prisma
@@ -270,6 +275,157 @@ describe('NotificationDeliveryWorkerService', () => {
 			outcomes
 		};
 	};
+
+	const createSupportMessage = (
+		kind: SupportNotificationKind
+	): ConsumeMessage =>
+		({
+			content: Buffer.from(
+				JSON.stringify({
+					schemaVersion: 1,
+					eventId,
+					eventType: SUPPORT_NOTIFICATION_EVENT_TYPES[kind],
+					occurredAt: '2026-09-09T00:00:00.000Z',
+					reference: {
+						type: 'support-notification',
+						id: '22222222-2222-4222-8222-222222222222'
+					}
+				})
+			),
+			fields: {
+				exchange: 'winwidget.events',
+				routingKey: SUPPORT_NOTIFICATION_EVENT_TYPES[kind]
+			},
+			properties: {
+				messageId: eventId,
+				type: SUPPORT_NOTIFICATION_EVENT_TYPES[kind],
+				headers: {}
+			}
+		}) as ConsumeMessage;
+
+	it.each(SUPPORT_NOTIFICATION_KINDS)(
+		'commits a %s outcome with its claimed receipt before ACK',
+		async kind => {
+			const { service, transaction, rabbitMq } = createService(kind);
+			await (service as any).handle(kind, createSupportMessage(kind));
+			const create =
+				transaction.notificationDeliveryOutboxEvent.createMany;
+			expect(create).toHaveBeenCalledWith({
+				data: [
+					expect.objectContaining({
+						eventType: 'support.notification.delivery.outcome.v1',
+						payload: expect.objectContaining({
+							sourceKind: kind,
+							sourceEventId: eventId,
+							status: 'DELIVERED',
+							reason: null
+						})
+					})
+				],
+				skipDuplicates: true
+			});
+			expect(create.mock.invocationCallOrder[0]).toBeLessThan(
+				(rabbitMq.ack as jest.Mock).mock.invocationCallOrder[0]
+			);
+			expect(rabbitMq.nack).not.toHaveBeenCalled();
+		}
+	);
+	it('commits unavailable client email as SKIPPED with an outcome before ACK', async () => {
+		const { service, adapter, transaction, rabbitMq } = createService(
+			'support-client-email'
+		);
+		(adapter.deliver as jest.Mock).mockResolvedValue({
+			status: 'SKIPPED',
+			reason: 'RECIPIENT_UNAVAILABLE'
+		});
+		await (service as any).handle(
+			'support-client-email',
+			createSupportMessage('support-client-email')
+		);
+		expect(
+			transaction.notificationDeliveryOutboxEvent.createMany
+		).toHaveBeenCalledWith({
+			data: [
+				expect.objectContaining({
+					payload: expect.objectContaining({
+						status: 'SKIPPED',
+						reason: 'RECIPIENT_UNAVAILABLE'
+					})
+				})
+			],
+			skipDuplicates: true
+		});
+		expect(
+			transaction.notificationDeliveryReceipt.updateMany
+		).toHaveBeenCalledWith(
+			expect.objectContaining({
+				where: expect.objectContaining({
+					status: 'PROCESSING',
+					lockToken: expect.any(String)
+				}),
+				data: expect.objectContaining({ status: 'CLOSED_NO_RETRY' })
+			})
+		);
+		expect(rabbitMq.ack).toHaveBeenCalledTimes(1);
+	});
+	it.each(SUPPORT_NOTIFICATION_KINDS)(
+		'retries %s through its independent durable route',
+		async kind => {
+			const { service, adapter, transaction, rabbitMq } =
+				createService(kind);
+			(adapter.deliver as jest.Mock).mockRejectedValue(
+				Object.assign(new Error('context unavailable'), {
+					code: 'ETIMEDOUT'
+				})
+			);
+			await (service as any).handle(kind, createSupportMessage(kind));
+			expect(
+				transaction.notificationDeliveryOutboxEvent.create
+			).toHaveBeenCalledWith(
+				expect.objectContaining({
+					data: expect.objectContaining({
+						routingKey: 'manual.' + kind,
+						eventType: SUPPORT_NOTIFICATION_EVENT_TYPES[kind]
+					})
+				})
+			);
+			expect(rabbitMq.ack).toHaveBeenCalledTimes(1);
+			expect(rabbitMq.nack).not.toHaveBeenCalled();
+		}
+	);
+	it('deduplicates a support delivery using eventId plus consumer before the adapter', async () => {
+		const { service, adapter, prisma, transaction, rabbitMq } =
+			createService('support-team-email');
+		(
+			prisma.notificationDeliveryReceipt.create as jest.Mock
+		).mockRejectedValue(
+			new Prisma.PrismaClientKnownRequestError('duplicate', {
+				code: 'P2002',
+				clientVersion: '5.22.0'
+			})
+		);
+		(
+			prisma.notificationDeliveryReceipt.findUnique as jest.Mock
+		).mockResolvedValue({
+			status: NotificationDeliveryReceiptStatus.DELIVERED
+		});
+		await (service as any).handle(
+			'support-team-email',
+			createSupportMessage('support-team-email')
+		);
+		expect(
+			prisma.notificationDeliveryReceipt.findUnique
+		).toHaveBeenCalledWith({
+			where: {
+				eventId_consumer: { eventId, consumer: 'support-team-email' }
+			}
+		});
+		expect(adapter.deliver).not.toHaveBeenCalled();
+		expect(
+			transaction.notificationDeliveryOutboxEvent.createMany
+		).not.toHaveBeenCalled();
+		expect(rabbitMq.ack).toHaveBeenCalledTimes(1);
+	});
 
 	beforeEach(() => {
 		jest.restoreAllMocks();

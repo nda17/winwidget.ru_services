@@ -65,6 +65,7 @@ const SMTP_TRANSIENT_CODES = new Set([
 ]);
 const SMTP_PERMANENT_CODES = new Set(['EENVELOPE', 'EMESSAGE']);
 const TELEGRAM_KINDS = new Set<NotificationDeliveryKind>([
+	'support-team-telegram',
 	'telegram',
 	'payment-telegram',
 	'limit-telegram',

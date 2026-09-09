@@ -277,6 +277,10 @@ export function validateCrmCompanionCompose(config, source) {
 		config?.name === 'winwidget' && config.services && source,
 		'Invalid CRM companion inputs'
 	);
+	for (const key of ['SUPPORT_CRM_ACCESS_BASE_URL', 'SUPPORT_CRM_ACCESS_TOKEN']) {
+		if (Object.hasOwn(source, key) || Object.hasOwn(config.services['support-api']?.environment ?? {}, key))
+			targets[key] = ['support-api'];
+	}
 	if (
 		backupOnlyKeys.some(
 			key =>
@@ -559,6 +563,10 @@ export function validateCrmCompose(config) {
 				'CORS_ALLOWED_ORIGINS',
 				...Object.keys(origins[app]),
 				...tokenNames[app],
+				...(app === 'crm-access' && role === 'api' &&
+					Object.hasOwn(env, 'CRM_ACCESS_SUPPORT_TOKEN')
+					? ['CRM_ACCESS_SUPPORT_TOKEN']
+					: []),
 				...(app === 'crm-customers' && role === 'api'
 					? ['CRM_CUSTOMERS_DADATA_API_KEY']
 					: []),
@@ -587,6 +595,12 @@ export function validateCrmCompose(config) {
 				envKeys,
 				'CRM process received an unexpected credential or setting'
 			);
+			if (app === 'crm-access' && role === 'api' &&
+				Object.hasOwn(env, 'CRM_ACCESS_SUPPORT_TOKEN')) {
+				check(env.CRM_ACCESS_SUPPORT_TOKEN === '' ||
+					strong(env.CRM_ACCESS_SUPPORT_TOKEN),
+					'Invalid optional Support CRM Access credential');
+			}
 			if (app === 'crm-customers' && role === 'api') {
 				const key = env.CRM_CUSTOMERS_DADATA_API_KEY;
 				check(

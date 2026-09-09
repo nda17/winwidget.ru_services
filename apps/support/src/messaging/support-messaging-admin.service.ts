@@ -1,7 +1,8 @@
 import {
 	ConflictException,
 	Injectable,
-	NotFoundException
+	NotFoundException,
+	Optional
 } from '@nestjs/common';
 import {
 	ConsumerFailureStatus,
@@ -16,6 +17,8 @@ import { randomUUID } from 'node:crypto';
 import type { SupportActor } from '../auth/support-request';
 import { enqueueSupportAdminAudit } from '../domain/support-admin-audit';
 import { SupportPrismaService } from '../prisma/support-prisma.service';
+import { SupportOutcomeWorkerService } from '../web/support-outcome-worker.service';
+import { SUPPORT_OUTCOME_CONSUMER } from '../web/support-notifications.service';
 import {
 	MANUAL_RETRY_EXCHANGE,
 	SUPPORT_WEBHOOK_CONSUMER,
@@ -24,7 +27,10 @@ import {
 
 @Injectable()
 export class SupportMessagingAdminService {
-	constructor(private readonly prisma: SupportPrismaService) {}
+	constructor(
+		private readonly prisma: SupportPrismaService,
+		@Optional() private readonly outcomes?: SupportOutcomeWorkerService
+	) {}
 
 	async list(page: number, limit: number) {
 		const skip = (page - 1) * limit;
@@ -73,6 +79,13 @@ export class SupportMessagingAdminService {
 					throw new NotFoundException('Support failure not found');
 				if (failure.status !== ConsumerFailureStatus.OPEN) {
 					throw new ConflictException('Support failure is not open');
+				}
+				if (failure.consumer === SUPPORT_OUTCOME_CONSUMER) {
+					if (!this.outcomes)
+						throw new ConflictException(
+							'Outcome processing is unavailable'
+						);
+					return this.outcomes.retry(transaction, failure, actor, request);
 				}
 				if (failure.eventType === 'support.poison.v1') {
 					throw new ConflictException(
@@ -182,6 +195,19 @@ export class SupportMessagingAdminService {
 					throw new ConflictException('Support failure is not open');
 				}
 				const poison = failure.eventType === 'support.poison.v1';
+				if (failure.consumer === SUPPORT_OUTCOME_CONSUMER) {
+					if (!this.outcomes)
+						throw new ConflictException(
+							'Outcome processing is unavailable'
+						);
+					return this.outcomes.close(
+						transaction,
+						failure,
+						comment,
+						actor,
+						request
+					);
+				}
 				const inboxId = poison ? null : this.inboxId(failure.payload);
 				const now = new Date();
 				const changed = await transaction.consumerFailure.updateMany({

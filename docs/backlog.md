@@ -1197,6 +1197,19 @@ major-переход и остаётся на NestJS 10 / Express 4 до отд�
 - При закрытии review повторить frozen install, audit от low, unit/integration,
   PostgreSQL 18 и production Docker gates только для точного Billing SHA.
 
+### P1 — сохранить Support topology в следующем общем или CRM-релизе
+
+Перед повторным использованием старых `all` и `crm-*-activate` release scopes
+обновить их точные RabbitMQ-контракты с учётом очередей и разрешений web-чата
+поддержки. Текущий Support release расширяет ACL трёх независимых каналов
+уведомлений и outcome consumer; исторические validators должны останавливать
+несовместимый выпуск до изменений.
+
+Обязательно сохранять действующие Support queues, bindings, permissions,
+retained messages и отдельные retry/DLQ; не заменять ACL старым снимком и не
+удалять очереди. До согласования следующего такого выпуска использовать
+подготовленные `support-chat` / `support-chat-activate` только в их scope.
+
 ### P2 — повысить сигнал CI и распараллелить verify
 
 - Перехватывать ожидаемые ERROR/WARN отрицательных tests через logger spy.

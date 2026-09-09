@@ -189,6 +189,49 @@ NOBYPASSRLS, только CONNECT, schema USAGE и SELECT/INSERT/UPDATE/DELETE �
 только собственные случайные fixture event IDs. Lifecycle disposable DB и
 контейнера остаётся у запускающего окружения.
 
+## Чат поддержки CRM
+
+Три дополнительных вида доставки включаются явно в
+`NOTIFICATION_DELIVERY_KINDS`: `support-team-email`,
+`support-team-telegram`, `support-client-email`. Прежний набор по умолчанию
+сохраняется. Каждому виду принадлежат отдельные main/retry/DLQ и manual retry.
+Служебные email получают отдельные события на каждого получателя.
+
+Support сохраняет сообщения, группирует уведомления в окне 60 секунд и
+публикует только `schemaVersion`, `eventId`, `eventType`, `occurredAt` и
+`reference: {type: 'support-notification', id: intentId}`. Текст переписки,
+вложения, тема, адреса и credentials в broker не передаются.
+
+После receipt claim ND запрашивает приватный контекст через
+`POST /internal/v1/notification-delivery/support-notifications/:intentId/delivery-context`
+с `{schemaVersion: 1, eventId, kind}`. `SUPPORT_INTERNAL_BASE_URL` указывает
+на Support API (`http://127.0.0.1:5100` при совместном размещении);
+`SUPPORT_NOTIFICATION_DELIVERY_TOKEN` — отдельный caller token. Support
+повторно проверяет получателя и настройки, а Identity предоставляет актуальный
+подтверждённый email клиента. ND не читает чужие БД.
+
+Telegram-уведомления использует отдельный outbound transport с
+`TELEGRAM_SUPPORT_BOT_TOKEN` и существующим pinned `TELEGRAM_API_BASE_URL`.
+Это Support bot, не INFO bot. Группа и положительный topic ID обязательны:
+fallback в General отсутствует. ND не управляет webhook и не принимает ответы.
+Существующий Telegram bridge остаётся у Support без изменения поведения.
+
+Фирменные письма и Telegram содержат только номер обращения и защищённую
+ссылку: CRM `/inbox?supportConversation=UUID`, операторы
+`https://winwidget.ru/admin/support?conversationId=UUID`.
+Ответы `DELIVERED`, `FAILED`, `SKIPPED` публикуются в
+`support.notification.delivery.outcome.v1` через ND Outbox в транзакции
+изменения receipt. Payload содержит `schemaVersion`, `eventId`, `eventType`,
+`occurredAt`, `sourceEventId`, `sourceKind`, `intentId`, `status`, `reason`;
+`reason` — только безопасный код или null. Support применяет результаты
+идемпотентно. Редкий дубль после принятия SMTP/Telegram до receipt commit
+остаётся допустимой границей at-least-once.
+
+Перед включением нужны новая additive миграция ND, scoped broker ACL,
+Support context и outcome consumer, синхронизированные production env.
+Локальные тесты используют mocks; реальная отправка — только по согласованным
+каналам. Readiness не доказывает факт внешней доставки.
+
 ## Retention и readiness
 
 Сервис применяет фиксированную политику хранения ко всем активным видам

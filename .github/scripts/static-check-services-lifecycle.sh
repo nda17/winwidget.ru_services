@@ -156,8 +156,8 @@ const routeManifest = path => {
 const rootRoutes = routeManifest('.env.example');
 const gatewayRoutes = routeManifest('apps/api-gateway/.env.example');
 for (const routes of [rootRoutes, gatewayRoutes]) {
-	if (routes.length !== 42) {
-		throw new Error('Gateway route count must be 42');
+	if (routes.length !== 43) {
+		throw new Error('Gateway route count must be 43');
 	}
 	if (
 		routes.filter(
@@ -417,8 +417,8 @@ for (const path of [
 	}
 }
 
-exactFiles('scripts', ['generate-jwt-keyset.mjs', 'test-workers-bootstrap-recovery.mjs']);
-exactFiles('.github/workflows', ['ci.yml']);
+exactFiles('scripts', ['generate-jwt-keyset.mjs', 'support-chat-env-ops.mjs', 'test-workers-bootstrap-recovery.mjs']);
+exactFiles('.github/workflows', ['ci.yml', 'support-chat-ops.yml']);
 exactFiles('.github/scripts', [
 	'crm-backup-boundary.cjs',
 	'crm-backup-boundary.test.cjs',
@@ -432,6 +432,8 @@ exactFiles('.github/scripts', [
 	'validate-crm-reminders-compose.test.mjs',
 	'validate-production-compose.cjs',
 	'validate-production-compose.sh',
+	'validate-support-chat-compose.cjs',
+	'validate-support-chat-compose.test.cjs',
 	'verify-production-audit.cjs'
 ]);
 exactFiles('deploy', [
@@ -474,7 +476,7 @@ if (!servicesWorkflow.includes('node .github/scripts/test-crm-bootstrap-failure.
 	throw new Error('CRM bounded bootstrap process gate is missing');
 }
 const pinnedInfraRevision =
-	'8393b7bcf5cafb5cf36a590ebf77e20760df2025';
+	'2e0c8548a2d019697d2f455e57f8ba51422b7c9e';
 for (const evidence of [
 	"cancel-in-progress: ${{ github.ref != 'refs/heads/prod' }}",
 	'operations-control-ledger:',
@@ -534,22 +536,22 @@ if (
 	infraReleaseReferences.length !== 1 ||
 	infraReleaseReferences.some(reference => reference[1] !== pinnedInfraRevision)
 ) {
-	throw new Error('Tilda CRM upgrade must use one exact reviewed infra SHA');
+	throw new Error('Support release must use one exact reviewed infra SHA');
 }
-// Code-only CRM upgrade after Gateway rollout; preserve both reminders/SLA overlays.
-for (const [job, scope] of [['deploy-production', 'crm-upgrade']]) {
+// Initial Support release keeps the product gate closed until a separate activation.
+for (const [job, scope] of [['deploy-production', 'support-chat']]) {
 	const block = servicesWorkflow.match(new RegExp('^  ' + job + ':\\n([\\s\\S]*?)(?=^  [a-z][a-z0-9-]*:|$(?![\\s\\S]))', 'm'))?.[1];
 	if (!block || !block.includes('release_scope: ' + scope) ||
 		!block.includes('services_revision: ${{ github.sha }}') ||
 		!block.includes("expected_live_revision: 'fc3669057a748c6cd2a6cfe89b0d6ccd9a23c681'") ||
-		!block.includes("expected_service_env_sha256: 'a3c3b245a2fe17bb8f59d4e3baea72cb624d3a7ec838abffff72289b25704f51'") ||
-		!block.includes("expected_crm_upgrade_baseline_sha256: '81a9319aa9da4953cd59ea824fa0087b30fc36e8e74fbe4c9f0fcc401f186b02'") ||
-		/expected_crm_(?!upgrade_)\w+_baseline_sha256:|operations_evidence_sha256:/.test(block)) {
-		throw new Error('Tilda CRM upgrade must pin its fresh 21-role baseline and unchanged CRM env without activation authority');
+		!block.includes("expected_service_env_sha256: 'cab70688122306a71cb345c9c7031814048b47b70aca5ed677c9be01ab995e51'") ||
+		!block.includes("expected_support_chat_baseline_sha256: '439a5f4c5a1facebeabfe0c2449e3e0272840e03b6a42bb3d415b3615b5a8cff'") ||
+		/expected_crm_\w+_baseline_sha256:|operations_evidence_sha256:/.test(block)) {
+		throw new Error('Support release must pin its eleven-process baseline and prepared CRM env with product gates closed');
 	}
 }
 if (/release_scope: (?:crm-prepare|crm-databases|crm-runtime|all)\b/.test(servicesWorkflow)) {
-	throw new Error('Initial CRM provisioning and broad rollout must not replay for this upgrade');
+	throw new Error('Initial CRM provisioning and broad rollout must not replay for Support release');
 }
 
 const rootReadme = readFileSync('README.md', 'utf8');

@@ -34,7 +34,7 @@
 		"class-transformer": "^0.5.1",
 		"class-validator": "^0.14.1",
 		"express": "5.2.1",
-		"nodemailer": "9.0.3",
+		"nodemailer": "9.1.1",
 		"prisma": "5.22.0",
 		"react": "^18.3.1",
 		"reflect-metadata": "^0.1.14",
@@ -60,7 +60,7 @@
 	"pnpm": {
 		"overrides": {
 			"@nestjs/config>lodash": "4.18.1",
-			"@nestjs/platform-express>multer": "2.2.0",
+			"@nestjs/platform-express>multer": "2.3.0",
 			"@react-email/code-block>prismjs": "1.30.0",
 			"body-parser": "2.3.0",
 			"qs": "6.16.0",

@@ -1,3 +1,5 @@
+import SupportNotificationEmail from '../../emails/support-notification.email';
+import type { SupportNotificationContent } from '../messaging/support-notification.contract';
 import AdminBroadcastEmail from '../../emails/admin-broadcast.email';
 import LeadNotificationEmail from '../../emails/lead-notification.email';
 import LimitReachedEmail from '../../emails/limit-reached.email';
@@ -211,6 +213,23 @@ export class EmailService {
 			html,
 			{
 				messageId: `<${eventId}.wincrm-task-reminder@winwidget.ru>`
+			}
+		);
+	}
+	sendSupportNotification(
+		to: string,
+		content: SupportNotificationContent,
+		client: boolean,
+		eventId: string
+	) {
+		return this.sendEmail(
+			to,
+			client
+				? 'Вам ответила поддержка'
+				: 'Новое сообщение в поддержке WinCRM',
+			render(SupportNotificationEmail({ content, client })),
+			{
+				messageId: `<${eventId}.support-notification@winwidget.ru>`
 			}
 		);
 	}

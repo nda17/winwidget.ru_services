@@ -1,6 +1,7 @@
 const { readFileSync } = require('node:fs');
 const { isAbsolute, relative, resolve, sep } = require('node:path');
 const { validateCrmBackupBoundary } = require('./crm-backup-boundary.cjs');
+const { validateSupportChatCompose } = require('./validate-support-chat-compose.cjs');
 
 const fail = message => {
 	throw new Error(message);
@@ -45,6 +46,7 @@ const parseExample = path => {
 
 const config = JSON.parse(readFileSync(0, 'utf8'));
 const services = config.services ?? {};
+validateSupportChatCompose(services);
 const rootExample = parseExample('.env.example');
 const gatewayExample = parseExample('apps/api-gateway/.env.example');
 const notificationDeliveryExample = parseExample(
@@ -761,6 +763,7 @@ const expectedGatewayRoutes = [
 		10000
 	),
 	route('support-admin', '/api/v1/support/admin', 5100, 'required', 60000),
+	route('support-web-chat', '/api/v1/support', 5100, 'required', 30000),
 	route(
 		'operations-admin-event-log',
 		'/api/v1/admin-event-log',
@@ -964,8 +967,8 @@ assert(
 	'apps/api-gateway/.env.example Gateway route manifest drifted'
 );
 assert(
-	gatewayRoutes.length === 42,
-	'Gateway must expose exactly 42 routes'
+	gatewayRoutes.length === 43,
+	'Gateway must expose exactly 43 routes'
 );
 assert(
 	gatewayRoutes.filter(

@@ -1,6 +1,7 @@
 import {
 	BadRequestException,
 	ConflictException,
+	ForbiddenException,
 	Injectable,
 	NotFoundException,
 	ServiceUnavailableException,
@@ -92,6 +93,78 @@ export class IdentityInternalService {
 			subject: session.user.id,
 			sessionId: session.id,
 			roles: [...new Set(session.user.rights)].sort()
+		};
+	}
+
+	async supportAuthorContext(
+		authorization: string | undefined,
+		workspaceId?: string
+	) {
+		const identity = await this.introspect(authorization);
+		const user = await this.prisma.user.findFirst({
+			where: {
+				id: identity.subject,
+				status: UserStatus.ACTIVE,
+				deletedAt: null
+			},
+			select: { name: true }
+		});
+		if (!user) throw new UnauthorizedException('User is deactivated');
+		const membership = workspaceId
+			? await this.prisma.workspaceMember.findFirst({
+					where: {
+						workspaceId,
+						userId: identity.subject,
+						status: WorkspaceMemberStatus.ACTIVE,
+						workspace: { status: WorkspaceStatus.ACTIVE },
+						user: { status: UserStatus.ACTIVE, deletedAt: null }
+					},
+					select: { id: true, workspaceId: true }
+				})
+			: null;
+		if (workspaceId && !membership)
+			throw new ForbiddenException('Workspace is not available');
+		return {
+			schemaVersion: 1 as const,
+			subject: identity.subject,
+			role: identity.roles.includes(Role.DEV)
+				? ('DEV' as const)
+				: identity.roles.includes(Role.ADMIN)
+					? ('ADMIN' as const)
+					: ('USER' as const),
+			name: user.name,
+			workspace: membership
+				? { id: membership.workspaceId, membershipId: membership.id }
+				: null
+		};
+	}
+
+	async supportRecipientContext(subject: string) {
+		const user = await this.prisma.user.findFirst({
+			where: { id: subject, status: UserStatus.ACTIVE, deletedAt: null },
+			select: {
+				authIdentities: {
+					where: {
+						type: AuthIdentityType.EMAIL,
+						verifiedAt: { not: null }
+					},
+					select: { value: true },
+					orderBy: { id: 'asc' },
+					take: 1
+				}
+			}
+		});
+		const email = user?.authIdentities[0]?.value.trim().toLowerCase();
+		return {
+			schemaVersion: 1 as const,
+			subject,
+			active: Boolean(user),
+			verifiedEmail:
+				email &&
+				email.length <= 254 &&
+				/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)
+					? email
+					: null
 		};
 	}
 

@@ -1,3 +1,4 @@
+import type { SupportNotificationEvent } from './support-notification.contract';
 import {
 	CAMPAIGN_EMAIL_NOTIFICATION_EVENT_TYPE,
 	CAMPAIGN_NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE,
@@ -334,6 +335,7 @@ export interface WincrmInvitationEmailRequestedEventPayload {
 }
 
 export type NotificationDeliveryEventPayload =
+	| SupportNotificationEvent
 	| WincrmIntakeSlaEventPayload
 	| WincrmTaskReminderEventPayload
 	| WincrmInvitationEmailRequestedEventPayload

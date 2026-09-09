@@ -114,6 +114,44 @@ describe('admin audit event contract', () => {
 		);
 	});
 
+	it('accepts Support replies while rejecting conversation text in audit metadata', () => {
+		const payload = {
+			...common,
+			section: 'SUPPORT',
+			action: 'SUPPORT_CONVERSATION_REPLY',
+			description: 'Ответ поддержки',
+			entity: {
+				type: 'support_conversation',
+				id: campaignId,
+				label: '#1',
+				targetUserId: null
+			},
+			metadata: {
+				actorRole: 'ADMIN',
+				requestIp: null,
+				requestUserAgent: null,
+				messageId: correlationId,
+				sequence: 2,
+				aggregateVersion: 2
+			}
+		};
+		expect(
+			parseAdminAuditEvent(source('support'), payload).record.action
+		).toBe('SUPPORT_CONVERSATION_REPLY');
+		expect(() =>
+			parseAdminAuditEvent(source('support'), {
+				...payload,
+				metadata: { ...payload.metadata, text: 'Private message' }
+			})
+		).toThrow();
+		expect(() =>
+			parseAdminAuditEvent(source('support'), {
+				...payload,
+				metadata: { ...payload.metadata, actorRole: 'OWNER' }
+			})
+		).toThrow();
+	});
+
 	it('accepts the audited Support event contract on its dedicated source', () => {
 		const result = parseAdminAuditEvent(source('support'), {
 			...common,

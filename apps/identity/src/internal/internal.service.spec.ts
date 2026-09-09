@@ -6,6 +6,11 @@ import { IdentityInternalService } from './internal.service';
 
 function service(session: unknown) {
 	const prisma = {
+		user: {
+			findFirst: jest
+				.fn()
+				.mockResolvedValue({ name: 'Client', authIdentities: [] })
+		},
 		userSession: { findFirst: jest.fn().mockResolvedValue(session) },
 		workspaceMember: {
 			findMany: jest.fn().mockResolvedValue([]),
@@ -30,6 +35,91 @@ function service(session: unknown) {
 }
 
 describe('canonical Identity introspection', () => {
+	it('keeps Support independent of paid access and binds optional workspace to the authenticated author', async () => {
+		const current = service({
+			id: 'session',
+			user: {
+				id: 'user-id',
+				rights: [Role.USER],
+				status: UserStatus.ACTIVE,
+				deletedAt: null
+			}
+		});
+		await expect(
+			current.value.supportAuthorContext('Bearer access-token')
+		).resolves.toEqual({
+			schemaVersion: 1,
+			subject: 'user-id',
+			role: 'USER',
+			name: 'Client',
+			workspace: null
+		});
+		await expect(
+			current.value.supportAuthorContext(
+				'Bearer access-token',
+				'foreign-workspace'
+			)
+		).rejects.toThrow('Workspace is not available');
+		current.prisma.workspaceMember.findFirst.mockResolvedValue({
+			id: 'binding',
+			workspaceId: 'workspace'
+		});
+		await expect(
+			current.value.supportAuthorContext(
+				'Bearer access-token',
+				'workspace'
+			)
+		).resolves.toMatchObject({
+			workspace: { id: 'workspace', membershipId: 'binding' }
+		});
+		expect(
+			current.prisma.workspaceMember.findFirst
+		).toHaveBeenLastCalledWith(
+			expect.objectContaining({
+				where: expect.objectContaining({
+					userId: 'user-id',
+					status: 'ACTIVE',
+					user: { status: 'ACTIVE', deletedAt: null }
+				})
+			})
+		);
+	});
+
+	it('resolves only current verified Support email and disables delivery for deleted users', async () => {
+		const current = service(null);
+		await expect(
+			current.value.supportRecipientContext('user-id')
+		).resolves.toEqual({
+			schemaVersion: 1,
+			subject: 'user-id',
+			active: true,
+			verifiedEmail: null
+		});
+		current.prisma.user.findFirst.mockResolvedValue({
+			name: 'Client',
+			authIdentities: [{ value: 'Client@Example.test' }]
+		});
+		await expect(
+			current.value.supportRecipientContext('user-id')
+		).resolves.toMatchObject({ verifiedEmail: 'client@example.test' });
+		expect(current.prisma.user.findFirst).toHaveBeenLastCalledWith(
+			expect.objectContaining({
+				where: { id: 'user-id', status: 'ACTIVE', deletedAt: null },
+				select: {
+					authIdentities: {
+						where: { type: 'EMAIL', verifiedAt: { not: null } },
+						select: { value: true },
+						orderBy: { id: 'asc' },
+						take: 1
+					}
+				}
+			})
+		);
+		current.prisma.user.findFirst.mockResolvedValue(null);
+		await expect(
+			current.value.supportRecipientContext('user-id')
+		).resolves.toMatchObject({ active: false, verifiedEmail: null });
+	});
 	it('resolves durable source authority without a JWT and without inactive users or memberships', async () => {
 		const current = service(null);
 		const workspaceId = '33333333-3333-4333-8333-333333333333';

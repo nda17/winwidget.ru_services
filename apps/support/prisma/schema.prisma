@@ -284,3 +284,188 @@ enum ConsumerFailureStatus {
 
   @@schema("support")
 }
+
+model SupportConversation {
+  id            String                      @id @default(uuid()) @db.Uuid
+  number        Int                         @unique @default(autoincrement())
+  authorSubject String                      @map("author_subject")
+  authorName    String?                     @map("author_name")
+  workspaceId   String?                     @map("workspace_id") @db.Uuid
+  companyName   String?                     @map("company_name")
+  subject       String                      @db.VarChar(160)
+  status        SupportConversationStatus   @default(NEW)
+  section       String                      @db.VarChar(32)
+  appVersion    String                      @map("app_version") @db.VarChar(64)
+  lastSequence  Int                         @default(0) @map("last_sequence")
+  version       Int                         @default(0)
+  createdAt     DateTime                    @default(now()) @map("created_at")
+  updatedAt     DateTime                    @updatedAt @map("updated_at")
+  lastMessageAt DateTime                    @default(now()) @map("last_message_at")
+  messages      SupportMessage[]
+  reads         SupportReadState[]
+  attachments   SupportAttachment[]
+  intents       SupportNotificationIntent[]
+
+  @@index([authorSubject, lastMessageAt, id])
+  @@index([status, lastMessageAt, id])
+  @@map("web_conversations")
+  @@schema("support")
+}
+
+model SupportMessage {
+  id             String              @id @default(uuid()) @db.Uuid
+  conversationId String              @map("conversation_id") @db.Uuid
+  senderSubject  String              @map("sender_subject")
+  senderKind     SupportSenderKind   @map("sender_kind")
+  senderName     String?             @map("sender_name")
+  text           String              @db.Text
+  sequence       Int
+  createdAt      DateTime            @default(now()) @map("created_at")
+  conversation   SupportConversation @relation(fields: [conversationId], references: [id], onDelete: Restrict)
+  attachments    SupportAttachment[]
+
+  @@unique([conversationId, sequence])
+  @@index([conversationId, senderKind, sequence])
+  @@map("web_messages")
+  @@schema("support")
+}
+
+model SupportCommand {
+  id           String   @id @default(uuid()) @db.Uuid
+  actorSubject String   @map("actor_subject")
+  commandId    String   @map("command_id") @db.Uuid
+  operation    String
+  requestHash  String   @map("request_hash") @db.Char(64)
+  result       Json
+  status       String   @default("COMPLETED")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  @@unique([actorSubject, commandId])
+  @@map("web_commands")
+  @@schema("support")
+}
+
+model SupportReadState {
+  id              String              @id @default(uuid()) @db.Uuid
+  conversationId  String              @map("conversation_id") @db.Uuid
+  readerSubject   String              @map("reader_subject")
+  throughSequence Int                 @default(0) @map("through_sequence")
+  updatedAt       DateTime            @updatedAt @map("updated_at")
+  conversation    SupportConversation @relation(fields: [conversationId], references: [id], onDelete: Restrict)
+
+  @@unique([conversationId, readerSubject])
+  @@map("web_read_states")
+  @@schema("support")
+}
+
+model SupportAttachment {
+  id             String                  @id @default(uuid()) @db.Uuid
+  ownerSubject   String                  @map("owner_subject")
+  commandId      String                  @map("command_id") @db.Uuid
+  requestHash    String                  @map("request_hash") @db.Char(64)
+  draftId        String?                 @map("draft_id") @db.Uuid
+  conversationId String?                 @map("conversation_id") @db.Uuid
+  messageId      String?                 @map("message_id") @db.Uuid
+  storageKey     String                  @unique @map("storage_key")
+  fileName       String                  @map("file_name") @db.VarChar(160)
+  mediaType      String                  @map("media_type")
+  byteSize       Int                     @map("byte_size")
+  width          Int
+  height         Int
+  contentHash    String                  @map("content_hash") @db.Char(64)
+  status         SupportAttachmentStatus @default(PREPARED)
+  leaseToken     String?                 @map("lease_token") @db.Uuid
+  leaseExpiresAt DateTime?               @map("lease_expires_at")
+  attempts       Int                     @default(0)
+  deletePasses   Int                     @default(0) @map("delete_passes")
+  expiresAt      DateTime                @map("expires_at")
+  createdAt      DateTime                @default(now()) @map("created_at")
+  updatedAt      DateTime                @updatedAt @map("updated_at")
+  conversation   SupportConversation?    @relation(fields: [conversationId], references: [id], onDelete: Restrict)
+  message        SupportMessage?         @relation(fields: [messageId], references: [id], onDelete: Restrict)
+
+  @@unique([ownerSubject, commandId])
+  @@index([status, expiresAt, leaseExpiresAt])
+  @@index([ownerSubject, status])
+  @@map("web_attachments")
+  @@schema("support")
+}
+
+model SupportNotificationSettings {
+  id                 String   @id @default("singleton")
+  version            Int      @default(0)
+  enabled            Boolean  @default(false)
+  emailEnabled       Boolean  @default(false) @map("email_enabled")
+  staffEmails        String[] @default([]) @map("staff_emails")
+  telegramEnabled    Boolean  @default(false) @map("telegram_enabled")
+  telegramChatId     String?  @map("telegram_chat_id")
+  telegramThreadId   Int?     @map("telegram_thread_id")
+  clientEmailEnabled Boolean  @default(false) @map("client_email_enabled")
+  updatedAt          DateTime @updatedAt @map("updated_at")
+
+  @@map("web_notification_settings")
+  @@schema("support")
+}
+
+model SupportNotificationIntent {
+  id               String              @id @default(uuid()) @db.Uuid
+  eventId          String              @unique @map("event_id") @db.Uuid
+  conversationId   String              @map("conversation_id") @db.Uuid
+  kind             String
+  notificationType String              @map("notification_type")
+  recipientSubject String?             @map("recipient_subject")
+  recipientEmail   String?             @map("recipient_email")
+  telegramChatId   String?             @map("telegram_chat_id")
+  telegramThreadId Int?                @map("telegram_thread_id")
+  settingsVersion  Int                 @map("settings_version")
+  groupKey         String              @unique @map("group_key") @db.Char(64)
+  firstSequence    Int                 @map("first_sequence")
+  lastSequence     Int                 @map("last_sequence")
+  status           String              @default("PENDING")
+  reason           String?
+  outcomeEventId   String?             @map("outcome_event_id") @db.Uuid
+  windowAt         DateTime            @map("window_at")
+  createdAt        DateTime            @default(now()) @map("created_at")
+  updatedAt        DateTime            @updatedAt @map("updated_at")
+  conversation     SupportConversation @relation(fields: [conversationId], references: [id], onDelete: Restrict)
+
+  @@index([conversationId, createdAt])
+  @@map("web_notification_intents")
+  @@schema("support")
+}
+
+model SupportRateBucket {
+  key       String   @id
+  count     Int      @default(0)
+  expiresAt DateTime @map("expires_at")
+
+  @@index([expiresAt])
+  @@map("web_rate_buckets")
+  @@schema("support")
+}
+
+enum SupportConversationStatus {
+  NEW
+  IN_PROGRESS
+  RESOLVED
+
+  @@schema("support")
+}
+
+enum SupportSenderKind {
+  CLIENT
+  OPERATOR
+
+  @@schema("support")
+}
+
+enum SupportAttachmentStatus {
+  PREPARED
+  TEMPORARY
+  ATTACHED
+  DELETE_PENDING
+  DELETING
+  DELETED
+
+  @@schema("support")
+}

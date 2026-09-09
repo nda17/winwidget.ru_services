@@ -35,6 +35,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y ripgrep
       - run: bash .github/scripts/static-check-services-lifecycle.sh
+      - name: Verify Support process credential boundaries
+        run: node --test .github/scripts/validate-support-chat-compose.test.cjs
       - name: Verify isolated four-frontend browser harness
         run: node --test apps/crm-access/test/integration/local-frontends.test.mjs apps/crm-access/test/integration/local-browser-team.test.mjs apps/crm-access/test/integration/local-team-runtime.test.mjs
       - name: Verify isolated CRM image topology contract
@@ -1046,6 +1048,9 @@ jobs:
           - app: crm-sales
             schema: crm_sales
             script: test:workflow
+          - app: support
+            schema: support
+            script: test:integration:web
           - app: notification-delivery
             schema: notification_delivery
             database_key: notification_invitation
@@ -1105,7 +1110,7 @@ jobs:
         env:
           POSTGRES_CONTAINER_ID: ${{ job.services.postgres.id }}
         run: |
-          [[ "$DOMAIN_SCHEMA" =~ ^(crm_(access|customers|intake|sales)|notification_delivery|identity)$ ]]
+          [[ "$DOMAIN_SCHEMA" =~ ^(crm_(access|customers|intake|sales)|notification_delivery|identity|support)$ ]]
           if [ "$DOMAIN_SCHEMA" = notification_delivery ]; then
             test "$DOMAIN_DATABASE" = winwidget_notification_invitation_test_ci
           else
@@ -1166,6 +1171,10 @@ jobs:
               docker exec "$POSTGRES_CONTAINER_ID" psql -U crm_domain_bootstrap_ci -d "$DOMAIN_DATABASE" -v ON_ERROR_STOP=1 -c 'GRANT USAGE ON SCHEMA notification_delivery TO crm_domain_runtime_ci; GRANT SELECT, INSERT, UPDATE, DELETE ON notification_delivery.delivery_receipts, notification_delivery.delivery_failures, notification_delivery.outbox_events, notification_delivery.control_actions, notification_delivery.heartbeats TO crm_domain_runtime_ci'
               exit 0
               ;;
+            support)
+              docker exec "$POSTGRES_CONTAINER_ID" psql -U crm_domain_bootstrap_ci -d "$DOMAIN_DATABASE" -v ON_ERROR_STOP=1 -c 'GRANT USAGE ON SCHEMA support TO crm_domain_runtime_ci; GRANT SELECT ON support.service_identity TO crm_domain_runtime_ci; GRANT SELECT, INSERT, UPDATE ON support.web_conversations, support.web_commands, support.web_read_states, support.web_attachments, support.web_notification_settings, support.web_notification_intents, support.routing_settings TO crm_domain_runtime_ci; GRANT SELECT, INSERT ON support.web_messages TO crm_domain_runtime_ci; GRANT SELECT, INSERT, UPDATE, DELETE ON support.web_rate_buckets, support.outbox_events, support.consumer_receipts, support.consumer_failures, support.messaging_heartbeats TO crm_domain_runtime_ci; GRANT USAGE, SELECT ON SEQUENCE support.web_conversations_number_seq TO crm_domain_runtime_ci; REVOKE ALL ON support._prisma_migrations FROM crm_domain_runtime_ci'
+              exit 0
+              ;;
             *) exit 1 ;;
           esac
           docker exec -i "$POSTGRES_CONTAINER_ID" psql -U crm_domain_bootstrap_ci -d "$DOMAIN_DATABASE" -v ON_ERROR_STOP=1 <<SQL
@@ -1179,6 +1188,13 @@ jobs:
         env:
           DOMAIN_TEST_SCRIPT: ${{ matrix.script }}
         run: |
+          if [ "$DOMAIN_APP" = support ]; then
+            env SUPPORT_TEST_ALLOW_MUTATION=true SUPPORT_TEST_SKIP_MIGRATIONS=true \
+              "SUPPORT_TEST_DATABASE_URL=$DOMAIN_RUNTIME_URL" \
+              "SUPPORT_TEST_MIGRATION_DATABASE_URL=$DOMAIN_MIGRATION_URL" \
+              pnpm --dir apps/support run "$DOMAIN_TEST_SCRIPT"
+            exit 0
+          fi
           if [ "$DOMAIN_APP" = notification-delivery ]; then
             env NOTIFICATION_INVITATION_TEST_ALLOW_MUTATION=true \
               "NOTIFICATION_INVITATION_TEST_DATABASE_URL=$DOMAIN_RUNTIME_URL" \
@@ -1407,7 +1423,7 @@ jobs:
           done
 
   deploy-production:
-    name: Upgrade WinCRM with Tilda form intake
+    name: Prepare CRM support chat production release
     needs:
       - billing-crm-policy-integration
       - billing-wincrm-commerce-integration
@@ -1424,13 +1440,13 @@ jobs:
       - service-integration
       - widgets-integration
     if: github.event_name == 'push' && github.ref == 'refs/heads/prod'
-    uses: nda17/winwidget.ru_infra/.github/workflows/deploy-production.yml@8393b7bcf5cafb5cf36a590ebf77e20760df2025
+    uses: nda17/winwidget.ru_infra/.github/workflows/deploy-production.yml@2e0c8548a2d019697d2f455e57f8ba51422b7c9e
     with:
       services_revision: ${{ github.sha }}
-      release_scope: crm-upgrade
+      release_scope: support-chat
       expected_live_revision: 'fc3669057a748c6cd2a6cfe89b0d6ccd9a23c681'
-      expected_service_env_sha256: 'a3c3b245a2fe17bb8f59d4e3baea72cb624d3a7ec838abffff72289b25704f51'
-      expected_crm_upgrade_baseline_sha256: '81a9319aa9da4953cd59ea824fa0087b30fc36e8e74fbe4c9f0fcc401f186b02'
+      expected_service_env_sha256: 'cab70688122306a71cb345c9c7031814048b47b70aca5ed677c9be01ab995e51'
+      expected_support_chat_baseline_sha256: '439a5f4c5a1facebeabfe0c2449e3e0272840e03b6a42bb3d415b3615b5a8cff'
     secrets:
       BACKEND_PRODUCTION_SSH_HOST: ${{ secrets.PRODUCTION_SSH_HOST }}
       BACKEND_PRODUCTION_SSH_PORT: ${{ secrets.PRODUCTION_SSH_PORT }}

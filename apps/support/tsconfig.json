@@ -16,7 +16,7 @@
 		"strictPropertyInitialization": false,
 		"skipLibCheck": true,
 		"forceConsistentCasingInFileNames": true,
-		"types": ["node", "jest", "express"]
+		"types": ["node", "jest", "express", "multer"]
 	},
 	"include": ["src/**/*.ts"],
 	"exclude": ["node_modules", "dist"]

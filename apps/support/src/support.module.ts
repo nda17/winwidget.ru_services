@@ -25,6 +25,21 @@ import { SupportWebhookAdminController } from './telegram/support-webhook-admin.
 import { SupportWebhookAdminService } from './telegram/support-webhook-admin.service';
 import { SupportWebhookController } from './telegram/support-webhook.controller';
 import { SupportWebhookService } from './telegram/support-webhook.service';
+import {
+	SupportWebController,
+	SupportWebAdminController
+} from './web/support-web.controller';
+import { SupportConversationsService } from './web/support-conversations.service';
+import { SupportWebIdentityClient } from './web/support-web-identity.client';
+import { SupportWebRateGuard } from './web/support-web-rate.guard';
+import { SupportAttachmentsService } from './web/support-attachments.service';
+import { SupportAttachmentStorageService } from './web/support-attachment-storage.service';
+import { SupportNotificationsService } from './web/support-notifications.service';
+import {
+	SupportNotificationDeliveryGuard,
+	SupportNotificationsController
+} from './web/support-notifications.controller';
+import { SupportOutcomeWorkerService } from './web/support-outcome-worker.service';
 
 const PROCESS_ROLE = parseSupportProcessRole(
 	process.env.SUPPORT_PROCESS_ROLE
@@ -33,6 +48,9 @@ const PROCESS_ROLE = parseSupportProcessRole(
 const API_CONTROLLERS =
 	PROCESS_ROLE === 'api'
 		? [
+				SupportWebController,
+				SupportWebAdminController,
+				SupportNotificationsController,
 				SupportWebhookController,
 				SupportWebhookAdminController,
 				SupportSettingsController,
@@ -44,6 +62,13 @@ const API_CONTROLLERS =
 const API_PROVIDERS =
 	PROCESS_ROLE === 'api'
 		? [
+				SupportWebIdentityClient,
+				SupportWebRateGuard,
+				SupportConversationsService,
+				SupportAttachmentsService,
+				SupportAttachmentStorageService,
+				SupportNotificationsService,
+				SupportNotificationDeliveryGuard,
 				IdentityIntrospectionClient,
 				SupportAuthGuard,
 				SupportInternalGuard,
@@ -61,6 +86,7 @@ const API_PROVIDERS =
 	],
 	controllers: [SupportHealthController, ...API_CONTROLLERS],
 	providers: [
+		SupportOutcomeWorkerService,
 		...API_PROVIDERS,
 		SupportConfigService,
 		SupportSettingsService,

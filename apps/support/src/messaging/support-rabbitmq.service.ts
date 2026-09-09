@@ -15,6 +15,11 @@ import { randomUUID } from 'node:crypto';
 import { hostname } from 'node:os';
 import { safeError } from '../common/support-request-context';
 import {
+	SUPPORT_OUTCOME_QUEUE,
+	SUPPORT_OUTCOME_EVENT,
+	SUPPORT_OUTCOME_CONSUMER
+} from '../web/support-notifications.service';
+import {
 	strictBoolean,
 	SupportRuntimeService
 } from '../runtime/support-runtime.service';
@@ -39,6 +44,7 @@ export class SupportRabbitMqService
 	private connection: AmqpConnectionManager | null = null;
 	private channel: ChannelWrapper | null = null;
 	private consumerTag: string | null = null;
+	private outcomeConsumerTag: string | null = null;
 	private readonly deliveryChannels = new WeakMap<
 		ConsumeMessage,
 		ConfirmChannel
@@ -121,7 +127,11 @@ export class SupportRabbitMqService
 	}
 
 	isConsumerReady(): boolean {
-		return !this.runtime.workerEnabled || Boolean(this.consumerTag);
+		return (
+			!this.runtime.workerEnabled ||
+			(Boolean(this.consumerTag) &&
+				(!this.runtime.webChatEnabled || Boolean(this.outcomeConsumerTag)))
+		);
 	}
 
 	async publish(
@@ -159,16 +169,18 @@ export class SupportRabbitMqService
 	}
 
 	async consume(
-		handler: (message: ConsumeMessage) => Promise<void>
+		handler: (message: ConsumeMessage) => Promise<void>,
+		queue: string = SUPPORT_WEBHOOK_QUEUE
 	): Promise<void> {
 		if (!this.channel) throw new Error('RabbitMQ consumer is disabled');
 		await this.channel.addSetup(async (channel: ConfirmChannel) => {
 			await channel.prefetch(this.runtime.prefetch, false);
 			const consumer = await channel.consume(
-				SUPPORT_WEBHOOK_QUEUE,
+				queue,
 				message => {
 					if (!message) {
-						this.consumerTag = null;
+						if (queue === SUPPORT_WEBHOOK_QUEUE) this.consumerTag = null;
+						else this.outcomeConsumerTag = null;
 						return;
 					}
 					this.deliveryChannels.set(message, channel);
@@ -182,13 +194,15 @@ export class SupportRabbitMqService
 				{
 					noAck: false,
 					consumerTag:
-						`${this.config.get<string>('RABBITMQ_CONNECTION_NAME')}:${hostname()}:${SUPPORT_WEBHOOK_QUEUE}`.slice(
+						`${this.config.get<string>('RABBITMQ_CONNECTION_NAME')}:${hostname()}:${queue}`.slice(
 							0,
 							255
 						)
 				}
 			);
-			this.consumerTag = consumer.consumerTag;
+			if (queue === SUPPORT_WEBHOOK_QUEUE)
+				this.consumerTag = consumer.consumerTag;
+			else this.outcomeConsumerTag = consumer.consumerTag;
 		});
 	}
 
@@ -202,6 +216,7 @@ export class SupportRabbitMqService
 
 	async onApplicationShutdown(): Promise<void> {
 		this.consumerTag = null;
+		this.outcomeConsumerTag = null;
 		await this.channel?.close().catch(() => undefined);
 		await this.connection?.close().catch(() => undefined);
 		this.channel = null;
@@ -222,6 +237,41 @@ export class SupportRabbitMqService
 		await channel.assertExchange(MANUAL_RETRY_EXCHANGE, 'direct', {
 			durable: true
 		});
+		if (this.runtime.webChatEnabled) {
+			await channel.assertQueue(SUPPORT_OUTCOME_QUEUE, { durable: true });
+			await channel.bindQueue(
+				SUPPORT_OUTCOME_QUEUE,
+				EVENTS_EXCHANGE,
+				SUPPORT_OUTCOME_EVENT
+			);
+			await channel.bindQueue(
+				SUPPORT_OUTCOME_QUEUE,
+				MANUAL_RETRY_EXCHANGE,
+				SUPPORT_OUTCOME_CONSUMER
+			);
+			await channel.assertQueue(`${SUPPORT_OUTCOME_QUEUE}.dead-letter`, {
+				durable: true
+			});
+			await channel.bindQueue(
+				`${SUPPORT_OUTCOME_QUEUE}.dead-letter`,
+				DEAD_LETTER_EXCHANGE,
+				`${SUPPORT_OUTCOME_CONSUMER}.dead-letter`
+			);
+			for (const [index, delay] of SUPPORT_RETRY_DELAYS_MS.entries()) {
+				const queue = `${SUPPORT_OUTCOME_QUEUE}.retry-v1.${index + 1}`;
+				await channel.assertQueue(queue, {
+					durable: true,
+					messageTtl: delay,
+					deadLetterExchange: MANUAL_RETRY_EXCHANGE,
+					deadLetterRoutingKey: SUPPORT_OUTCOME_CONSUMER
+				});
+				await channel.bindQueue(
+					queue,
+					RETRY_EXCHANGE,
+					`${SUPPORT_OUTCOME_CONSUMER}.retry.${index + 1}`
+				);
+			}
+		}
 		await channel.assertQueue(SUPPORT_WEBHOOK_QUEUE, { durable: true });
 		await channel.bindQueue(
 			SUPPORT_WEBHOOK_QUEUE,

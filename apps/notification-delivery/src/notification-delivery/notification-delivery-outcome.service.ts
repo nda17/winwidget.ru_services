@@ -1,4 +1,14 @@
 import {
+	SUPPORT_NOTIFICATION_EVENT_TYPES,
+	SUPPORT_NOTIFICATION_OUTCOME_EVENT_TYPE
+} from '../messaging/messaging.constants';
+import {
+	assertSupportNotificationEvent,
+	assertSupportNotificationOutcome,
+	isSupportNotificationKind,
+	SupportNotificationSkipReason
+} from '../messaging/support-notification.contract';
+import {
 	CAMPAIGN_NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE,
 	NOTIFICATION_DELIVERY_OUTCOME_EVENT_TYPE,
 	NotificationDeliveryKind,
@@ -23,13 +33,65 @@ export class NotificationDeliveryOutcomeService {
 			kind: NotificationDeliveryKind;
 			eventId: string;
 			payload: NotificationDeliveryEventPayload;
-			status: 'DELIVERED' | 'FAILED';
+			status: 'DELIVERED' | 'FAILED' | 'SKIPPED';
+			skipReason?: SupportNotificationSkipReason;
 			failure: {
 				normalizedCode: string;
 				safeReason: string;
 			} | null;
 		}
 	): Promise<void> {
+		if (isSupportNotificationKind(input.kind)) {
+			assertSupportNotificationEvent(input.payload);
+			if (
+				input.payload.eventId !== input.eventId ||
+				input.payload.eventType !==
+					SUPPORT_NOTIFICATION_EVENT_TYPES[input.kind]
+			)
+				throw new Error('Support outcome request identity mismatch');
+			const messageId = randomUUID();
+			const payload = {
+				schemaVersion: 1 as const,
+				eventId: messageId,
+				eventType: SUPPORT_NOTIFICATION_OUTCOME_EVENT_TYPE,
+				occurredAt: new Date().toISOString(),
+				sourceEventId: input.eventId,
+				sourceKind: input.kind,
+				intentId: input.payload.reference.id,
+				status: input.status,
+				reason:
+					input.status === 'DELIVERED'
+						? null
+						: input.status === 'SKIPPED'
+							? input.skipReason
+							: /^[A-Z0-9_]{1,120}$/.test(
+										input.failure?.normalizedCode ?? ''
+								  )
+								? input.failure!.normalizedCode
+								: 'UNCLASSIFIED'
+			};
+			assertSupportNotificationOutcome(payload);
+			await transaction.notificationDeliveryOutboxEvent.createMany({
+				data: [
+					{
+						messageId,
+						deduplicationKey: `notification:${input.eventId}:${input.kind}:outcome:${input.status.toLowerCase()}:v1`,
+						exchange: NotificationDeliveryExchange.EVENTS,
+						eventType: SUPPORT_NOTIFICATION_OUTCOME_EVENT_TYPE,
+						routingKey: SUPPORT_NOTIFICATION_OUTCOME_EVENT_TYPE,
+						payload: payload as unknown as Prisma.InputJsonValue,
+						headers: createMessagingHeaders({
+							messageId,
+							causationId: input.eventId
+						}) as Prisma.InputJsonObject
+					}
+				],
+				skipDuplicates: true
+			});
+			return;
+		}
+		if (input.status === 'SKIPPED')
+			throw new Error('Unsupported notification skip outcome');
 		if (
 			input.kind !== 'campaign-email' &&
 			input.kind !== 'campaign-telegram' &&

@@ -1,3 +1,4 @@
+import { isSupportNotificationKind } from '../messaging/support-notification.contract';
 import {
 	NotificationDeliveryKind,
 	DEFAULT_NOTIFICATION_DELIVERY_KINDS,
@@ -312,7 +313,8 @@ export class NotificationDeliveryWorkerService
 					eventId,
 					kind,
 					claim.lockToken,
-					deliveryResult.reason
+					deliveryResult.reason,
+					...(isSupportNotificationKind(kind) ? [payload] : [])
 				);
 				this.ackMessage(message);
 				this.logger.log(

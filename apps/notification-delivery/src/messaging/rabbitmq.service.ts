@@ -1,3 +1,4 @@
+import { SUPPORT_NOTIFICATION_KINDS } from './messaging.constants';
 import {
 	DEAD_LETTER_EXCHANGE,
 	EVENTS_EXCHANGE,
@@ -625,6 +626,7 @@ export class RabbitMqService
 				?.split(',')
 				.map(kind => kind.trim()) ?? [];
 		for (const kind of [
+			...SUPPORT_NOTIFICATION_KINDS,
 			...WINCRM_TASK_REMINDER_KINDS,
 			...WINCRM_INTAKE_SLA_KINDS
 		])

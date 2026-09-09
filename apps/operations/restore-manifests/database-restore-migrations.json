@@ -2,7 +2,7 @@
 	"schemaVersion": 1,
 	"targets": {
 		"notification-delivery": {
-			"manifestSha256": "6c5bf79e6daeb866f24052f060dd71553cbcbaf8f2fc0edeec139b41769afcd3",
+			"manifestSha256": "0300fbb78dc0114001d6f2022b47a2b5c3223371f9acebcb8b348a32cd5c7168",
 			"migrations": [
 				{
 					"name": "20260727000000_init_notification_delivery",
@@ -43,6 +43,10 @@
 				{
 					"name": "20260907230000_add_wincrm_task_reminders",
 					"checksum": "ecd2b1677dccc6c0515ef38baf28a4407c0ae4882c68bbcf4d60da11fd807b27"
+				},
+				{
+					"name": "20260909010000_add_support_notifications",
+					"checksum": "38507fd2bf62b4635b24cb68b91f36915da755b8ed41738d061d50c55aa5a8e0"
 				}
 			]
 		},
@@ -204,7 +208,7 @@
 			]
 		},
 		"support": {
-			"manifestSha256": "40f3627571d7eadddf6430538f327871b2d4270b14ebfc7c025842d3aea7fe7e",
+			"manifestSha256": "393231132822dbad4f14df1ad65d3375e4fa31d66e3fbda37aacc519c22e47c1",
 			"migrations": [
 				{
 					"name": "20260824010000_init_support",
@@ -217,6 +221,10 @@
 				{
 					"name": "20260830020000_harden_default_routine_acl",
 					"checksum": "8a7b82e266d02b2dd9da4ccd9c4bbd884d266ebf9c9b5b39011ea1dd97a24334"
+				},
+				{
+					"name": "20260909160000_add_web_support_chat",
+					"checksum": "cbd494aed27135389d38b89028035c439beaafe69f32ebae85d592f0a53f5a38"
 				}
 			]
 		}

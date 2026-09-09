@@ -1,4 +1,13 @@
 import {
+	SUPPORT_NOTIFICATION_EVENT_TYPES,
+	SUPPORT_NOTIFICATION_OUTCOME_EVENT_TYPE
+} from './messaging.constants';
+import {
+	assertSupportNotificationEvent,
+	assertSupportNotificationOutcome,
+	isSupportNotificationKind
+} from './support-notification.contract';
+import {
 	BILLING_PERIOD_VALUES,
 	LEAD_SOURCES,
 	NotificationDeliveryEventPayload,
@@ -634,6 +643,7 @@ const assertPreparedNotificationEvent = (
 
 type ResolvedContractKind =
 	| NotificationDeliveryKind
+	| 'support-notification-outcome'
 	| 'telegram-destination-unavailable-outcome'
 	| 'notification-delivery-outcome'
 	| 'reporting-notification-delivery-outcome'
@@ -881,6 +891,16 @@ const resolveExpectedKind = (
 	payload: JsonRecord
 ): ResolvedContractKind => {
 	switch (payload.eventType) {
+		case SUPPORT_NOTIFICATION_EVENT_TYPES['support-team-email']:
+		case SUPPORT_NOTIFICATION_EVENT_TYPES['support-team-telegram']:
+		case SUPPORT_NOTIFICATION_EVENT_TYPES['support-client-email']:
+			assertSupportNotificationEvent(payload);
+			return Object.entries(SUPPORT_NOTIFICATION_EVENT_TYPES).find(
+				([, type]) => type === payload.eventType
+			)![0] as NotificationDeliveryKind;
+		case SUPPORT_NOTIFICATION_OUTCOME_EVENT_TYPE:
+			assertSupportNotificationOutcome(payload);
+			return 'support-notification-outcome';
 		case WINCRM_TASK_REMINDER_EMAIL_EVENT_TYPE:
 		case WINCRM_TASK_REMINDER_TELEGRAM_EVENT_TYPE:
 			assertWincrmTaskReminderEvent(payload);
@@ -945,7 +965,9 @@ export function assertMessagingEventContract(
 
 	const expectedKind = resolveExpectedKind(payload);
 	if (
-		(expectedKind === 'wincrm-invitation-email' ||
+		(isSupportNotificationKind(expectedKind) ||
+			expectedKind === 'support-notification-outcome' ||
+			expectedKind === 'wincrm-invitation-email' ||
 			expectedKind === 'wincrm-task-reminder-email' ||
 			expectedKind === 'wincrm-task-reminder-telegram' ||
 			expectedKind === 'wincrm-intake-sla-email' ||
@@ -953,6 +975,14 @@ export function assertMessagingEventContract(
 		payload.eventId !== metadata.messageId
 	) {
 		throw new Error('WinCRM eventId must match the AMQP messageId');
+	}
+	if (expectedKind === 'support-notification-outcome') {
+		if (
+			metadata.kind ||
+			metadata.routingKey !== SUPPORT_NOTIFICATION_OUTCOME_EVENT_TYPE
+		)
+			throw new Error('Invalid support notification outcome route');
+		return;
 	}
 	if (expectedKind === 'telegram-destination-unavailable-outcome') {
 		if (metadata.kind) {

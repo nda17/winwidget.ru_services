@@ -38,6 +38,10 @@ async function bootstrap(): Promise<void> {
 	}
 	app.setGlobalPrefix('api/v1', {
 		exclude: [
+			{
+				path: 'internal/v1/notification-delivery/support-notifications/:id/delivery-context',
+				method: RequestMethod.POST
+			},
 			{ path: 'health/live', method: RequestMethod.GET },
 			{ path: 'health/ready', method: RequestMethod.GET },
 			{

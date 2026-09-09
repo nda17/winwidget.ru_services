@@ -96,6 +96,9 @@ const PLATFORM_ACTIONS = [
 	'PLATFORM_HOME_PAGE_RAW_CODE_UPDATE'
 ] as const;
 const SUPPORT_ACTIONS = [
+	'SUPPORT_CONVERSATION_REPLY',
+	'SUPPORT_CONVERSATION_STATUS_UPDATE',
+	'SUPPORT_NOTIFICATION_SETTINGS_UPDATE',
 	'SUPPORT_ROUTING_SETTINGS_UPDATE',
 	'SUPPORT_WEBHOOK_REINSTALL',
 	'SUPPORT_DELIVERY_RETRY',
@@ -684,6 +687,83 @@ function validateSupportAudit(
 	entity: Record<string, unknown>,
 	metadata: Record<string, unknown>
 ): void {
+	if (
+		[
+			'SUPPORT_CONVERSATION_REPLY',
+			'SUPPORT_CONVERSATION_STATUS_UPDATE',
+			'SUPPORT_NOTIFICATION_SETTINGS_UPDATE'
+		].includes(action)
+	) {
+		const settings = action === 'SUPPORT_NOTIFICATION_SETTINGS_UPDATE';
+		if (
+			entity.type !==
+				(settings
+					? 'support_notification_settings'
+					: 'support_conversation') ||
+			(settings && entity.id !== 'singleton')
+		) {
+			throw new Error('Support chat audit entity is invalid');
+		}
+		if (!settings) uuid(entity.id, 'entity.id');
+		const base = [
+			'actorRole',
+			'requestIp',
+			'requestUserAgent',
+			'aggregateVersion'
+		];
+		if (
+			!['ADMIN', 'DEV'].includes(String(metadata.actorRole)) ||
+			(settings && metadata.actorRole !== 'DEV')
+		) {
+			throw new Error('Support chat actor role is invalid');
+		}
+		optionalString(metadata.requestIp, 'requestIp', 128);
+		optionalString(metadata.requestUserAgent, 'requestUserAgent', 500);
+		if (
+			!Number.isSafeInteger(metadata.aggregateVersion) ||
+			Number(metadata.aggregateVersion) < 1
+		) {
+			throw new Error('Support chat aggregateVersion is invalid');
+		}
+		if (action === 'SUPPORT_CONVERSATION_REPLY') {
+			assertExactKeys(metadata, [...base, 'messageId', 'sequence']);
+			uuid(metadata.messageId, 'messageId');
+			if (
+				!Number.isSafeInteger(metadata.sequence) ||
+				Number(metadata.sequence) < 1
+			) {
+				throw new Error('Support chat sequence is invalid');
+			}
+		} else if (action === 'SUPPORT_CONVERSATION_STATUS_UPDATE') {
+			assertExactKeys(metadata, [...base, 'oldStatus', 'newStatus']);
+			for (const status of [metadata.oldStatus, metadata.newStatus]) {
+				if (!['NEW', 'IN_PROGRESS', 'RESOLVED'].includes(String(status))) {
+					throw new Error('Support chat status is invalid');
+				}
+			}
+		} else {
+			assertExactKeys(metadata, [...base, 'changedFields']);
+			const fields = metadata.changedFields;
+			const allowed = [
+				'enabled',
+				'emailEnabled',
+				'staffEmails',
+				'telegramEnabled',
+				'telegramChatId',
+				'telegramThreadId',
+				'clientEmailEnabled'
+			];
+			if (
+				!Array.isArray(fields) ||
+				fields.length > allowed.length ||
+				new Set(fields).size !== fields.length ||
+				fields.some(field => !allowed.includes(String(field)))
+			) {
+				throw new Error('Support chat settings fields are invalid');
+			}
+		}
+		return;
+	}
 	if (
 		(action === 'SUPPORT_ROUTING_SETTINGS_UPDATE' &&
 			(entity.type !== 'support_routing_settings' ||

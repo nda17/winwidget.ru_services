@@ -1,3 +1,5 @@
+import { SupportNotificationContextService } from './support-notification-context.service';
+import { TelegramSupportTransportService } from '../telegram/telegram-support-transport.service';
 import { EmailModule } from '../email/email.module';
 import { RabbitMqModule } from '../messaging/rabbitmq.module';
 import { NotificationDeliveryControlModule } from './control/notification-delivery-control.module';
@@ -44,6 +46,8 @@ import {
 		WincrmTaskReminderReadinessController
 	],
 	providers: [
+		SupportNotificationContextService,
+		TelegramSupportTransportService,
 		WincrmInvitationContextService,
 		WincrmIntakeSlaContextService,
 		WincrmIntakeSlaReadinessGuard,

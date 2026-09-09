@@ -70,6 +70,7 @@ export function strictBoolean(
 @Injectable()
 export class SupportRuntimeService {
 	readonly role: SupportProcessRole;
+	readonly webChatEnabled: boolean;
 	readonly prefetch: number;
 	readonly inboxLeaseMs: number;
 	readonly outboxBatchSize: number;
@@ -79,6 +80,11 @@ export class SupportRuntimeService {
 	readonly failureRetentionDays: number;
 
 	constructor(config: ConfigService) {
+		this.webChatEnabled = strictBoolean(
+			config.get<string>('SUPPORT_WEB_CHAT_ENABLED'),
+			false,
+			'SUPPORT_WEB_CHAT_ENABLED'
+		);
 		this.role = parseSupportProcessRole(
 			config.get<string>('SUPPORT_PROCESS_ROLE')
 		);
