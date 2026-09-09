@@ -18,7 +18,7 @@ const identityFile = join(sshDirectory, 'key');
 const hostsFile = join(sshDirectory, 'known_hosts');
 for (const [file, name] of [[identityFile, 'SUPPORT_OPS_SSH_PRIVATE_KEY'], [hostsFile, 'SUPPORT_OPS_SSH_KNOWN_HOSTS']]) {
   if (!process.env[name]) throw new Error('Missing pinned SSH configuration');
-  writeFileSync(file, process.env[name], { mode: 0o600 });
+  writeFileSync(file, process.env[name].trimEnd() + '\n', { mode: 0o600 });
 }
 const host = process.env.SUPPORT_OPS_SSH_HOST;
 const port = process.env.SUPPORT_OPS_SSH_PORT || '22';
@@ -77,25 +77,29 @@ const sshArgs = ['-F','/dev/null','-i',identityFile,'-o','BatchMode=yes','-o','S
   '-o','LogLevel=ERROR','-o','ClearAllForwardings=yes','-o','ForwardAgent=no','-p',port,`${user}@${host}`,'python3','-'];
 const guardedRemote = "import sys\nstage='initial'\ntry:\n" + remote.split('\n').map(line => ' '+line).join('\n') + "\nexcept Exception:\n sys.stderr.write('SUPPORT_PREFLIGHT_STAGE='+stage+'\\n')\n sys.exit(1)\n";
 const result = spawnSync('ssh', sshArgs, { input: Buffer.from(guardedRemote), maxBuffer: 32 * 1024 * 1024, timeout: 120000 });
+let snapshot, captured;
 if (result.status !== 0 || result.error) {
   const diagnostics = result.stderr?.toString('utf8') || '';
   const stage = diagnostics.match(/^SUPPORT_PREFLIGHT_STAGE=(initial|files|containers|ledgers|memory)$/m)?.[1];
-  const reason = stage ? `REMOTE_${stage}` : /Permission denied/.test(diagnostics) ? 'SSH_AUTH_DENIED' : /Host key verification failed/.test(diagnostics) ? 'SSH_HOST_KEY' : 'SSH_TRANSPORT';
-  throw new Error(`Support production preflight failed (${reason}); captured output is withheld`);
+  const reason = stage ? `REMOTE_${stage}` : /Permission denied/.test(diagnostics) ? 'SSH_AUTH_DENIED' : /Host key verification failed/.test(diagnostics) ? 'SSH_HOST_KEY' : /libcrypto|invalid format/.test(diagnostics) ? 'SSH_KEY_FORMAT' : 'SSH_TRANSPORT';
+  snapshot = { error: reason, files: {}, containers: [], diagnostics: { status: result.status, code: result.error?.code, stderr: diagnostics } };
+  captured = Buffer.from(JSON.stringify(snapshot));
+} else {
+  captured = result.stdout;
+  snapshot = JSON.parse(captured.toString('utf8'));
 }
-const snapshot = JSON.parse(result.stdout.toString('utf8'));
 const key = randomBytes(32), iv = randomBytes(12);
 const cipher = createCipheriv('aes-256-gcm', key, iv);
 const aad = Buffer.from(`support-chat-preflight-v1:${process.env.GITHUB_SHA}`);
 cipher.setAAD(aad);
-const ciphertext = Buffer.concat([cipher.update(result.stdout),cipher.final()]);
+const ciphertext = Buffer.concat([cipher.update(captured),cipher.final()]);
 mkdirSync('support-chat-preflight', { mode: 0o700 });
 writeFileSync('support-chat-preflight/encrypted.json', JSON.stringify({
   schemaVersion:1,revision:process.env.GITHUB_SHA,aad:aad.toString('base64'),iv:iv.toString('base64'),
   key:publicEncrypt({key:operation.publicKey,padding:constants.RSA_PKCS1_OAEP_PADDING,oaepHash:'sha256'},key).toString('base64'),
   tag:cipher.getAuthTag().toString('base64'),ciphertext:ciphertext.toString('base64')
 }), {mode:0o600});
-const summary = { revision:process.env.GITHUB_SHA, files:Object.fromEntries(Object.entries(snapshot.files).map(([name,file]) => [name,{sha256:file.sha256,bytes:file.bytes,error:file.error,uid:file.uid,gid:file.gid,mode:file.mode}])),
+const summary = { revision:process.env.GITHUB_SHA, error: snapshot.error, files:Object.fromEntries(Object.entries(snapshot.files).map(([name,file]) => [name,{sha256:file.sha256,bytes:file.bytes,error:file.error,uid:file.uid,gid:file.gid,mode:file.mode}])),
   containers:snapshot.containers.map(c=>({service:c.Config.Labels?.['com.docker.compose.service']||null,id:c.Id,image:c.Config.Image,health:c.State.Health?.Status||null})),
   memoryAvailableKiB:snapshot.memoryAvailableKiB, encryptedSha256:createHash('sha256').update(ciphertext).digest('hex') };
 writeFileSync('support-chat-preflight/summary.json', JSON.stringify(summary,null,2),{mode:0o600});
