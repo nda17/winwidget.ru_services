@@ -40,16 +40,23 @@ paths={
  'crmAccess':root+'/winwidget.ru_services/apps/crm-access/.env.production'
 }
 result={'schemaVersion':1,'files':{},'containers':[],'ledgers':{}}
+stage='files'
 for name,path in paths.items():
  if name=='crmAccess' and not os.path.exists(path): continue
+ if not os.path.exists(path):
+  result['files'][name]={'error':'MISSING'}
+  continue
  info=os.lstat(path)
  if not stat.S_ISREG(info.st_mode) or info.st_uid!=0 or info.st_gid!=0 or stat.S_IMODE(info.st_mode)!=0o600 or info.st_nlink!=1 or info.st_size>524288:
-  raise RuntimeError('Unsafe environment file')
+  result['files'][name]={'error':'UNSAFE_METADATA','uid':info.st_uid,'gid':info.st_gid,'mode':stat.S_IMODE(info.st_mode),'regular':stat.S_ISREG(info.st_mode),'links':info.st_nlink,'bytes':info.st_size}
+  continue
  fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW)
  with os.fdopen(fd,'rb') as file: data=file.read(524289)
  result['files'][name]={'sha256':hashlib.sha256(data).hexdigest(),'bytes':len(data),'base64':base64.b64encode(data).decode()}
+stage='containers'
 ids=subprocess.run(['docker','ps','-q'],check=True,capture_output=True,text=True).stdout.split()
 if ids: result['containers']=json.loads(subprocess.run(['docker','inspect',*ids],check=True,capture_output=True,text=True).stdout)
+stage='ledgers'
 for container in result['containers']:
  service=container.get('Config',{}).get('Labels',{}).get('com.docker.compose.service','')
  if not service.endswith('-postgres'): continue
@@ -61,14 +68,21 @@ for container in result['containers']:
  if check.returncode==0:
   result['ledgers'][owner]=[{'name':line.split('|')[0],'checksum':line.split('|')[1]} for line in check.stdout.splitlines() if '|' in line]
  else: result['ledgers'][owner]={'unavailable':True}
+stage='memory'
 result['memoryAvailableKiB']=int(next(line.split()[1] for line in open('/proc/meminfo') if line.startswith('MemAvailable:')))
 sys.stdout.write(json.dumps(result,separators=(',',':')))
 `;
 const sshArgs = ['-F','/dev/null','-i',identityFile,'-o','BatchMode=yes','-o','StrictHostKeyChecking=yes',
   '-o',`UserKnownHostsFile=${hostsFile}`,'-o','IdentitiesOnly=yes','-o','ConnectTimeout=15',
   '-o','LogLevel=ERROR','-o','ClearAllForwardings=yes','-o','ForwardAgent=no','-p',port,`${user}@${host}`,'python3','-'];
-const result = spawnSync('ssh', sshArgs, { input: Buffer.from(remote), maxBuffer: 32 * 1024 * 1024, timeout: 120000 });
-if (result.status !== 0 || result.error) throw new Error('Support production preflight failed; captured output is withheld');
+const guardedRemote = "import sys\nstage='initial'\ntry:\n" + remote.split('\n').map(line => ' '+line).join('\n') + "\nexcept Exception:\n sys.stderr.write('SUPPORT_PREFLIGHT_STAGE='+stage+'\\n')\n sys.exit(1)\n";
+const result = spawnSync('ssh', sshArgs, { input: Buffer.from(guardedRemote), maxBuffer: 32 * 1024 * 1024, timeout: 120000 });
+if (result.status !== 0 || result.error) {
+  const diagnostics = result.stderr?.toString('utf8') || '';
+  const stage = diagnostics.match(/^SUPPORT_PREFLIGHT_STAGE=(initial|files|containers|ledgers|memory)$/m)?.[1];
+  const reason = stage ? `REMOTE_${stage}` : /Permission denied/.test(diagnostics) ? 'SSH_AUTH_DENIED' : /Host key verification failed/.test(diagnostics) ? 'SSH_HOST_KEY' : 'SSH_TRANSPORT';
+  throw new Error(`Support production preflight failed (${reason}); captured output is withheld`);
+}
 const snapshot = JSON.parse(result.stdout.toString('utf8'));
 const key = randomBytes(32), iv = randomBytes(12);
 const cipher = createCipheriv('aes-256-gcm', key, iv);
@@ -81,7 +95,7 @@ writeFileSync('support-chat-preflight/encrypted.json', JSON.stringify({
   key:publicEncrypt({key:operation.publicKey,padding:constants.RSA_PKCS1_OAEP_PADDING,oaepHash:'sha256'},key).toString('base64'),
   tag:cipher.getAuthTag().toString('base64'),ciphertext:ciphertext.toString('base64')
 }), {mode:0o600});
-const summary = { revision:process.env.GITHUB_SHA, files:Object.fromEntries(Object.entries(snapshot.files).map(([name,file]) => [name,{sha256:file.sha256,bytes:file.bytes}])),
+const summary = { revision:process.env.GITHUB_SHA, files:Object.fromEntries(Object.entries(snapshot.files).map(([name,file]) => [name,{sha256:file.sha256,bytes:file.bytes,error:file.error,uid:file.uid,gid:file.gid,mode:file.mode}])),
   containers:snapshot.containers.map(c=>({service:c.Config.Labels?.['com.docker.compose.service']||null,id:c.Id,image:c.Config.Image,health:c.State.Health?.Status||null})),
   memoryAvailableKiB:snapshot.memoryAvailableKiB, encryptedSha256:createHash('sha256').update(ciphertext).digest('hex') };
 writeFileSync('support-chat-preflight/summary.json', JSON.stringify(summary,null,2),{mode:0o600});
