@@ -4,11 +4,34 @@ import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { createHash, createCipheriv, publicEncrypt, randomBytes, constants } from 'node:crypto';
 import { join } from 'node:path';
+import { gunzipSync } from 'node:zlib';
+import { parseEnv } from 'node:util';
 
 const operation = JSON.parse(readFileSync('.github/support-chat-operation.json', 'utf8'));
-if (operation.schemaVersion !== 1 || operation.action !== 'inspect' ||
+if (operation.schemaVersion !== 1 || !['inspect', 'sync-env'].includes(operation.action) ||
     typeof operation.publicKey !== 'string' || operation.publicKey.length > 5000) {
   throw new Error('Unsupported Support preflight operation');
+}
+let sync = null;
+if (operation.action === 'sync-env') {
+  const payload = process.env.SUPPORT_OPS_ENV_PAYLOAD;
+  if (!payload || !operation.files || Object.keys(operation.files).length !== 4) throw new Error('Missing bounded Support env update');
+  const files = JSON.parse(gunzipSync(Buffer.from(payload, 'base64'), { maxOutputLength: 2097152 }));
+  const allowed = {
+    canonical: ['GATEWAY_ROUTES_JSON', 'SUPPORT_WEB_CHAT_ENABLED', 'SUPPORT_CRM_ACCESS_BASE_URL', 'SUPPORT_CRM_ACCESS_TOKEN', 'CRM_ACCESS_SUPPORT_TOKEN', 'SUPPORT_NOTIFICATION_DELIVERY_TOKEN', 'SUPPORT_S3_ENDPOINT', 'SUPPORT_S3_REGION', 'SUPPORT_S3_BUCKET', 'SUPPORT_S3_FORCE_PATH_STYLE', 'SUPPORT_S3_ACCESS_KEY_ID', 'SUPPORT_S3_SECRET_ACCESS_KEY', 'NOTIFICATION_DELIVERY_KINDS'],
+    crm: ['CRM_ACCESS_SUPPORT_TOKEN'],
+    support: ['SUPPORT_WEB_CHAT_ENABLED', 'SUPPORT_CRM_ACCESS_BASE_URL', 'SUPPORT_CRM_ACCESS_TOKEN', 'SUPPORT_NOTIFICATION_DELIVERY_TOKEN', 'SUPPORT_S3_ENDPOINT', 'SUPPORT_S3_REGION', 'SUPPORT_S3_BUCKET', 'SUPPORT_S3_FORCE_PATH_STYLE', 'SUPPORT_S3_ACCESS_KEY_ID', 'SUPPORT_S3_SECRET_ACCESS_KEY'],
+    notificationDelivery: ['SUPPORT_INTERNAL_BASE_URL', 'SUPPORT_NOTIFICATION_DELIVERY_TOKEN', 'TELEGRAM_SUPPORT_BOT_TOKEN', 'NOTIFICATION_DELIVERY_KINDS']
+  };
+  if (Object.keys(files).sort().join(',') !== Object.keys(operation.files).sort().join(',')) throw new Error('Support env file set mismatch');
+  for (const [name, plan] of Object.entries(operation.files)) {
+    if (!allowed[name] || !/^[a-f0-9]{64}$/.test(plan.expectedSha256) || !/^[a-f0-9]{64}$/.test(plan.sha256) || !Array.isArray(plan.changedKeys) || plan.changedKeys.some(key => !allowed[name].includes(key))) throw new Error('Invalid Support env plan');
+    const bytes = Buffer.from(files[name], 'base64');
+    if (bytes.length > 524288 || createHash('sha256').update(bytes).digest('hex') !== plan.sha256) throw new Error('Support env checksum mismatch');
+    const parsed = parseEnv(bytes.toString('utf8'));
+    if (plan.changedKeys.some(key => typeof parsed[key] !== 'string')) throw new Error('Missing planned Support env key');
+  }
+  sync = { plans: operation.files, files };
 }
 const directory = process.env.RUNNER_TEMP;
 if (!directory) throw new Error('This operation requires the CI runner');
@@ -28,7 +51,7 @@ if (!/^[A-Za-z0-9][A-Za-z0-9.-]{0,252}$/.test(host || '') ||
   throw new Error('Invalid pinned SSH destination');
 }
 const remote = String.raw`
-import os, sys, json, stat, hashlib, base64, subprocess
+import os, sys, json, stat, hashlib, base64, subprocess, tempfile, re, fcntl
 root='/opt/winwidget'
 paths={
  'canonical':root+'/deploy/backend/.env.production',
@@ -41,6 +64,54 @@ paths={
 }
 result={'schemaVersion':1,'files':{},'containers':[],'ledgers':{}}
 stage='files'
+sync=SYNC_INPUT
+if sync is not None:
+ lock_path=root+'/deploy/backend/.production-deploy.lock'
+ lock_fd=os.open(lock_path,os.O_RDWR|os.O_CREAT|os.O_NOFOLLOW,0o600)
+ lock_info=os.fstat(lock_fd)
+ if not stat.S_ISREG(lock_info.st_mode) or lock_info.st_uid!=0 or lock_info.st_gid!=0 or stat.S_IMODE(lock_info.st_mode)!=0o600 or lock_info.st_nlink!=1: raise RuntimeError('Unsafe deploy lock')
+ fcntl.flock(lock_fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
+ originals={}
+ staged={}
+ try:
+  for name,plan in sync['plans'].items():
+   path=paths[name]
+   info=os.lstat(path)
+   if not stat.S_ISREG(info.st_mode) or info.st_uid!=0 or info.st_gid!=0 or stat.S_IMODE(info.st_mode)!=0o600 or info.st_nlink!=1: raise RuntimeError('Unsafe update target')
+   with open(path,'rb') as file: before=file.read(524289)
+   after=base64.b64decode(sync['files'][name],validate=True)
+   if hashlib.sha256(before).hexdigest()!=plan['expectedSha256'] or hashlib.sha256(after).hexdigest()!=plan['sha256']: raise RuntimeError('Update baseline mismatch')
+   allowed=set(plan['changedKeys'])
+   def preserve(data):
+    output=[]
+    for line in data.decode().splitlines():
+     match=re.match(r'^([A-Z][A-Z0-9_]*)=',line)
+     if match and match.group(1) in allowed: continue
+     output.append(line)
+    return output
+   if preserve(before)!=preserve(after): raise RuntimeError('Unrelated env lines changed')
+   originals[name]=before
+   fd,temp=tempfile.mkstemp(prefix='.support-env-',dir=os.path.dirname(path))
+   with os.fdopen(fd,'wb') as file:
+    file.write(after);file.flush();os.fsync(file.fileno())
+   os.chmod(temp,0o600);os.chown(temp,0,0);staged[name]=temp
+  changed=[]
+  try:
+   for name,temp in staged.items():
+    os.replace(temp,paths[name]);changed.append(name)
+   for name,plan in sync['plans'].items():
+    with open(paths[name],'rb') as file: after=file.read()
+    if hashlib.sha256(after).hexdigest()!=plan['sha256']: raise RuntimeError('Update verification failed')
+  except Exception:
+   for name in changed:
+    fd,temp=tempfile.mkstemp(prefix='.support-env-rollback-',dir=os.path.dirname(paths[name]))
+    with os.fdopen(fd,'wb') as file:
+     file.write(originals[name]);file.flush();os.fsync(file.fileno())
+    os.chmod(temp,0o600);os.chown(temp,0,0);os.replace(temp,paths[name])
+   raise
+ finally:
+  for temp in staged.values():
+   if os.path.exists(temp): os.unlink(temp)
 for name,path in paths.items():
  if name=='crmAccess' and not os.path.exists(path): continue
  if not os.path.exists(path):
@@ -75,7 +146,8 @@ sys.stdout.write(json.dumps(result,separators=(',',':')))
 const sshArgs = ['-F','/dev/null','-i',identityFile,'-o','BatchMode=yes','-o','StrictHostKeyChecking=yes',
   '-o',`UserKnownHostsFile=${hostsFile}`,'-o','IdentitiesOnly=yes','-o','ConnectTimeout=15',
   '-o','LogLevel=ERROR','-o','ClearAllForwardings=yes','-o','ForwardAgent=no','-p',port,`${user}@${host}`,'python3','-'];
-const guardedRemote = "import sys\nstage='initial'\ntry:\n" + remote.split('\n').map(line => ' '+line).join('\n') + "\nexcept Exception:\n sys.stderr.write('SUPPORT_PREFLIGHT_STAGE='+stage+'\\n')\n sys.exit(1)\n";
+const preparedRemote = remote.replace('SYNC_INPUT', sync ? `json.loads(base64.b64decode('${Buffer.from(JSON.stringify(sync)).toString('base64')}'))` : 'None');
+const guardedRemote = "import sys\nstage='initial'\ntry:\n" + preparedRemote.split('\n').map(line => ' '+line).join('\n') + "\nexcept Exception:\n sys.stderr.write('SUPPORT_PREFLIGHT_STAGE='+stage+'\\n')\n sys.exit(1)\n";
 const result = spawnSync('ssh', sshArgs, { input: Buffer.from(guardedRemote), maxBuffer: 32 * 1024 * 1024, timeout: 120000 });
 let snapshot, captured;
 if (result.status !== 0 || result.error) {
@@ -103,4 +175,5 @@ const summary = { revision:process.env.GITHUB_SHA, error: snapshot.error, files:
   containers:snapshot.containers.map(c=>({service:c.Config.Labels?.['com.docker.compose.service']||null,id:c.Id,image:c.Config.Image,health:c.State.Health?.Status||null})),
   memoryAvailableKiB:snapshot.memoryAvailableKiB, encryptedSha256:createHash('sha256').update(ciphertext).digest('hex') };
 writeFileSync('support-chat-preflight/summary.json', JSON.stringify(summary,null,2),{mode:0o600});
-console.log('Support production preflight encrypted; no env values or captured SSH output logged.');
+console.log(snapshot.error ? 'Support operation failed; diagnostics encrypted and no captured output logged.' : 'Support production preflight encrypted; no env values or captured SSH output logged.');
+if (snapshot.error) process.exitCode = 1;

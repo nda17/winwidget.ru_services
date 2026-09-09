@@ -34,8 +34,10 @@ jobs:
           SUPPORT_OPS_SSH_USER: ${{ secrets.PRODUCTION_SSH_USER }}
           SUPPORT_OPS_SSH_PRIVATE_KEY: ${{ secrets.PRODUCTION_SSH_PRIVATE_KEY }}
           SUPPORT_OPS_SSH_KNOWN_HOSTS: ${{ secrets.BACKEND_PRODUCTION_SSH_KNOWN_HOSTS }}
+          SUPPORT_OPS_ENV_PAYLOAD: ${{ secrets.SUPPORT_CHAT_ENV_PAYLOAD }}
         run: node scripts/support-chat-env-ops.mjs
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: support-chat-preflight-${{ github.sha }}
           path: support-chat-preflight
