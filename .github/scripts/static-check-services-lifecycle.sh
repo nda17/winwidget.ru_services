@@ -538,16 +538,16 @@ if (
 ) {
 	throw new Error('Support release must use one exact reviewed infra SHA');
 }
-// Initial Support release keeps the product gate closed until a separate activation.
-for (const [job, scope] of [['deploy-production', 'support-chat']]) {
+// Activate only the four Support delivery processes on the verified existing images.
+for (const [job, scope] of [['deploy-production', 'support-chat-activate']]) {
 	const block = servicesWorkflow.match(new RegExp('^  ' + job + ':\\n([\\s\\S]*?)(?=^  [a-z][a-z0-9-]*:|$(?![\\s\\S]))', 'm'))?.[1];
 	if (!block || !block.includes('release_scope: ' + scope) ||
 		!block.includes('services_revision: ${{ github.sha }}') ||
-		!block.includes("expected_live_revision: 'fc3669057a748c6cd2a6cfe89b0d6ccd9a23c681'") ||
+		!block.includes("expected_live_revision: '474d3ab9235002ca3c6c887dace6ccd927a7fdd2'") ||
 		!block.includes("expected_service_env_sha256: 'cab70688122306a71cb345c9c7031814048b47b70aca5ed677c9be01ab995e51'") ||
-		!block.includes("expected_support_chat_baseline_sha256: '439a5f4c5a1facebeabfe0c2449e3e0272840e03b6a42bb3d415b3615b5a8cff'") ||
+		!block.includes("expected_support_chat_baseline_sha256: 'baee115343424d1618df45bce5b6783ee74efd0fee2708fc16122885b07b0acd'") ||
 		/expected_crm_\w+_baseline_sha256:|operations_evidence_sha256:/.test(block)) {
-		throw new Error('Support release must pin its eleven-process baseline and prepared CRM env with product gates closed');
+		throw new Error('Support activation must pin its verified eleven-process baseline and synchronized CRM env');
 	}
 }
 if (/release_scope: (?:crm-prepare|crm-databases|crm-runtime|all)\b/.test(servicesWorkflow)) {

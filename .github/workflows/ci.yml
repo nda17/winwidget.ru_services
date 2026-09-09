@@ -1423,7 +1423,7 @@ jobs:
           done
 
   deploy-production:
-    name: Prepare CRM support chat production release
+    name: Activate CRM support chat
     needs:
       - billing-crm-policy-integration
       - billing-wincrm-commerce-integration
@@ -1443,10 +1443,10 @@ jobs:
     uses: nda17/winwidget.ru_infra/.github/workflows/deploy-production.yml@0bdf2f594baf2f90bf6839b5a62f6f0875667838
     with:
       services_revision: ${{ github.sha }}
-      release_scope: support-chat
-      expected_live_revision: 'fc3669057a748c6cd2a6cfe89b0d6ccd9a23c681'
+      release_scope: support-chat-activate
+      expected_live_revision: '474d3ab9235002ca3c6c887dace6ccd927a7fdd2'
       expected_service_env_sha256: 'cab70688122306a71cb345c9c7031814048b47b70aca5ed677c9be01ab995e51'
-      expected_support_chat_baseline_sha256: '439a5f4c5a1facebeabfe0c2449e3e0272840e03b6a42bb3d415b3615b5a8cff'
+      expected_support_chat_baseline_sha256: 'baee115343424d1618df45bce5b6783ee74efd0fee2708fc16122885b07b0acd'
     secrets:
       BACKEND_PRODUCTION_SSH_HOST: ${{ secrets.PRODUCTION_SSH_HOST }}
       BACKEND_PRODUCTION_SSH_PORT: ${{ secrets.PRODUCTION_SSH_PORT }}
