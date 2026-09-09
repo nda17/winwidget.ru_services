@@ -11,6 +11,8 @@ const operation = JSON.parse(readFileSync('.github/support-chat-operation.json',
 if (operation.schemaVersion !== 1 || !['inspect', 'sync-env'].includes(operation.action) ||
     typeof operation.publicKey !== 'string' || operation.publicKey.length > 5000 ||
     (operation.supportChat !== undefined && typeof operation.supportChat !== 'boolean') ||
+    (operation.databaseProbeSourceOnly !== undefined &&
+      (typeof operation.databaseProbeSourceOnly !== 'boolean' || !operation.databaseProbeRevision)) ||
     (operation.databaseProbeRevision !== undefined &&
       (operation.action !== 'inspect' || typeof operation.databaseProbeRevision !== 'string' || !/^[a-f0-9]{40}$/.test(operation.databaseProbeRevision)))) {
   throw new Error('Unsupported Support preflight operation');
@@ -200,18 +202,40 @@ SELECT json_build_object('available',true,'receipts',COALESCE((SELECT json_agg(r
 """)
  except Exception: smoke['notificationDelivery']={'available':False,'reason':'DIAGNOSTIC_UNAVAILABLE'}
 probe_revision=DATABASE_PROBE_REVISION_INPUT
+probe_source_only=DATABASE_PROBE_SOURCE_ONLY_INPUT
 if probe_revision is not None:
  # Exact candidate images and owner env files; only connection metadata and full migration ledgers.
  probes={}
  result.setdefault('supportChat',{'schemaVersion':1})['databaseProbe']={'revision':probe_revision,'owners':probes}
  probe_source=r"""
 const owner=process.argv[1], schema=owner.replaceAll('-','_');
-const output={available:false,stage:'client',prismaCode:null,sqlState:null};
+const output={available:false,stage:'source',uid:process.getuid(),gid:process.getgid(),prismaCode:null,sqlState:null};
 const finish=()=>process.stdout.write(JSON.stringify(output));
 const timer=setTimeout(()=>{output.available=false;output.errorCode='QUERY_TIMEOUT';finish();process.exit(0)},13000);
 (async()=>{
  let client;
  try {
+  const fs=require('node:fs'),crypto=require('node:crypto'),root='/app/prisma/migrations';
+  const fsCode=error=>typeof error?.code==='string'&&/^E[A-Z0-9_]{1,40}$/.test(error.code)?error.code:'FS_UNAVAILABLE';
+  const metadata=path=>{try{const info=fs.lstatSync(path);return {kind:info.isSymbolicLink()?'SYMLINK':info.isDirectory()?'DIRECTORY':info.isFile()?'FILE':'OTHER',uid:info.uid,gid:info.gid,mode:(info.mode&0o7777).toString(8),bytes:info.size}}catch(error){return {errorCode:fsCode(error)}}};
+  output.source={exists:fs.existsSync(root),parents:['/app','/app/prisma',root].map(path=>({path,...metadata(path)})),children:[]};
+  output.source.realpath=fs.realpathSync(root);
+  const entries=fs.readdirSync(root,{withFileTypes:true}).sort((a,b)=>a.name.localeCompare(b.name));
+  output.source.childCount=entries.length;output.source.truncated=entries.length>256;
+  let hashedBytes=0;
+  for(const item of entries.slice(0,256)){
+   const validName=/^\d{14}_[a-z0-9_]+$/.test(item.name);
+   const entry={name:/^[A-Za-z0-9_.-]{1,200}$/.test(item.name)?item.name:'UNSAFE_FILENAME',validName,...metadata(root+'/'+item.name)};
+   output.source.children.push(entry);
+   if(!validName||entry.kind!=='DIRECTORY')continue;
+   const filename=root+'/'+item.name+'/migration.sql';
+   entry.sql=metadata(filename);
+   if(entry.sql.kind!=='FILE')continue;
+   if(entry.sql.bytes>2097152||hashedBytes+entry.sql.bytes>16777216){entry.sql.errorCode='HASH_SIZE_LIMIT';continue}
+   try{const fd=fs.openSync(filename,fs.constants.O_RDONLY|fs.constants.O_NOFOLLOW);try{const data=fs.readFileSync(fd);hashedBytes+=data.length;entry.sql.sha256=crypto.createHash('sha256').update(data).digest('hex')}finally{fs.closeSync(fd)}}catch(error){entry.sql.errorCode=fsCode(error)}
+  }
+  if(process.argv[2]==='source-only'){output.available=true;return}
+  output.stage='client';
   const key=owner==='notification-delivery'?'NOTIFICATION_DELIVERY_MIGRATION_URL_PRODUCTION':schema.toUpperCase()+'_MIGRATION_DATABASE_URL';
   if(!process.env[key]){output.errorCode='MISSING_MIGRATION_URL';return}
   const url=new URL(process.env[key]);
@@ -230,6 +254,7 @@ const timer=setTimeout(()=>{output.available=false;output.errorCode='QUERY_TIMEO
   output.available=true;
  } catch(error) {
   output.errorCode='PROBE_FAILED';
+  if(output.stage==='source'&&typeof error?.code==='string'&&/^E[A-Z0-9_]{1,40}$/.test(error.code))output.fsCode=error.code;
   const prismaCode=error?.code??error?.errorCode;
   if(typeof prismaCode==='string'&&/^P\d{4}$/.test(prismaCode))output.prismaCode=prismaCode;
   if(typeof error?.meta?.code==='string'&&/^[A-Z0-9]{5}$/.test(error.meta.code))output.sqlState=error.meta.code;
@@ -254,11 +279,49 @@ const timer=setTimeout(()=>{output.available=false;output.errorCode='QUERY_TIMEO
     entry['errorCode']='CANDIDATE_IMAGE_MISMATCH';continue
    image_id=images[0]['Id']
    entry['imageId']=image_id
-   check=subprocess.run(['docker','run','--rm','--network','host','--read-only','--log-driver','none','--cap-drop','ALL','--security-opt','no-new-privileges','--user','0:0','--memory','256m','--memory-swap','256m','--cpus','1','--pids-limit','64','--ulimit','core=0:0','--tmpfs','/tmp:rw,nosuid,size=16m','--env-file',paths[path_key],'--env','NODE_OPTIONS=--max-old-space-size=96','--entrypoint','node',image_id,'-e',probe_source,owner],capture_output=True,text=True,timeout=18)
+   common=['docker','run','--rm','--read-only','--log-driver','none','--cap-drop','ALL','--security-opt','no-new-privileges','--memory','256m','--memory-swap','256m','--cpus','1','--pids-limit','64','--ulimit','core=0:0','--tmpfs','/tmp:rw,nosuid,size=16m','--env','NODE_OPTIONS=--max-old-space-size=96','--entrypoint','node']
+   access=['--network','none'] if probe_source_only else ['--network','host','--env-file',paths[path_key]]
+   check=subprocess.run(common+access+['--user','0:0',image_id,'-e',probe_source,owner]+(['source-only'] if probe_source_only else []),capture_output=True,text=True,timeout=18)
    if check.returncode!=0 or len(check.stdout)>1048576:
     entry['errorCode']='PROBE_PROCESS_FAILED';continue
    entry.update(json.loads(check.stdout))
+   source_check=subprocess.run(common+['--network','none',image_id,'-e',probe_source,owner,'source-only'],capture_output=True,text=True,timeout=18)
+   entry['defaultUserSource']=json.loads(source_check.stdout) if source_check.returncode==0 and len(source_check.stdout)<=1048576 else {'available':False,'errorCode':'SOURCE_PROCESS_FAILED'}
   except Exception: entry['errorCode']='PROBE_UNAVAILABLE'
+ broker={'available':False}
+ result['supportChat']['broker']=broker
+ try:
+  gateways=[c for c in result['containers'] if c.get('Config',{}).get('Labels',{}).get('com.docker.compose.service')=='api-gateway' and c.get('Config',{}).get('Labels',{}).get('com.docker.compose.project')=='winwidget']
+  if len(gateways)!=1 or 'base64' not in result['files'].get('canonical',{}): raise RuntimeError('Broker probe unavailable')
+  gateway=gateways[0]
+  gateway_image=gateway.get('Image','')
+  if not re.fullmatch(r'sha256:[a-f0-9]{64}',gateway_image): raise RuntimeError('Gateway image unavailable')
+  inspection=subprocess.run(['docker','image','inspect',gateway_image],capture_output=True,text=True,timeout=5)
+  images=json.loads(inspection.stdout) if inspection.returncode==0 else []
+  revision=gateway.get('Config',{}).get('Labels',{}).get('org.opencontainers.image.revision','')
+  if len(images)!=1 or images[0].get('Id')!=gateway_image or not re.fullmatch(r'[a-f0-9]{40}',revision) or images[0].get('Config',{}).get('Labels',{}).get('org.opencontainers.image.revision')!=revision: raise RuntimeError('Gateway image mismatch')
+  broker_source=r"""
+const output={available:false};
+(async()=>{try{
+ if(process.env.RABBITMQ_MANAGEMENT_URL!=='http://127.0.0.1:15672'||process.env.RABBITMQ_VHOST!=='winwidget'||!process.env.RABBITMQ_ADMIN_USER||!process.env.RABBITMQ_ADMIN_PASSWORD){output.errorCode='BROKER_CONFIGURATION';return}
+ const authorization='Basic '+Buffer.from(process.env.RABBITMQ_ADMIN_USER+':'+process.env.RABBITMQ_ADMIN_PASSWORD).toString('base64');
+ const endpoints=[['exchanges','exchanges/winwidget',['name','vhost','type','durable','auto_delete','internal','arguments']],['queues','queues/winwidget',['name','vhost','type','durable','auto_delete','arguments','consumers']],['bindings','bindings/winwidget',['source','vhost','destination','destination_type','routing_key','arguments']],['permissions','permissions',['user','vhost','configure','read','write']],['topic_permissions','topic-permissions',['user','vhost','exchange','read','write']]];
+ await Promise.all(endpoints.map(async([key,path,fields])=>{
+  const response=await fetch('http://127.0.0.1:15672/api/'+path,{method:'GET',headers:{authorization},redirect:'error',signal:AbortSignal.timeout(5000)});
+  if(!response.ok){output[key]={errorCode:'BROKER_HTTP',status:response.status};return}
+  const chunks=[];let bytes=0;
+  for await(const chunk of response.body){bytes+=chunk.length;if(bytes>2097152){output[key]={errorCode:'BROKER_SIZE_LIMIT'};return}chunks.push(chunk)}
+  const rows=JSON.parse(Buffer.concat(chunks).toString('utf8'));
+  if(!Array.isArray(rows)||rows.length>2000){output[key]={errorCode:'BROKER_SHAPE'};return}
+  output[key]=rows.map(row=>Object.fromEntries(fields.filter(field=>Object.hasOwn(row,field)).map(field=>[field,row[field]])));
+ }));
+ output.available=endpoints.every(([key])=>Array.isArray(output[key]));
+}catch{output.errorCode='BROKER_REQUEST_FAILED'}finally{process.stdout.write(JSON.stringify(output))}})();
+"""
+  check=subprocess.run(['docker','run','--rm','--network','host','--read-only','--log-driver','none','--cap-drop','ALL','--security-opt','no-new-privileges','--memory','192m','--memory-swap','192m','--cpus','1','--pids-limit','64','--ulimit','core=0:0','--env-file',paths['canonical'],'--env','NODE_OPTIONS=--max-old-space-size=64','--entrypoint','node',gateway_image,'-e',broker_source],capture_output=True,text=True,timeout=12)
+  if check.returncode!=0 or len(check.stdout)>4194304: raise RuntimeError('Broker probe failed')
+  broker.update(json.loads(check.stdout))
+ except Exception: broker['errorCode']='BROKER_PROBE_UNAVAILABLE'
 stage='memory'
 result['memoryAvailableKiB']=int(next(line.split()[1] for line in open('/proc/meminfo') if line.startswith('MemAvailable:')))
 sys.stdout.write(json.dumps(result,separators=(',',':')))
@@ -268,7 +331,8 @@ const sshArgs = ['-F','/dev/null','-i',identityFile,'-o','BatchMode=yes','-o','S
   '-o','LogLevel=ERROR','-o','ClearAllForwardings=yes','-o','ForwardAgent=no','-p',port,`${user}@${host}`,'python3','-'];
 const preparedRemote = remote.replace('SYNC_INPUT', sync ? `json.loads(base64.b64decode('${Buffer.from(JSON.stringify(sync)).toString('base64')}'))` : 'None')
   .replace('SUPPORT_CHAT_SMOKE_INPUT', operation.supportChat === true ? 'True' : 'False')
-  .replace('DATABASE_PROBE_REVISION_INPUT', operation.databaseProbeRevision ? JSON.stringify(operation.databaseProbeRevision) : 'None');
+  .replace('DATABASE_PROBE_REVISION_INPUT', operation.databaseProbeRevision ? JSON.stringify(operation.databaseProbeRevision) : 'None')
+  .replace('DATABASE_PROBE_SOURCE_ONLY_INPUT', operation.databaseProbeSourceOnly === true ? 'True' : 'False');
 const guardedRemote = "import sys\nstage='initial'\ntry:\n" + preparedRemote.split('\n').map(line => ' '+line).join('\n') + "\nexcept Exception:\n sys.stderr.write('SUPPORT_PREFLIGHT_STAGE='+stage+'\\n')\n sys.exit(1)\n";
 const result = spawnSync('ssh', sshArgs, { input: Buffer.from(guardedRemote), maxBuffer: 32 * 1024 * 1024, timeout: 120000 });
 let snapshot, captured;
