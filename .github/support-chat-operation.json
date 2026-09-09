@@ -1,6 +1,31 @@
 {
 	"schemaVersion": 1,
-	"action": "inspect",
+	"action": "sync-env",
 	"publicKey": "-----BEGIN PUBLIC KEY-----\nMIIBojANBgkqhkiG9w0BAQEFAAOCAY8AMIIBigKCAYEArokcmP7FptydAYnSG7oN\njL8eEd+HjEj35gw32VyOaYffGDeHxJ2l52bJkwDDmPnRLEduWKR8bwTtXLhBlV86\n24PDrCwBXeCpxC9eXssBTpaQemlWdgxt4daw+guaEg8zVy0PbkH1ywQK8YLvD3RR\nH6AcmtwhpkA2FzC775O78zYCdmXr1SLBHFR9WGH3rP3v9sa/zsRlF11SxRwbwvcc\nIYFGoaq68WBsNbK6Pek/Hx9MR/de6nuzmLZHWpdLuiaAue2tUX3Mdsyn6tht/PuG\nQyPGGZ68IPIB3jeEFBBV8fbWJSqWtWZqwQDTjf3GoG7TEn9M0BZBPbCCEHVhPqpz\nFZh2Op9tva4d2SsrF80vGNpJdpRKySAdAy3MWmpZ36W5EQd7DxWMVypQklpmjyea\n/tYxjqwzxUyuqo1/an6zh0+BmrJnr6ENCRsEKw2ImuwOPkk8Tve7iFFQLD9E822z\nZ4Tg9ioavz3YUuFVKDMGjPpNpesC+Wip52eOrTRyz09XAgMBAAE=\n-----END PUBLIC KEY-----\n",
-	"supportChat": true
+	"supportChat": true,
+	"files": {
+		"canonical": {
+			"expectedSha256": "9d00f890e35cf00219a0c9e6b15b5f2ad6ba6bad05bf650123b151a0bc577c60",
+			"sha256": "44be359bf48e24946666ec249ca1ed027bf40c14f3e25336d4d114cb1bbf24e5",
+			"changedKeys": [
+				"NOTIFICATION_DELIVERY_KINDS",
+				"SUPPORT_WEB_CHAT_ENABLED"
+			]
+		},
+		"crm": {
+			"expectedSha256": "cab70688122306a71cb345c9c7031814048b47b70aca5ed677c9be01ab995e51",
+			"sha256": "cab70688122306a71cb345c9c7031814048b47b70aca5ed677c9be01ab995e51",
+			"changedKeys": []
+		},
+		"support": {
+			"expectedSha256": "f9060845ec51b39d592893686149c07166d40f091ee5c65c5984234b0182b989",
+			"sha256": "c9d68f57a4eccae23b524c5cef9b92c704523c17aa89d9163fa164d52ced7f79",
+			"changedKeys": ["CORS_ALLOWED_ORIGINS", "SUPPORT_WEB_CHAT_ENABLED"]
+		},
+		"notificationDelivery": {
+			"expectedSha256": "9d10a854bf4a7e6d0b3fca9dc030c96927406c2d83b20287e74866909b6c0c9c",
+			"sha256": "23dcd9483671d3587f7668e7dda4929449e2a3b74fb162590dc77c556b08f555",
+			"changedKeys": ["NOTIFICATION_DELIVERY_KINDS"]
+		}
+	}
 }
