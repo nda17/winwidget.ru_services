@@ -1,0 +1,46 @@
+name: Support chat production preflight
+
+on:
+  push:
+    branches: [dev_3.5.0/feature/support-chat]
+    paths:
+      - .github/workflows/support-chat-ops.yml
+      - .github/support-chat-operation.json
+      - scripts/support-chat-env-ops.mjs
+
+permissions:
+  contents: read
+
+concurrency:
+  group: winwidget-production-services
+  cancel-in-progress: false
+
+jobs:
+  inspect:
+    if: github.repository == 'nda17/winwidget.ru_services'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+      - name: Capture encrypted owner environments and release baseline
+        env:
+          SUPPORT_OPS_SSH_HOST: ${{ secrets.PRODUCTION_SSH_HOST }}
+          SUPPORT_OPS_SSH_PORT: ${{ secrets.PRODUCTION_SSH_PORT }}
+          SUPPORT_OPS_SSH_USER: ${{ secrets.PRODUCTION_SSH_USER }}
+          SUPPORT_OPS_SSH_PRIVATE_KEY: ${{ secrets.PRODUCTION_SSH_PRIVATE_KEY }}
+          SUPPORT_OPS_SSH_KNOWN_HOSTS: ${{ secrets.BACKEND_PRODUCTION_SSH_KNOWN_HOSTS }}
+        run: node scripts/support-chat-env-ops.mjs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: support-chat-preflight-${{ github.sha }}
+          path: support-chat-preflight
+          if-no-files-found: error
+          retention-days: 1
+      - name: Remove ephemeral SSH material
+        if: always()
+        run: rm -rf -- "$RUNNER_TEMP/support-chat-ssh" support-chat-preflight
