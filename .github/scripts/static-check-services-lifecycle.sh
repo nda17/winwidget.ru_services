@@ -476,7 +476,7 @@ if (!servicesWorkflow.includes('node .github/scripts/test-crm-bootstrap-failure.
 	throw new Error('CRM bounded bootstrap process gate is missing');
 }
 const pinnedInfraRevision =
-	'2e0c8548a2d019697d2f455e57f8ba51422b7c9e';
+	'564888a9cab3e66dbdbfe202e337c352966d7ae0';
 for (const evidence of [
 	"cancel-in-progress: ${{ github.ref != 'refs/heads/prod' }}",
 	'operations-control-ledger:',

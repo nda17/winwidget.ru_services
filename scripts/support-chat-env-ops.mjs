@@ -9,7 +9,8 @@ import { parseEnv } from 'node:util';
 
 const operation = JSON.parse(readFileSync('.github/support-chat-operation.json', 'utf8'));
 if (operation.schemaVersion !== 1 || !['inspect', 'sync-env'].includes(operation.action) ||
-    typeof operation.publicKey !== 'string' || operation.publicKey.length > 5000) {
+    typeof operation.publicKey !== 'string' || operation.publicKey.length > 5000 ||
+    (operation.supportChat !== undefined && typeof operation.supportChat !== 'boolean')) {
   throw new Error('Unsupported Support preflight operation');
 }
 let sync = null;
@@ -20,7 +21,7 @@ if (operation.action === 'sync-env') {
   const allowed = {
     canonical: ['GATEWAY_ROUTES_JSON', 'SUPPORT_WEB_CHAT_ENABLED', 'SUPPORT_CRM_ACCESS_BASE_URL', 'SUPPORT_CRM_ACCESS_TOKEN', 'CRM_ACCESS_SUPPORT_TOKEN', 'SUPPORT_NOTIFICATION_DELIVERY_TOKEN', 'SUPPORT_S3_ENDPOINT', 'SUPPORT_S3_REGION', 'SUPPORT_S3_BUCKET', 'SUPPORT_S3_FORCE_PATH_STYLE', 'SUPPORT_S3_ACCESS_KEY_ID', 'SUPPORT_S3_SECRET_ACCESS_KEY', 'NOTIFICATION_DELIVERY_KINDS'],
     crm: ['CRM_ACCESS_SUPPORT_TOKEN'],
-    support: ['SUPPORT_WEB_CHAT_ENABLED', 'SUPPORT_CRM_ACCESS_BASE_URL', 'SUPPORT_CRM_ACCESS_TOKEN', 'SUPPORT_NOTIFICATION_DELIVERY_TOKEN', 'SUPPORT_S3_ENDPOINT', 'SUPPORT_S3_REGION', 'SUPPORT_S3_BUCKET', 'SUPPORT_S3_FORCE_PATH_STYLE', 'SUPPORT_S3_ACCESS_KEY_ID', 'SUPPORT_S3_SECRET_ACCESS_KEY'],
+    support: ['SUPPORT_WEB_CHAT_ENABLED', 'SUPPORT_CRM_ACCESS_BASE_URL', 'SUPPORT_CRM_ACCESS_TOKEN', 'SUPPORT_NOTIFICATION_DELIVERY_TOKEN', 'SUPPORT_S3_ENDPOINT', 'SUPPORT_S3_REGION', 'SUPPORT_S3_BUCKET', 'SUPPORT_S3_FORCE_PATH_STYLE', 'SUPPORT_S3_ACCESS_KEY_ID', 'SUPPORT_S3_SECRET_ACCESS_KEY', 'CORS_ALLOWED_ORIGINS'],
     notificationDelivery: ['SUPPORT_INTERNAL_BASE_URL', 'SUPPORT_NOTIFICATION_DELIVERY_TOKEN', 'TELEGRAM_SUPPORT_BOT_TOKEN', 'NOTIFICATION_DELIVERY_KINDS']
   };
   if (Object.keys(files).sort().join(',') !== Object.keys(operation.files).sort().join(',')) throw new Error('Support env file set mismatch');
@@ -139,6 +140,63 @@ for container in result['containers']:
  if check.returncode==0:
   result['ledgers'][owner]=[{'name':line.split('|')[0],'checksum':line.split('|')[1]} for line in check.stdout.splitlines() if '|' in line]
  else: result['ledgers'][owner]={'unavailable':True}
+if SUPPORT_CHAT_SMOKE_INPUT:
+ # Best-effort metadata only. No message text, users, recipients, destinations or raw delivery payloads.
+ smoke={'schemaVersion':1,'support':{'available':False},'notificationDelivery':{'available':False}}
+ result['supportChat']=smoke
+ def smoke_database(owner):
+  matches=[c for c in result['containers'] if c.get('Config',{}).get('Labels',{}).get('com.docker.compose.service')==owner+'-postgres' and c.get('Config',{}).get('Labels',{}).get('com.docker.compose.project')=='winwidget']
+  if len(matches)!=1: raise RuntimeError('Database unavailable')
+  return matches[0]['Id']
+ def smoke_query(container_id,sql):
+  check=subprocess.run(['docker','exec',container_id,'sh','-c','PGOPTIONS="-c default_transaction_read_only=on -c statement_timeout=5000 -c lock_timeout=1000" exec psql -XAt -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "$1"','sh',sql],capture_output=True,text=True,timeout=8)
+  if check.returncode!=0 or len(check.stdout)>262144: raise RuntimeError('Diagnostic unavailable')
+  return json.loads(check.stdout)
+ def smoke_tables(container_id,tables):
+  return smoke_query(container_id,'SELECT to_json('+ ' AND '.join("to_regclass('"+table+"') IS NOT NULL" for table in tables)+')') is True
+ try:
+  support_db=smoke_database('support')
+  if smoke_tables(support_db,['support.web_conversations','support.web_messages','support.web_attachments','support.web_notification_settings','support.web_notification_intents']):
+   smoke['support']=smoke_query(support_db,"""
+WITH recent AS (SELECT id,number,status,created_at FROM support.web_conversations ORDER BY created_at DESC,id DESC LIMIT 20),
+intents AS (SELECT i.id,i.event_id AS "eventId",i.conversation_id AS "conversationId",i.kind,i.status,
+ CASE WHEN i.reason ~ '^[A-Z0-9_]{1,120}$' THEN i.reason ELSE NULL END AS reason,i.created_at AS "createdAt"
+ FROM support.web_notification_intents i JOIN recent c ON c.id=i.conversation_id ORDER BY i.created_at DESC,i.id DESC LIMIT 120)
+SELECT json_build_object('available',true,'intentsLimit',120,
+ 'counts',json_build_object('conversations',(SELECT count(*) FROM support.web_conversations),'messages',(SELECT count(*) FROM support.web_messages),'attachments',(SELECT count(*) FROM support.web_attachments),'intents',(SELECT count(*) FROM support.web_notification_intents)),
+ 'settings',(SELECT json_build_object('version',version,'enabled',enabled,'emailEnabled',email_enabled,'telegramEnabled',telegram_enabled,'clientEmailEnabled',client_email_enabled) FROM support.web_notification_settings WHERE id='singleton'),
+ 'conversations',COALESCE((SELECT json_agg(json_build_object('id',id,'number',number,'status',status) ORDER BY created_at DESC,id DESC) FROM recent),'[]'::json),
+ 'intents',COALESCE((SELECT json_agg(intents ORDER BY "createdAt" DESC,id DESC) FROM intents),'[]'::json))
+""")
+  else: smoke['support']['reason']='TABLES_NOT_MIGRATED'
+ except Exception: smoke['support']={'available':False,'reason':'DIAGNOSTIC_UNAVAILABLE'}
+ try:
+  intents=smoke['support'].get('intents',[])
+  if smoke['support'].get('available') is not True: smoke['notificationDelivery']['reason']='SUPPORT_UNAVAILABLE'
+  elif not intents: smoke['notificationDelivery']={'available':True,'receipts':[],'outcomes':[],'failures':[]}
+  else:
+   nd_db=smoke_database('notification-delivery')
+   if not smoke_tables(nd_db,['notification_delivery.delivery_receipts','notification_delivery.delivery_failures','notification_delivery.outbox_events']):
+    smoke['notificationDelivery']['reason']='TABLES_NOT_MIGRATED'
+   else:
+    values=[]
+    for item in intents:
+     if not re.fullmatch(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}',item['eventId']) or item['kind'] not in ['support-team-email','support-team-telegram','support-client-email']: raise RuntimeError('Invalid intent metadata')
+     values.append("('"+item['eventId']+"'::uuid,'"+item['kind']+"')")
+    smoke['notificationDelivery']=smoke_query(nd_db,"""
+WITH wanted(event_id,kind) AS (VALUES """+','.join(values)+"""),
+receipts AS (SELECT r.event_id AS "eventId",r.consumer AS kind,r.status,r.delivered_at AS "deliveredAt",r.retry_attempt AS "retryAttempt" FROM notification_delivery.delivery_receipts r JOIN wanted w ON r.event_id=w.event_id AND r.consumer=w.kind),
+outcomes AS (SELECT w.event_id AS "eventId",w.kind,o.status AS "outboxStatus",
+ CASE WHEN o.payload->>'status' IN ('DELIVERED','SKIPPED','FAILED') THEN o.payload->>'status' ELSE NULL END AS "deliveryStatus",
+ CASE WHEN o.payload->>'reason' ~ '^[A-Z0-9_]{1,120}$' THEN o.payload->>'reason' ELSE NULL END AS reason,o.published_at AS "publishedAt"
+ FROM wanted w CROSS JOIN (VALUES ('delivered'),('skipped'),('failed')) s(status)
+ JOIN notification_delivery.outbox_events o ON o.deduplication_key='notification:'||w.event_id::text||':'||w.kind||':outcome:'||s.status||':v1'
+ WHERE o.event_type='support.notification.delivery.outcome.v1'),
+failures AS (SELECT f.event_id AS "eventId",f.consumer AS kind,f.category,f.retryable,f.resolution,f.resolved_at AS "resolvedAt",
+ CASE WHEN f.normalized_code ~ '^[A-Z0-9_]{1,120}$' THEN f.normalized_code ELSE NULL END AS reason FROM notification_delivery.delivery_failures f JOIN wanted w ON f.event_id=w.event_id AND f.consumer=w.kind)
+SELECT json_build_object('available',true,'receipts',COALESCE((SELECT json_agg(receipts) FROM receipts),'[]'::json),'outcomes',COALESCE((SELECT json_agg(outcomes) FROM outcomes),'[]'::json),'failures',COALESCE((SELECT json_agg(failures) FROM failures),'[]'::json))
+""")
+ except Exception: smoke['notificationDelivery']={'available':False,'reason':'DIAGNOSTIC_UNAVAILABLE'}
 stage='memory'
 result['memoryAvailableKiB']=int(next(line.split()[1] for line in open('/proc/meminfo') if line.startswith('MemAvailable:')))
 sys.stdout.write(json.dumps(result,separators=(',',':')))
@@ -146,7 +204,8 @@ sys.stdout.write(json.dumps(result,separators=(',',':')))
 const sshArgs = ['-F','/dev/null','-i',identityFile,'-o','BatchMode=yes','-o','StrictHostKeyChecking=yes',
   '-o',`UserKnownHostsFile=${hostsFile}`,'-o','IdentitiesOnly=yes','-o','ConnectTimeout=15',
   '-o','LogLevel=ERROR','-o','ClearAllForwardings=yes','-o','ForwardAgent=no','-p',port,`${user}@${host}`,'python3','-'];
-const preparedRemote = remote.replace('SYNC_INPUT', sync ? `json.loads(base64.b64decode('${Buffer.from(JSON.stringify(sync)).toString('base64')}'))` : 'None');
+const preparedRemote = remote.replace('SYNC_INPUT', sync ? `json.loads(base64.b64decode('${Buffer.from(JSON.stringify(sync)).toString('base64')}'))` : 'None')
+  .replace('SUPPORT_CHAT_SMOKE_INPUT', operation.supportChat === true ? 'True' : 'False');
 const guardedRemote = "import sys\nstage='initial'\ntry:\n" + preparedRemote.split('\n').map(line => ' '+line).join('\n') + "\nexcept Exception:\n sys.stderr.write('SUPPORT_PREFLIGHT_STAGE='+stage+'\\n')\n sys.exit(1)\n";
 const result = spawnSync('ssh', sshArgs, { input: Buffer.from(guardedRemote), maxBuffer: 32 * 1024 * 1024, timeout: 120000 });
 let snapshot, captured;
