@@ -8,15 +8,22 @@ import { gunzipSync } from 'node:zlib';
 import { parseEnv } from 'node:util';
 
 const operation = JSON.parse(readFileSync('.github/support-chat-operation.json', 'utf8'));
-if (operation.schemaVersion !== 1 || !['inspect', 'sync-env'].includes(operation.action) ||
+if (operation.schemaVersion !== 1 || !['inspect', 'sync-env', 'restore-worker'].includes(operation.action) ||
     typeof operation.publicKey !== 'string' || operation.publicKey.length > 5000 ||
     (operation.supportChat !== undefined && typeof operation.supportChat !== 'boolean') ||
+    (operation.supportWorkerLogs !== undefined &&
+      (operation.action !== 'inspect' || typeof operation.supportWorkerLogs !== 'boolean')) ||
     (operation.databaseProbeSourceOnly !== undefined &&
       (typeof operation.databaseProbeSourceOnly !== 'boolean' || !operation.databaseProbeRevision)) ||
     (operation.databaseProbeRevision !== undefined &&
       (operation.action !== 'inspect' || typeof operation.databaseProbeRevision !== 'string' || !/^[a-f0-9]{40}$/.test(operation.databaseProbeRevision)))) {
   throw new Error('Unsupported Support preflight operation');
 }
+const restore = operation.action === 'restore-worker' ? operation.restore : null;
+if (restore && (!/^[a-f0-9]{40}$/.test(restore.releaseRevision) ||
+    !/^[a-f0-9]{40}$/.test(restore.imageRevision) || !/^[a-f0-9]{64}$/.test(restore.containerId) ||
+    !/^sha256:[a-f0-9]{64}$/.test(restore.imageId))) throw new Error('Invalid bounded Support worker recovery');
+if (operation.action === 'restore-worker' && !restore) throw new Error('Missing Support worker recovery identity');
 let sync = null;
 if (operation.action === 'sync-env') {
   const payload = process.env.SUPPORT_OPS_ENV_PAYLOAD;
@@ -56,7 +63,7 @@ if (!/^[A-Za-z0-9][A-Za-z0-9.-]{0,252}$/.test(host || '') ||
   throw new Error('Invalid pinned SSH destination');
 }
 const remote = String.raw`
-import os, sys, json, stat, hashlib, base64, subprocess, tempfile, re, fcntl
+import os, sys, json, stat, hashlib, base64, subprocess, tempfile, re, fcntl, glob, time
 root='/opt/winwidget'
 paths={
  'canonical':root+'/deploy/backend/.env.production',
@@ -70,12 +77,47 @@ paths={
 result={'schemaVersion':1,'files':{},'containers':[],'ledgers':{}}
 stage='files'
 sync=SYNC_INPUT
-if sync is not None:
+restore=RESTORE_WORKER_INPUT
+if sync is not None or restore is not None:
  lock_path=root+'/deploy/backend/.production-deploy.lock'
  lock_fd=os.open(lock_path,os.O_RDWR|os.O_CREAT|os.O_NOFOLLOW,0o600)
  lock_info=os.fstat(lock_fd)
  if not stat.S_ISREG(lock_info.st_mode) or lock_info.st_uid!=0 or lock_info.st_gid!=0 or stat.S_IMODE(lock_info.st_mode)!=0o600 or lock_info.st_nlink!=1: raise RuntimeError('Unsafe deploy lock')
  fcntl.flock(lock_fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
+if restore is not None:
+ stage='restore-worker'
+ docker_env={'PATH':os.environ['PATH'],'DOCKER_HOST':'unix:///var/run/docker.sock'}
+ def docker(*args,timeout=30):
+  return subprocess.run(['docker',*args],check=True,capture_output=True,text=True,timeout=timeout,env=docker_env).stdout
+ def worker():
+  ids=docker('ps','--all','--no-trunc','--filter','label=com.docker.compose.project=winwidget','--filter','label=com.docker.compose.service=support-worker','--format','{{.ID}}').split()
+  if len(ids)!=1: raise RuntimeError('Support worker identity is not unique')
+  return json.loads(docker('inspect',ids[0]))[0]
+ current=worker()
+ if current['Id']!=restore['containerId'] or current['Image']!=restore['imageId'] or current['Config']['Labels'].get('org.opencontainers.image.revision')!=restore['imageRevision']: raise RuntimeError('Support worker recovery baseline changed')
+ if current['State'].get('Health',{}).get('Status')!='unhealthy': raise RuntimeError('Support worker no longer needs recovery')
+ matches=glob.glob(root+'/deploy/backend/.support-chat-activate-release-'+restore['releaseRevision']+'.*')
+ if len(matches)!=1: raise RuntimeError('Support recovery directory is not unique')
+ directory=matches[0];info=os.lstat(directory)
+ if not stat.S_ISDIR(info.st_mode) or info.st_uid!=0 or info.st_gid!=0 or stat.S_IMODE(info.st_mode)!=0o700: raise RuntimeError('Unsafe Support recovery directory')
+ rollback=directory+'/rollback-winwidget.json';info=os.lstat(rollback)
+ if not stat.S_ISREG(info.st_mode) or info.st_uid!=0 or info.st_gid!=0 or stat.S_IMODE(info.st_mode)!=0o600 or info.st_nlink!=1 or info.st_size>2097152: raise RuntimeError('Unsafe Support recovery file')
+ with open(rollback) as file: config=json.load(file)
+ service=config['services']['support-worker']
+ before=dict(item.split('=',1) for item in current['Config']['Env']);after=service['environment']
+ if before.get('SUPPORT_WEB_CHAT_ENABLED')!='true' or after.get('SUPPORT_WEB_CHAT_ENABLED')!='false' or before.get('APP_REVISION')!=restore['imageRevision'] or service['image']!=restore['imageId']: raise RuntimeError('Support recovery configuration is invalid')
+ before['SUPPORT_WEB_CHAT_ENABLED']='false'
+ if before!=after: raise RuntimeError('Unrelated Support recovery environment change')
+ docker('compose','--project-name','winwidget','-f',rollback,'up','--detach','--no-deps','--no-build','--pull','never','support-worker',timeout=60)
+ for attempt in range(45):
+  recovered=worker()
+  if recovered['State'].get('Health',{}).get('Status')=='healthy': break
+  time.sleep(2)
+ else: raise RuntimeError('Recovered Support worker did not become healthy')
+ if recovered['Image']!=restore['imageId'] or dict(item.split('=',1) for item in recovered['Config']['Env'])!=after: raise RuntimeError('Support recovery postcondition failed')
+ result['workerRecovery']={'healthy':True,'imageRevision':restore['imageRevision']}
+ stage='files'
+if sync is not None:
  originals={}
  staged={}
  try:
@@ -322,6 +364,31 @@ const output={available:false};
   if check.returncode!=0 or len(check.stdout)>4194304: raise RuntimeError('Broker probe failed')
   broker.update(json.loads(check.stdout))
  except Exception: broker['errorCode']='BROKER_PROBE_UNAVAILABLE'
+if SUPPORT_WORKER_LOGS_INPUT:
+ # Captured logs remain inside the encrypted snapshot, never in summary.json or CI stdout.
+ worker={'available':False}
+ result.setdefault('supportChat',{'schemaVersion':1})['workerDiagnostics']=worker
+ try:
+  workers=[c for c in result['containers'] if c.get('Config',{}).get('Labels',{}).get('com.docker.compose.service')=='support-worker' and c.get('Config',{}).get('Labels',{}).get('com.docker.compose.project')=='winwidget']
+  if len(workers)!=1 or not re.fullmatch(r'[a-f0-9]{64}',workers[0].get('Id','')): raise RuntimeError('Worker unavailable')
+  worker['containerId']=workers[0]['Id']
+  with tempfile.TemporaryFile() as captured_logs:
+   check=subprocess.run(['docker','logs','--tail','120',workers[0]['Id']],stdout=captured_logs,stderr=subprocess.STDOUT,timeout=5)
+   size=captured_logs.tell()
+   captured_logs.seek(max(0,size-131072))
+   worker.update({'available':check.returncode==0,'logs':captured_logs.read(131072).decode('utf8',errors='replace'),'logsTruncated':size>131072})
+ except Exception: worker['errorCode']='WORKER_LOGS_UNAVAILABLE'
+ try:
+  if 'containerId' not in worker: raise RuntimeError('Worker unavailable')
+  import http.client
+  connection=http.client.HTTPConnection('127.0.0.1',5101,timeout=3)
+  try:
+   connection.request('GET','/health/ready')
+   response=connection.getresponse()
+   body=response.read(4097)
+   worker['readiness']={'status':response.status,'body':body[:4096].decode('utf8',errors='replace'),'truncated':len(body)>4096}
+  finally: connection.close()
+ except Exception: worker['readiness']={'errorCode':'READINESS_UNAVAILABLE'}
 stage='memory'
 result['memoryAvailableKiB']=int(next(line.split()[1] for line in open('/proc/meminfo') if line.startswith('MemAvailable:')))
 sys.stdout.write(json.dumps(result,separators=(',',':')))
@@ -330,15 +397,17 @@ const sshArgs = ['-F','/dev/null','-i',identityFile,'-o','BatchMode=yes','-o','S
   '-o',`UserKnownHostsFile=${hostsFile}`,'-o','IdentitiesOnly=yes','-o','ConnectTimeout=15',
   '-o','LogLevel=ERROR','-o','ClearAllForwardings=yes','-o','ForwardAgent=no','-p',port,`${user}@${host}`,'python3','-'];
 const preparedRemote = remote.replace('SYNC_INPUT', sync ? `json.loads(base64.b64decode('${Buffer.from(JSON.stringify(sync)).toString('base64')}'))` : 'None')
+  .replace('RESTORE_WORKER_INPUT', restore ? `json.loads(base64.b64decode('${Buffer.from(JSON.stringify(restore)).toString('base64')}'))` : 'None')
   .replace('SUPPORT_CHAT_SMOKE_INPUT', operation.supportChat === true ? 'True' : 'False')
   .replace('DATABASE_PROBE_REVISION_INPUT', operation.databaseProbeRevision ? JSON.stringify(operation.databaseProbeRevision) : 'None')
-  .replace('DATABASE_PROBE_SOURCE_ONLY_INPUT', operation.databaseProbeSourceOnly === true ? 'True' : 'False');
+  .replace('DATABASE_PROBE_SOURCE_ONLY_INPUT', operation.databaseProbeSourceOnly === true ? 'True' : 'False')
+  .replace('SUPPORT_WORKER_LOGS_INPUT', operation.supportWorkerLogs === true ? 'True' : 'False');
 const guardedRemote = "import sys\nstage='initial'\ntry:\n" + preparedRemote.split('\n').map(line => ' '+line).join('\n') + "\nexcept Exception:\n sys.stderr.write('SUPPORT_PREFLIGHT_STAGE='+stage+'\\n')\n sys.exit(1)\n";
-const result = spawnSync('ssh', sshArgs, { input: Buffer.from(guardedRemote), maxBuffer: 32 * 1024 * 1024, timeout: 120000 });
+const result = spawnSync('ssh', sshArgs, { input: Buffer.from(guardedRemote), maxBuffer: 32 * 1024 * 1024, timeout: restore ? 240000 : 120000 });
 let snapshot, captured;
 if (result.status !== 0 || result.error) {
   const diagnostics = result.stderr?.toString('utf8') || '';
-  const stage = diagnostics.match(/^SUPPORT_PREFLIGHT_STAGE=(initial|files|containers|ledgers|memory)$/m)?.[1];
+  const stage = diagnostics.match(/^SUPPORT_PREFLIGHT_STAGE=(initial|files|containers|ledgers|memory|restore-worker)$/m)?.[1];
   const reason = stage ? `REMOTE_${stage}` : /Permission denied/.test(diagnostics) ? 'SSH_AUTH_DENIED' : /Host key verification failed/.test(diagnostics) ? 'SSH_HOST_KEY' : /libcrypto|invalid format/.test(diagnostics) ? 'SSH_KEY_FORMAT' : 'SSH_TRANSPORT';
   snapshot = { error: reason, files: {}, containers: [], diagnostics: { status: result.status, code: result.error?.code, stderr: diagnostics } };
   captured = Buffer.from(JSON.stringify(snapshot));
