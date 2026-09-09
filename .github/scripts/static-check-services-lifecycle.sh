@@ -538,16 +538,16 @@ if (
 ) {
 	throw new Error('Support release must use one exact reviewed infra SHA');
 }
-// Replace only Support processes; preserve the verified runtime environment and all peers.
-for (const [job, scope] of [['deploy-production', 'support-chat-repair']]) {
+// Activate Support delivery processes on their verified existing immutable images.
+for (const [job, scope] of [['deploy-production', 'support-chat-activate']]) {
 	const block = servicesWorkflow.match(new RegExp('^  ' + job + ':\\n([\\s\\S]*?)(?=^  [a-z][a-z0-9-]*:|$(?![\\s\\S]))', 'm'))?.[1];
 	if (!block || !block.includes('release_scope: ' + scope) ||
 		!block.includes('services_revision: ${{ github.sha }}') ||
 		!block.includes("expected_live_revision: '474d3ab9235002ca3c6c887dace6ccd927a7fdd2'") ||
 		!block.includes("expected_service_env_sha256: 'cab70688122306a71cb345c9c7031814048b47b70aca5ed677c9be01ab995e51'") ||
-		!block.includes("expected_support_chat_baseline_sha256: '400cb46740d895ca1e8049a4e1989ea32760c7eb8c6321182ef5c0f008b97fc3'") ||
+		!block.includes("expected_support_chat_baseline_sha256: '9d790638145abd4dad86f227cc5dcd1a8ce53172f5a6be84ef07d7ed46f83c23'") ||
 		/expected_crm_\w+_baseline_sha256:|operations_evidence_sha256:/.test(block)) {
-		throw new Error('Support repair must pin its verified eleven-process baseline and synchronized CRM env');
+		throw new Error('Support activation must pin its verified eleven-process baseline and synchronized CRM env');
 	}
 }
 if (/release_scope: (?:crm-prepare|crm-databases|crm-runtime|all)\b/.test(servicesWorkflow)) {
