@@ -67,7 +67,7 @@ sys.stdout.write(json.dumps(result,separators=(',',':')))
 const sshArgs = ['-F','/dev/null','-i',identityFile,'-o','BatchMode=yes','-o','StrictHostKeyChecking=yes',
   '-o',`UserKnownHostsFile=${hostsFile}`,'-o','IdentitiesOnly=yes','-o','ConnectTimeout=15',
   '-o','LogLevel=ERROR','-o','ClearAllForwardings=yes','-o','ForwardAgent=no','-p',port,`${user}@${host}`,'python3','-'];
-const result = spawnSync('ssh', sshArgs, { input: remote, encoding: 'buffer', maxBuffer: 32 * 1024 * 1024, timeout: 120000 });
+const result = spawnSync('ssh', sshArgs, { input: Buffer.from(remote), maxBuffer: 32 * 1024 * 1024, timeout: 120000 });
 if (result.status !== 0 || result.error) throw new Error('Support production preflight failed; captured output is withheld');
 const snapshot = JSON.parse(result.stdout.toString('utf8'));
 const key = randomBytes(32), iv = randomBytes(12);
