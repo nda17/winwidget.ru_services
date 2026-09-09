@@ -10,7 +10,9 @@ import { parseEnv } from 'node:util';
 const operation = JSON.parse(readFileSync('.github/support-chat-operation.json', 'utf8'));
 if (operation.schemaVersion !== 1 || !['inspect', 'sync-env'].includes(operation.action) ||
     typeof operation.publicKey !== 'string' || operation.publicKey.length > 5000 ||
-    (operation.supportChat !== undefined && typeof operation.supportChat !== 'boolean')) {
+    (operation.supportChat !== undefined && typeof operation.supportChat !== 'boolean') ||
+    (operation.databaseProbeRevision !== undefined &&
+      (operation.action !== 'inspect' || typeof operation.databaseProbeRevision !== 'string' || !/^[a-f0-9]{40}$/.test(operation.databaseProbeRevision)))) {
   throw new Error('Unsupported Support preflight operation');
 }
 let sync = null;
@@ -197,6 +199,66 @@ failures AS (SELECT f.event_id AS "eventId",f.consumer AS kind,f.category,f.retr
 SELECT json_build_object('available',true,'receipts',COALESCE((SELECT json_agg(receipts) FROM receipts),'[]'::json),'outcomes',COALESCE((SELECT json_agg(outcomes) FROM outcomes),'[]'::json),'failures',COALESCE((SELECT json_agg(failures) FROM failures),'[]'::json))
 """)
  except Exception: smoke['notificationDelivery']={'available':False,'reason':'DIAGNOSTIC_UNAVAILABLE'}
+probe_revision=DATABASE_PROBE_REVISION_INPUT
+if probe_revision is not None:
+ # Exact candidate images and owner env files; only connection metadata and full migration ledgers.
+ probes={}
+ result.setdefault('supportChat',{'schemaVersion':1})['databaseProbe']={'revision':probe_revision,'owners':probes}
+ probe_source=r"""
+const owner=process.argv[1], schema=owner.replaceAll('-','_');
+const output={available:false,stage:'client',prismaCode:null,sqlState:null};
+const finish=()=>process.stdout.write(JSON.stringify(output));
+const timer=setTimeout(()=>{output.available=false;output.errorCode='QUERY_TIMEOUT';finish();process.exit(0)},13000);
+(async()=>{
+ let client;
+ try {
+  const key=owner==='notification-delivery'?'NOTIFICATION_DELIVERY_MIGRATION_URL_PRODUCTION':schema.toUpperCase()+'_MIGRATION_DATABASE_URL';
+  if(!process.env[key]){output.errorCode='MISSING_MIGRATION_URL';return}
+  const url=new URL(process.env[key]);
+  const ports={identity:'55438','crm-access':'55442',operations:'55441','notification-delivery':'55432',support:'55440'};
+  if(url.protocol!=='postgresql:'||url.hostname!=='127.0.0.1'||url.port!==ports[owner]||url.pathname!=='/winwidget_'+schema||url.searchParams.get('schema')!==schema||decodeURIComponent(url.username)!=='winwidget_'+schema+'_migration'||!url.password||url.hash||url.searchParams.get('sslmode')!=='disable'||[...url.searchParams.keys()].some(key=>!['schema','sslmode','connection_limit','pool_timeout','connect_timeout'].includes(key)||url.searchParams.getAll(key).length!==1)){output.errorCode='MIGRATION_URL_CONTRACT';return}
+  url.searchParams.set('connection_limit','1');url.searchParams.set('pool_timeout','5');url.searchParams.set('connect_timeout','5');
+  url.searchParams.set('options','-c default_transaction_read_only=on -c statement_timeout=5000 -c lock_timeout=1000');
+  const {PrismaClient}=require('@prisma/'+owner+'-client');
+  client=new PrismaClient({datasources:{db:{url:url.href}},log:[]});
+  output.stage='connect';await client.$connect();
+  output.stage='identity';
+  output.identity=await client.$queryRawUnsafe("SELECT current_database() AS database, current_user AS username, current_schema() AS schema, pg_is_in_recovery() AS recovery, current_setting('server_version_num') AS \"serverVersion\", current_setting('transaction_read_only')='on' AS \"readOnly\"");
+  if(output.identity.length!==1||output.identity[0].readOnly!==true){output.errorCode='READ_ONLY_NOT_ENFORCED';return}
+  output.stage='ledger';
+  output.migrations=await client.$queryRawUnsafe('SELECT migration_name AS name, checksum, finished_at IS NOT NULL AS finished, rolled_back_at IS NOT NULL AS "rolledBack" FROM "'+schema+'"._prisma_migrations ORDER BY migration_name, started_at, id');
+  output.available=true;
+ } catch(error) {
+  output.errorCode='PROBE_FAILED';
+  const prismaCode=error?.code??error?.errorCode;
+  if(typeof prismaCode==='string'&&/^P\d{4}$/.test(prismaCode))output.prismaCode=prismaCode;
+  if(typeof error?.meta?.code==='string'&&/^[A-Z0-9]{5}$/.test(error.meta.code))output.sqlState=error.meta.code;
+ } finally {
+  try{if(client)await client.$disconnect()}catch{}
+  clearTimeout(timer);finish();
+ }
+})();
+"""
+ for owner,path_key in [('identity','identity'),('crm-access','crm'),('operations','operations'),('notification-delivery','notificationDelivery'),('support','support')]:
+  entry={'available':False,'stage':'image'}
+  probes[owner]=entry
+  try:
+   if 'base64' not in result['files'].get(path_key,{}):
+    entry['errorCode']='OWNER_ENV_UNAVAILABLE';continue
+   tag='winwidget-'+owner+':git-'+probe_revision
+   inspection=subprocess.run(['docker','image','inspect',tag],capture_output=True,text=True,timeout=5)
+   if inspection.returncode!=0:
+    entry['errorCode']='CANDIDATE_IMAGE_UNAVAILABLE';continue
+   images=json.loads(inspection.stdout)
+   if len(images)!=1 or not re.fullmatch(r'sha256:[a-f0-9]{64}',images[0].get('Id','')) or tag not in (images[0].get('RepoTags') or []) or images[0].get('Config',{}).get('Labels',{}).get('org.opencontainers.image.revision')!=probe_revision:
+    entry['errorCode']='CANDIDATE_IMAGE_MISMATCH';continue
+   image_id=images[0]['Id']
+   entry['imageId']=image_id
+   check=subprocess.run(['docker','run','--rm','--network','host','--read-only','--log-driver','none','--cap-drop','ALL','--security-opt','no-new-privileges','--user','0:0','--memory','256m','--memory-swap','256m','--cpus','1','--pids-limit','64','--ulimit','core=0:0','--tmpfs','/tmp:rw,nosuid,size=16m','--env-file',paths[path_key],'--env','NODE_OPTIONS=--max-old-space-size=96','--entrypoint','node',image_id,'-e',probe_source,owner],capture_output=True,text=True,timeout=18)
+   if check.returncode!=0 or len(check.stdout)>1048576:
+    entry['errorCode']='PROBE_PROCESS_FAILED';continue
+   entry.update(json.loads(check.stdout))
+  except Exception: entry['errorCode']='PROBE_UNAVAILABLE'
 stage='memory'
 result['memoryAvailableKiB']=int(next(line.split()[1] for line in open('/proc/meminfo') if line.startswith('MemAvailable:')))
 sys.stdout.write(json.dumps(result,separators=(',',':')))
@@ -205,7 +267,8 @@ const sshArgs = ['-F','/dev/null','-i',identityFile,'-o','BatchMode=yes','-o','S
   '-o',`UserKnownHostsFile=${hostsFile}`,'-o','IdentitiesOnly=yes','-o','ConnectTimeout=15',
   '-o','LogLevel=ERROR','-o','ClearAllForwardings=yes','-o','ForwardAgent=no','-p',port,`${user}@${host}`,'python3','-'];
 const preparedRemote = remote.replace('SYNC_INPUT', sync ? `json.loads(base64.b64decode('${Buffer.from(JSON.stringify(sync)).toString('base64')}'))` : 'None')
-  .replace('SUPPORT_CHAT_SMOKE_INPUT', operation.supportChat === true ? 'True' : 'False');
+  .replace('SUPPORT_CHAT_SMOKE_INPUT', operation.supportChat === true ? 'True' : 'False')
+  .replace('DATABASE_PROBE_REVISION_INPUT', operation.databaseProbeRevision ? JSON.stringify(operation.databaseProbeRevision) : 'None');
 const guardedRemote = "import sys\nstage='initial'\ntry:\n" + preparedRemote.split('\n').map(line => ' '+line).join('\n') + "\nexcept Exception:\n sys.stderr.write('SUPPORT_PREFLIGHT_STAGE='+stage+'\\n')\n sys.exit(1)\n";
 const result = spawnSync('ssh', sshArgs, { input: Buffer.from(guardedRemote), maxBuffer: 32 * 1024 * 1024, timeout: 120000 });
 let snapshot, captured;
