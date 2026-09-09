@@ -476,7 +476,7 @@ if (!servicesWorkflow.includes('node .github/scripts/test-crm-bootstrap-failure.
 	throw new Error('CRM bounded bootstrap process gate is missing');
 }
 const pinnedInfraRevision =
-	'0bdf2f594baf2f90bf6839b5a62f6f0875667838';
+	'81d63b56a81cf1f24404f15d80651cc332246120';
 for (const evidence of [
 	"cancel-in-progress: ${{ github.ref != 'refs/heads/prod' }}",
 	'operations-control-ledger:',
@@ -538,16 +538,16 @@ if (
 ) {
 	throw new Error('Support release must use one exact reviewed infra SHA');
 }
-// Activate only the four Support delivery processes on the verified existing images.
-for (const [job, scope] of [['deploy-production', 'support-chat-activate']]) {
+// Replace only Support processes; preserve the verified runtime environment and all peers.
+for (const [job, scope] of [['deploy-production', 'support-chat-repair']]) {
 	const block = servicesWorkflow.match(new RegExp('^  ' + job + ':\\n([\\s\\S]*?)(?=^  [a-z][a-z0-9-]*:|$(?![\\s\\S]))', 'm'))?.[1];
 	if (!block || !block.includes('release_scope: ' + scope) ||
 		!block.includes('services_revision: ${{ github.sha }}') ||
 		!block.includes("expected_live_revision: '474d3ab9235002ca3c6c887dace6ccd927a7fdd2'") ||
 		!block.includes("expected_service_env_sha256: 'cab70688122306a71cb345c9c7031814048b47b70aca5ed677c9be01ab995e51'") ||
-		!block.includes("expected_support_chat_baseline_sha256: 'baee115343424d1618df45bce5b6783ee74efd0fee2708fc16122885b07b0acd'") ||
+		!block.includes("expected_support_chat_baseline_sha256: '400cb46740d895ca1e8049a4e1989ea32760c7eb8c6321182ef5c0f008b97fc3'") ||
 		/expected_crm_\w+_baseline_sha256:|operations_evidence_sha256:/.test(block)) {
-		throw new Error('Support activation must pin its verified eleven-process baseline and synchronized CRM env');
+		throw new Error('Support repair must pin its verified eleven-process baseline and synchronized CRM env');
 	}
 }
 if (/release_scope: (?:crm-prepare|crm-databases|crm-runtime|all)\b/.test(servicesWorkflow)) {

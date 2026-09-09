@@ -1,7 +1,7 @@
 import {
 	ConflictException,
 	Injectable,
-	OnModuleInit
+	OnApplicationBootstrap
 } from '@nestjs/common';
 import { Prisma, ConsumerFailure } from '@prisma/support-client';
 import type { ConsumeMessage } from 'amqplib';
@@ -74,13 +74,13 @@ export function parseSupportOutcome(value: unknown): SupportOutcome {
 	return value as unknown as SupportOutcome;
 }
 @Injectable()
-export class SupportOutcomeWorkerService implements OnModuleInit {
+export class SupportOutcomeWorkerService implements OnApplicationBootstrap {
 	constructor(
 		private readonly prisma: SupportPrismaService,
 		private readonly runtime: SupportRuntimeService,
 		private readonly rabbit: SupportRabbitMqService
 	) {}
-	async onModuleInit() {
+	async onApplicationBootstrap() {
 		if (this.runtime.workerEnabled && this.runtime.webChatEnabled)
 			await this.rabbit.consume(
 				message => this.handle(message),
