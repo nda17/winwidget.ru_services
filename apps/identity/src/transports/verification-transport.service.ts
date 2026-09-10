@@ -199,11 +199,17 @@ export class VerificationTransportService {
 	}
 
 	smsCode(phone: string, code: string): Promise<void> {
-		return this.sendSms(phone, `Ваш код подтверждения: ${code}`);
+		return this.sendSms(
+			phone,
+			`Ваш код подтверждения в WinWidget: ${code}`
+		);
 	}
 
 	smsPassword(phone: string, password: string): Promise<void> {
-		return this.sendSms(phone, `Ваш новый пароль: ${password}`);
+		return this.sendSms(
+			phone,
+			`Ваш новый пароль в WinWidget: ${password}`
+		);
 	}
 
 	private async sendEmail(
