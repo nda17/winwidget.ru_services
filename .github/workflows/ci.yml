@@ -1440,7 +1440,7 @@ jobs:
       - service-integration
       - widgets-integration
     if: github.event_name == 'push' && github.ref == 'refs/heads/prod'
-    uses: nda17/winwidget.ru_infra/.github/workflows/deploy-production.yml@81d63b56a81cf1f24404f15d80651cc332246120
+    uses: nda17/winwidget.ru_infra/.github/workflows/deploy-production.yml@e3c5d59eb9fce4268d2e4dbe76d936f2286ae484
     with:
       services_revision: ${{ github.sha }}
       release_scope: support-chat-activate
