@@ -1423,7 +1423,7 @@ jobs:
           done
 
   deploy-production:
-    name: Activate CRM support chat
+    name: Update Identity SMS templates
     needs:
       - billing-crm-policy-integration
       - billing-wincrm-commerce-integration
@@ -1440,13 +1440,12 @@ jobs:
       - service-integration
       - widgets-integration
     if: github.event_name == 'push' && github.ref == 'refs/heads/prod'
-    uses: nda17/winwidget.ru_infra/.github/workflows/deploy-production.yml@e3c5d59eb9fce4268d2e4dbe76d936f2286ae484
+    uses: nda17/winwidget.ru_infra/.github/workflows/deploy-production.yml@77afd2c43fb603d7195cf5874bc86e5d0a7933da
     with:
       services_revision: ${{ github.sha }}
-      release_scope: support-chat-activate
+      release_scope: identity-api-runtime
       expected_live_revision: '474d3ab9235002ca3c6c887dace6ccd927a7fdd2'
-      expected_service_env_sha256: 'cab70688122306a71cb345c9c7031814048b47b70aca5ed677c9be01ab995e51'
-      expected_support_chat_baseline_sha256: '9d790638145abd4dad86f227cc5dcd1a8ce53172f5a6be84ef07d7ed46f83c23'
+      expected_service_env_sha256: 'f0add6db0694e10a0c611d95856b3774b9b998f8924759ce84bc7b4bc5b946eb'
     secrets:
       BACKEND_PRODUCTION_SSH_HOST: ${{ secrets.PRODUCTION_SSH_HOST }}
       BACKEND_PRODUCTION_SSH_PORT: ${{ secrets.PRODUCTION_SSH_PORT }}

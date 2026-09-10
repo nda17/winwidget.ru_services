@@ -476,7 +476,7 @@ if (!servicesWorkflow.includes('node .github/scripts/test-crm-bootstrap-failure.
 	throw new Error('CRM bounded bootstrap process gate is missing');
 }
 const pinnedInfraRevision =
-	'e3c5d59eb9fce4268d2e4dbe76d936f2286ae484';
+	'77afd2c43fb603d7195cf5874bc86e5d0a7933da';
 for (const evidence of [
 	"cancel-in-progress: ${{ github.ref != 'refs/heads/prod' }}",
 	'operations-control-ledger:',
@@ -536,22 +536,21 @@ if (
 	infraReleaseReferences.length !== 1 ||
 	infraReleaseReferences.some(reference => reference[1] !== pinnedInfraRevision)
 ) {
-	throw new Error('Support release must use one exact reviewed infra SHA');
+	throw new Error('Identity SMS release must use one exact reviewed infra SHA');
 }
-// Activate Support delivery processes on their verified existing immutable images.
-for (const [job, scope] of [['deploy-production', 'support-chat-activate']]) {
+// Update only Identity API text on the verified unchanged owner configuration.
+for (const [job, scope] of [['deploy-production', 'identity-api-runtime']]) {
 	const block = servicesWorkflow.match(new RegExp('^  ' + job + ':\\n([\\s\\S]*?)(?=^  [a-z][a-z0-9-]*:|$(?![\\s\\S]))', 'm'))?.[1];
 	if (!block || !block.includes('release_scope: ' + scope) ||
 		!block.includes('services_revision: ${{ github.sha }}') ||
 		!block.includes("expected_live_revision: '474d3ab9235002ca3c6c887dace6ccd927a7fdd2'") ||
-		!block.includes("expected_service_env_sha256: 'cab70688122306a71cb345c9c7031814048b47b70aca5ed677c9be01ab995e51'") ||
-		!block.includes("expected_support_chat_baseline_sha256: '9d790638145abd4dad86f227cc5dcd1a8ce53172f5a6be84ef07d7ed46f83c23'") ||
-		/expected_crm_\w+_baseline_sha256:|operations_evidence_sha256:/.test(block)) {
-		throw new Error('Support activation must pin its verified eleven-process baseline and synchronized CRM env');
+		!block.includes("expected_service_env_sha256: 'f0add6db0694e10a0c611d95856b3774b9b998f8924759ce84bc7b4bc5b946eb'") ||
+		/expected_crm_\w+_baseline_sha256:|expected_support_\w+:|expected_operations_\w+:|operations_runtime_revision:|operations_evidence_sha256:/.test(block)) {
+		throw new Error('Identity SMS release must pin its verified API revision and unchanged Identity env without companion scopes');
 	}
 }
 if (/release_scope: (?:crm-prepare|crm-databases|crm-runtime|all)\b/.test(servicesWorkflow)) {
-	throw new Error('Initial CRM provisioning and broad rollout must not replay for Support release');
+	throw new Error('Initial CRM provisioning and broad rollout must not replay for Identity SMS release');
 }
 
 const rootReadme = readFileSync('README.md', 'utf8');
