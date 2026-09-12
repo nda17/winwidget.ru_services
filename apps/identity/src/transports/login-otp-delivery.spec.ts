@@ -1,4 +1,5 @@
 import { ConfigService } from '@nestjs/config';
+import { Logger } from '@nestjs/common';
 import net from 'node:net';
 import { once } from 'node:events';
 import tls from 'node:tls';
@@ -112,6 +113,140 @@ describe('isolated login OTP delivery', () => {
 			)
 		).rejects.toThrow();
 		expect(global.fetch).not.toHaveBeenCalled();
+	});
+
+	it('bounds a registration SMTP send and closes its socket at the hard deadline', async () => {
+		const sockets = new Set<net.Socket>();
+		let connected = false;
+		let peerClosed!: () => void;
+		const closed = new Promise<void>(resolve => {
+			peerClosed = resolve;
+		});
+		const server = net.createServer(socket => {
+			connected = true;
+			sockets.add(socket);
+			socket.once('close', () => {
+				sockets.delete(socket);
+				peerClosed();
+			});
+		});
+		server.listen(0, '127.0.0.1');
+		await once(server, 'listening');
+		const port = (server.address() as net.AddressInfo).port;
+		const connect = net.connect.bind(net);
+		jest.spyOn(net, 'connect').mockImplementation(((
+			options: net.NetConnectOpts
+		) =>
+			connect({
+				...options,
+				host: '127.0.0.1',
+				port
+			})) as typeof net.connect);
+		const signal = AbortSignal.timeout(100);
+		jest.spyOn(AbortSignal, 'timeout').mockReturnValue(signal);
+		jest
+			.spyOn(Logger.prototype, 'warn')
+			.mockImplementation(() => undefined);
+		const transport = new VerificationTransportService(
+			new ConfigService({
+				MODE: 'development',
+				SMTP_SERVER: '127.0.0.1',
+				SMTP_LOGIN: 'synthetic',
+				SMTP_PASSWORD: 'synthetic'
+			})
+		);
+		const started = performance.now();
+		let closeTimer: ReturnType<typeof setTimeout> | undefined;
+		try {
+			await expect(
+				transport.emailCode('synthetic@example.test', '123456')
+			).rejects.toMatchObject({ outcome: 'UNKNOWN' });
+			expect(connected).toBe(true);
+			await Promise.race([
+				closed,
+				new Promise<never>((_, reject) => {
+					closeTimer = setTimeout(
+						() => reject(new Error('SMTP socket remained open')),
+						1_000
+					);
+				})
+			]);
+			expect(sockets.size).toBe(0);
+			expect(performance.now() - started).toBeLessThan(1500);
+		} finally {
+			if (closeTimer) clearTimeout(closeTimer);
+			for (const socket of sockets) socket.destroy();
+			await new Promise<void>(resolve => server.close(() => resolve()));
+		}
+	});
+
+	it('treats connection loss after the complete SMTP DATA as an unknown outcome', async () => {
+		const sockets = new Set<net.Socket>();
+		let completedData = false;
+		const server = net.createServer(socket => {
+			sockets.add(socket);
+			socket.once('close', () => sockets.delete(socket));
+			socket.write('220 synthetic SMTP ready\r\n');
+			let buffer = '';
+			let readingData = false;
+			socket.on('data', chunk => {
+				buffer += chunk.toString();
+				if (readingData) {
+					if (buffer.includes('\r\n.\r\n')) {
+						completedData = true;
+						// The server may have accepted DATA, but the sender receives no 250.
+						socket.destroy();
+					}
+					return;
+				}
+				while (buffer.includes('\r\n')) {
+					const end = buffer.indexOf('\r\n');
+					const line = buffer.slice(0, end);
+					buffer = buffer.slice(end + 2);
+					if (line.startsWith('EHLO'))
+						socket.write('250-test\r\n250 AUTH PLAIN\r\n');
+					else if (line.startsWith('AUTH'))
+						socket.write('235 authenticated\r\n');
+					else if (line === 'DATA') {
+						readingData = true;
+						socket.write('354 send message\r\n');
+						break;
+					} else socket.write('250 OK\r\n');
+				}
+			});
+		});
+		server.listen(0, '127.0.0.1');
+		await once(server, 'listening');
+		const port = (server.address() as net.AddressInfo).port;
+		const connect = net.connect.bind(net);
+		jest.spyOn(net, 'connect').mockImplementation(((
+			options: net.NetConnectOpts
+		) =>
+			connect({
+				...options,
+				host: '127.0.0.1',
+				port
+			})) as typeof net.connect);
+		jest
+			.spyOn(Logger.prototype, 'warn')
+			.mockImplementation(() => undefined);
+		const transport = new VerificationTransportService(
+			new ConfigService({
+				MODE: 'development',
+				SMTP_SERVER: '127.0.0.1',
+				SMTP_LOGIN: 'synthetic',
+				SMTP_PASSWORD: 'synthetic'
+			})
+		);
+		try {
+			await expect(
+				transport.emailCode('synthetic@example.test', '123456')
+			).rejects.toMatchObject({ outcome: 'UNKNOWN' });
+			expect(completedData).toBe(true);
+		} finally {
+			for (const socket of sockets) socket.destroy();
+			await new Promise<void>(resolve => server.close(() => resolve()));
+		}
 	});
 
 	it('requires verified TLS on the production SMTP path before sending any AUTH', async () => {

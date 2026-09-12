@@ -22,6 +22,8 @@ export type IdentityHousekeepingResult = {
 	staleHeartbeats: number;
 	expiredLoginOtpChallenges: number;
 	expiredLoginOtpRateLimits: number;
+	expiredEmailVerificationAttempts: number;
+	expiredEmailPasswordRecoveries: number;
 };
 
 @Injectable()
@@ -165,6 +167,22 @@ export class IdentityHousekeepingService
 				)
 				DELETE FROM identity.login_otp_rate_limits target
 				USING victims WHERE target.key = victims.key AND target.expires_at < ${now}
+			`),
+			this.prisma.$executeRaw(Prisma.sql`
+				WITH victims AS (
+					SELECT id FROM identity.verification_email_attempts WHERE expires_at < ${now}
+					ORDER BY expires_at, id LIMIT ${BATCH_SIZE}
+				)
+				DELETE FROM identity.verification_email_attempts target
+				USING victims WHERE target.id = victims.id AND target.expires_at < ${now}
+			`),
+			this.prisma.$executeRaw(Prisma.sql`
+				WITH victims AS (
+					SELECT id FROM identity.email_password_recoveries WHERE expires_at < ${now}
+					ORDER BY expires_at, id LIMIT ${BATCH_SIZE}
+				)
+				DELETE FROM identity.email_password_recoveries target
+				USING victims WHERE target.id = victims.id AND target.expires_at < ${now}
 			`)
 		]);
 		return {
@@ -177,7 +195,9 @@ export class IdentityHousekeepingService
 			telegramReceipts: values[6],
 			staleHeartbeats: values[7],
 			expiredLoginOtpChallenges: values[8],
-			expiredLoginOtpRateLimits: values[9]
+			expiredLoginOtpRateLimits: values[9],
+			expiredEmailVerificationAttempts: values[10],
+			expiredEmailPasswordRecoveries: values[11]
 		};
 	}
 

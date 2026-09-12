@@ -36,6 +36,7 @@ import {
 } from '../integrations/owner-clients.service';
 import { IdentityPrismaService } from '../prisma/identity-prisma.service';
 import { VerificationTransportService } from '../transports/verification-transport.service';
+import { EmailVerificationService } from '../auth/email-verification.service';
 import {
 	BindEmailStartDto,
 	BindEmailVerifyDto,
@@ -56,7 +57,11 @@ export class UsersService {
 		private readonly prisma: IdentityPrismaService,
 		private readonly events: IdentityEventsService,
 		private readonly transport: VerificationTransportService,
-		private readonly owners: OwnerClientsService
+		private readonly owners: OwnerClientsService,
+		private readonly emailVerification: EmailVerificationService = new EmailVerificationService(
+			prisma,
+			transport
+		)
 	) {}
 
 	findById(id: string) {
@@ -110,37 +115,69 @@ export class UsersService {
 		});
 	}
 
-	startEmailBinding(userId: string, dto: BindEmailStartDto) {
-		return this.startBinding(
-			userId,
-			VerificationChallengeType.EMAIL,
-			normalizeEmail(dto.email)
-		);
+	async startEmailBinding(userId: string, dto: BindEmailStartDto) {
+		const value = normalizeEmail(dto.email);
+		const occupied = await this.prisma.authIdentity.findFirst({
+			where: {
+				type: AuthIdentityType.EMAIL,
+				value,
+				userId: { not: userId }
+			}
+		});
+		if (occupied) throw new BadRequestException('Email busy');
+		return this.emailVerification.issue({
+			purpose: 'BIND_IDENTITY',
+			value,
+			userId
+		});
 	}
 
 	async verifyEmailBinding(userId: string, dto: BindEmailVerifyDto) {
-		return this.verifyBinding(
-			userId,
-			VerificationChallengeType.EMAIL,
-			AuthIdentityType.EMAIL,
-			normalizeEmail(dto.email),
+		const value = normalizeEmail(dto.email);
+		const verified = await this.emailVerification.validate(
+			{ purpose: 'BIND_IDENTITY', value, userId },
 			dto.code
 		);
+		return this.prisma.$transaction(async transaction => {
+			await transaction.$queryRaw(
+				Prisma.sql`SELECT id FROM identity.users WHERE id = ${userId} FOR UPDATE`
+			);
+			await this.emailVerification.consume(transaction, verified);
+			const occupied = await transaction.authIdentity.findUnique({
+				where: { type_value: { type: AuthIdentityType.EMAIL, value } }
+			});
+			if (occupied && occupied.userId !== userId)
+				throw new BadRequestException('Email busy');
+			await transaction.authIdentity.upsert({
+				where: { userId_type: { userId, type: AuthIdentityType.EMAIL } },
+				create: {
+					userId,
+					type: AuthIdentityType.EMAIL,
+					value,
+					verifiedAt: new Date()
+				},
+				update: { value, verifiedAt: new Date() }
+			});
+			await this.events.emitUserChanged(transaction, userId);
+			return publicUser(
+				await transaction.user.findUniqueOrThrow({
+					where: { id: userId },
+					include: USER_INCLUDE
+				})
+			);
+		});
 	}
 
 	startPhoneBinding(userId: string, dto: PhoneDto) {
-		return this.startBinding(
+		return this.startPhoneBindingChallenge(
 			userId,
-			VerificationChallengeType.PHONE,
 			normalizePhone(dto.phone)
 		);
 	}
 
 	verifyPhoneBinding(userId: string, dto: BindPhoneVerifyDto) {
-		return this.verifyBinding(
+		return this.verifyPhoneBindingChallenge(
 			userId,
-			VerificationChallengeType.PHONE,
-			AuthIdentityType.PHONE,
 			normalizePhone(dto.phone),
 			dto.code
 		);
@@ -720,15 +757,9 @@ export class UsersService {
 		return this.lifecycleMutation(actorId, id, 'RESTORE', request);
 	}
 
-	private async startBinding(
-		userId: string,
-		type: VerificationChallengeType,
-		value: string
-	) {
-		const identityType =
-			type === VerificationChallengeType.EMAIL
-				? AuthIdentityType.EMAIL
-				: AuthIdentityType.PHONE;
+	private async startPhoneBindingChallenge(userId: string, value: string) {
+		const type = VerificationChallengeType.PHONE;
+		const identityType = AuthIdentityType.PHONE;
 		const occupied = await this.prisma.authIdentity.findFirst({
 			where: { type: identityType, value, userId: { not: userId } }
 		});
@@ -743,18 +774,11 @@ export class UsersService {
 			}
 		});
 		if (existing && existing.lastSentAt.getTime() + 60_000 > Date.now()) {
-			throw new BadRequestException(
-				type === VerificationChallengeType.PHONE
-					? 'Phone verification resend cooldown'
-					: 'Email verification resend cooldown'
-			);
+			throw new BadRequestException('Phone verification resend cooldown');
 		}
 		const code = verificationCode();
 		const now = new Date();
-		const expiresAt = new Date(
-			now.getTime() +
-				(type === VerificationChallengeType.PHONE ? 5 : 10) * 60_000
-		);
+		const expiresAt = new Date(now.getTime() + 5 * 60_000);
 		const resendAvailableAt = new Date(now.getTime() + 60_000);
 		const codeHash = await hash(code, PASSWORD_SALT_ROUNDS);
 		await this.prisma.verificationChallenge.upsert({
@@ -782,21 +806,17 @@ export class UsersService {
 				lastSentAt: now
 			}
 		});
-		if (type === VerificationChallengeType.EMAIL) {
-			await this.transport.emailCode(value, code);
-		} else {
-			await this.transport.smsCode(value, code);
-		}
+		await this.transport.smsCode(value, code);
 		return { value, expiresAt, resendAvailableAt };
 	}
 
-	private async verifyBinding(
+	private async verifyPhoneBindingChallenge(
 		userId: string,
-		type: VerificationChallengeType,
-		identityType: AuthIdentityType,
 		value: string,
 		code: string
 	) {
+		const type = VerificationChallengeType.PHONE;
+		const identityType = AuthIdentityType.PHONE;
 		const challenge = await this.prisma.verificationChallenge.findUnique({
 			where: {
 				userId_type_purpose: {

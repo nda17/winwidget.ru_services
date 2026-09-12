@@ -87,7 +87,7 @@ describe('Identity current runtime readiness', () => {
 		try {
 			housekeeping.onModuleInit();
 			await jest.advanceTimersByTimeAsync(0);
-			expect(execute).toHaveBeenCalledTimes(10);
+			expect(execute).toHaveBeenCalledTimes(12);
 			expect(execute.mock.calls[8][0].sql).toContain(
 				'identity.login_otp_challenges'
 			);
@@ -96,6 +96,12 @@ describe('Identity current runtime readiness', () => {
 			);
 			expect(execute.mock.calls[9][0].sql).toContain(
 				'target.expires_at <'
+			);
+			expect(execute.mock.calls[10][0].sql).toContain(
+				'identity.verification_email_attempts'
+			);
+			expect(execute.mock.calls[11][0].sql).toContain(
+				'identity.email_password_recoveries'
 			);
 			expect(housekeeping.isReady()).toBe(true);
 		} finally {

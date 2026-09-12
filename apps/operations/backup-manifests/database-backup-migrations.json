@@ -138,7 +138,7 @@
 			]
 		},
 		"identity": {
-			"manifestSha256": "bbdaeb72f8dd8bcba866402a0de492fb7af2146ee6f34fd94a065fe3c29604f1",
+			"manifestSha256": "b00e71f2c1db4d8ef6e41b3dc379fd767ca33b1f866f974235559d505910a074",
 			"migrations": [
 				{
 					"name": "20260814000000_init_identity",
@@ -167,6 +167,10 @@
 				{
 					"name": "20260910010000_add_login_otp",
 					"checksum": "314f52d752f36d8ea039a4f2c0094d750d62da59c0d63686e7f64de619e71e80"
+				},
+				{
+					"name": "20260913000000_email_delivery_attempts",
+					"checksum": "df3b21a77b51a0d3a5d8636729caded47927514c2ef6931d1f45f3707784c021"
 				}
 			]
 		},

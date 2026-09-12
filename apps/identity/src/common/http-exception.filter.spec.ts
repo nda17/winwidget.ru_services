@@ -1,5 +1,6 @@
 import {
 	INestApplication,
+	BadGatewayException,
 	UnauthorizedException,
 	ValidationPipe
 } from '@nestjs/common';
@@ -19,7 +20,8 @@ import { IdentityHttpExceptionFilter } from './http-exception.filter';
 describe('Identity public auth HTTP exception contract', () => {
 	let app: INestApplication;
 	const auth = {
-		login: jest.fn()
+		login: jest.fn(),
+		register: jest.fn()
 	};
 	const allow = { canActivate: jest.fn().mockReturnValue(true) };
 
@@ -62,6 +64,7 @@ describe('Identity public auth HTTP exception contract', () => {
 
 	afterEach(() => {
 		auth.login.mockReset();
+		auth.register.mockReset();
 	});
 
 	afterAll(async () => {
@@ -102,6 +105,36 @@ describe('Identity public auth HTTP exception contract', () => {
 			code: 'validation_error'
 		});
 		expect(auth.login).not.toHaveBeenCalled();
+	});
+
+	it('preserves safe email retry metadata without spreading private error fields', async () => {
+		auth.register.mockRejectedValueOnce(
+			new BadGatewayException({
+				code: 'email_delivery_unknown',
+				message: 'Не удалось подтвердить отправку письма.',
+				deliveryStatus: 'UNKNOWN',
+				deliveryAttemptId: '00000000-0000-4000-8000-000000000001',
+				expiresAt: '2026-09-12T12:10:00.000Z',
+				resendAvailableAt: '2026-09-12T12:01:00.000Z',
+				password: 'private-password',
+				codeHash: 'private-hash',
+				providerResponse: 'private-provider-data'
+			})
+		);
+		const response = await request(app.getHttpServer())
+			.post('/api/v1/auth/register')
+			.send({ email: 'user@example.com', password: 'Secure1' })
+			.expect(502);
+		expect(response.body).toEqual({
+			statusCode: 502,
+			error: 'BadGatewayException',
+			code: 'email_delivery_unknown',
+			message: 'Не удалось подтвердить отправку письма.',
+			deliveryStatus: 'UNKNOWN',
+			deliveryAttemptId: '00000000-0000-4000-8000-000000000001',
+			expiresAt: '2026-09-12T12:10:00.000Z',
+			resendAvailableAt: '2026-09-12T12:01:00.000Z'
+		});
 	});
 
 	it('maps the missing refresh cookie to the frozen public contract', async () => {

@@ -13,6 +13,7 @@ node --check apps/operations/test/integration/database-restore-control-ledger-po
 node --check apps/operations/test/integration/database-restore-postgres18.rehearsal.mjs
 node --check apps/operations/test/integration/admin-backlog-removal-postgres18.integration.mjs
 node --check apps/identity/test/integration/login-otp-postgres18.integration.mjs
+node --check apps/identity/test/integration/email-delivery-postgres18.integration.mjs
 
 env \
 	GITHUB_CLIENT_ID=ci_identity_github_client_id \
@@ -472,11 +473,42 @@ for (const otpGateName of [
 		throw new Error('Full Identity OTP integration must gate CI in its immutable production image');
 	}
 }
+const emailFixture = servicesWorkflow.match(/      - name: Prepare isolated least-privilege email delivery database\n([\s\S]*?)(?=\n      - name:)/)?.[1];
+const emailIntegration = servicesWorkflow.match(/      - name: Prove email delivery failure, concurrency and password recovery on PostgreSQL 18\n([\s\S]*?)(?=\n  [a-z][a-z-]*:)/)?.[1];
+if (!emailFixture || [
+	"if: matrix.app == 'identity'",
+	'CREATE DATABASE winwidget_identity_test_email_ci OWNER services_ci;',
+	'CREATE SCHEMA identity AUTHORIZATION identity_email_migration_ci;',
+	'pnpm --dir apps/identity run prisma:migrate:deploy',
+	'GRANT SELECT ON identity.users, identity.auth_identities TO identity_email_runtime_ci;',
+	'GRANT UPDATE (id, password, updated_at) ON identity.users TO identity_email_runtime_ci;',
+	'GRANT SELECT, INSERT, UPDATE ON identity.user_sessions TO identity_email_runtime_ci;',
+	'GRANT SELECT, INSERT, UPDATE, DELETE ON identity.verification_challenges, identity.verification_email_attempts, identity.email_password_recoveries TO identity_email_runtime_ci;'
+].some(value => !emailFixture.includes(value)) || /GRANT ALL|GRANT UPDATE ON identity.users|TO identity_otp_runtime_ci/.test(emailFixture)) {
+	throw new Error('Email integration must use separate least-privilege roles without widening the OTP fixture');
+}
+if (!emailIntegration || [
+	"if: matrix.app == 'identity'",
+	'IDENTITY_OTP_IMAGE: winwidget-identity:otp-ci-${{ github.sha }}',
+	"IDENTITY_INTEGRATION_ALLOW_MUTATION: 'true'",
+	'IDENTITY_TEST_DATABASE_URL: postgresql://identity_email_runtime_ci:',
+	'IDENTITY_TEST_MIGRATION_DATABASE_URL: postgresql://identity_email_migration_ci:',
+	'docker run --rm --network host --read-only --cap-drop ALL',
+	'--security-opt no-new-privileges --user 1001:1001',
+	'--memory 1g --memory-swap 1g --pids-limit 128 --ulimit core=0:0',
+	'--env IDENTITY_INTEGRATION_ALLOW_MUTATION',
+	'--env IDENTITY_TEST_DATABASE_URL',
+	'--env IDENTITY_TEST_MIGRATION_DATABASE_URL',
+	'--mount "type=bind,src=$PWD/apps/identity/test/integration/email-delivery-postgres18.integration.mjs,dst=/app/test/integration/email-delivery-postgres18.integration.mjs,readonly"',
+	'--entrypoint node "$IDENTITY_OTP_IMAGE"'
+].some(value => !emailIntegration.includes(value)) || /continue-on-error|\|\|\s*true|--privileged|--env-file|node_modules:/.test(emailIntegration)) {
+	throw new Error('Email delivery and recovery PostgreSQL integration must gate CI in the exact immutable Identity image');
+}
 if (!servicesWorkflow.includes('node .github/scripts/test-crm-bootstrap-failure.mjs "${{ matrix.app }}"')) {
 	throw new Error('CRM bounded bootstrap process gate is missing');
 }
 const pinnedInfraRevision =
-	'cc06f3b3395ba8e97a02d3e09fd0481a46587ba4';
+	'7c99a8dfdd9c6d93616e06a238e7634b21146304';
 for (const evidence of [
 	"cancel-in-progress: ${{ github.ref != 'refs/heads/prod' }}",
 	'operations-control-ledger:',
@@ -536,21 +568,24 @@ if (
 	infraReleaseReferences.length !== 1 ||
 	infraReleaseReferences.some(reference => reference[1] !== pinnedInfraRevision)
 ) {
-	throw new Error('Identity SMS release must use one exact reviewed infra SHA');
+	throw new Error('Identity email release must use one exact reviewed infra SHA');
 }
-// Update only Identity API text on the verified unchanged owner configuration.
-for (const [job, scope] of [['deploy-production', 'identity-api-runtime']]) {
+// Release the reviewed email migration with matching Identity and Operations images.
+for (const [job, scope] of [['deploy-production', 'identity-email-delivery']]) {
 	const block = servicesWorkflow.match(new RegExp('^  ' + job + ':\\n([\\s\\S]*?)(?=^  [a-z][a-z0-9-]*:|$(?![\\s\\S]))', 'm'))?.[1];
 	if (!block || !block.includes('release_scope: ' + scope) ||
 		!block.includes('services_revision: ${{ github.sha }}') ||
-		!block.includes("expected_live_revision: '474d3ab9235002ca3c6c887dace6ccd927a7fdd2'") ||
+		!block.includes("expected_live_revision: 'eb19be4366d30de1576420a5d52484178bbca9c8'") ||
 		!block.includes("expected_service_env_sha256: 'f0add6db0694e10a0c611d95856b3774b9b998f8924759ce84bc7b4bc5b946eb'") ||
-		/expected_crm_\w+_baseline_sha256:|expected_support_\w+:|expected_operations_\w+:|operations_runtime_revision:|operations_evidence_sha256:/.test(block)) {
-		throw new Error('Identity SMS release must pin its verified API revision and unchanged Identity env without companion scopes');
+		!block.includes("expected_identity_workers_revision: '774db6490808cbaff4ff96033c589205cb3935f7'") ||
+		!block.includes("expected_operations_revision: '474d3ab9235002ca3c6c887dace6ccd927a7fdd2'") ||
+		!block.includes("expected_operations_env_sha256: 'bf85df42cd5785af7129279732cb9b6d342a9f29efddc6614c3de2fa5a744660'") ||
+		/expected_crm_\w+_baseline_sha256:|expected_support_\w+:|expected_operations_(?:api_revision|backup_baseline_sha256):|operations_runtime_revision:|operations_evidence_sha256:/.test(block)) {
+		throw new Error('Identity email release must pin its approved API/workers and Operations baselines with unchanged owner envs');
 	}
 }
 if (/release_scope: (?:crm-prepare|crm-databases|crm-runtime|all)\b/.test(servicesWorkflow)) {
-	throw new Error('Initial CRM provisioning and broad rollout must not replay for Identity SMS release');
+	throw new Error('Initial CRM provisioning and broad rollout must not replay for Identity email release');
 }
 
 const rootReadme = readFileSync('README.md', 'utf8');

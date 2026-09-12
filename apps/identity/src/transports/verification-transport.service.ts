@@ -1,7 +1,8 @@
 import {
 	BadGatewayException,
 	Injectable,
-	InternalServerErrorException
+	InternalServerErrorException,
+	Logger
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { render } from '@react-email/render';
@@ -9,6 +10,7 @@ import nodemailer, { type Transporter } from 'nodemailer';
 import type SMTPTransport from 'nodemailer/lib/smtp-transport';
 import { join } from 'node:path';
 import { connect, type Socket } from 'node:net';
+import { randomUUID } from 'node:crypto';
 import { passwordEmail, verificationEmail } from './email-templates';
 
 const SMSAERO_ENDPOINT = 'https://gate.smsaero.ru/v2/sms/send';
@@ -18,6 +20,27 @@ const EMAIL_LOGO_CID = 'winwidget-identity-logo';
 const EMAIL_LOGO_PATH = join(process.cwd(), 'assets', 'email-logo.png');
 export const VERIFICATION_EMAIL_SUBJECT = 'Код подтверждения email';
 export const PASSWORD_EMAIL_SUBJECT = 'Временный пароль';
+export const EMAIL_DELIVERY_TIMEOUT_MS = 20_000;
+
+export class EmailDeliveryException extends BadGatewayException {
+	constructor(
+		readonly outcome: 'FAILED' | 'UNKNOWN',
+		readonly attemptId: string
+	) {
+		super({
+			code:
+				outcome === 'FAILED'
+					? 'email_delivery_failed'
+					: 'email_delivery_unknown',
+			message:
+				outcome === 'FAILED'
+					? 'Не удалось отправить письмо. Попробуйте повторить отправку позже.'
+					: 'Не удалось подтвердить отправку письма. Если письмо придёт, используйте его; иначе повторите запрос позже.',
+			deliveryStatus: outcome,
+			deliveryAttemptId: attemptId
+		});
+	}
+}
 
 type SmsAeroResponse = {
 	success: boolean;
@@ -26,6 +49,7 @@ type SmsAeroResponse = {
 
 @Injectable()
 export class VerificationTransportService {
+	private readonly logger = new Logger(VerificationTransportService.name);
 	private readonly mailer: Transporter | null;
 	private readonly smtpConfigured: boolean;
 	private readonly smsEmail: string;
@@ -72,7 +96,7 @@ export class VerificationTransportService {
 		return Boolean(this.smsEmail && this.smsApiKey);
 	}
 
-	/** A single bounded login attempt; existing registration transports stay unchanged. */
+	/** The login fallback retains its independent, caller-owned deadline. */
 	async loginCode(
 		channel: 'EMAIL' | 'SMS',
 		destination: string,
@@ -182,19 +206,33 @@ export class VerificationTransportService {
 		}
 	}
 
-	async emailCode(email: string, code: string): Promise<void> {
+	async emailCode(
+		email: string,
+		code: string,
+		attemptId?: string
+	): Promise<void> {
 		await this.sendEmail(
 			email,
 			VERIFICATION_EMAIL_SUBJECT,
-			render(verificationEmail(code))
+			render(verificationEmail(code)),
+			`Ваш код подтверждения email в WinWidget: ${code}. Код действует 10 минут. Если вы не запрашивали код, проигнорируйте письмо.`,
+			'verification',
+			attemptId
 		);
 	}
 
-	async newPassword(email: string, password: string): Promise<void> {
+	async newPassword(
+		email: string,
+		password: string,
+		attemptId?: string
+	): Promise<void> {
 		await this.sendEmail(
 			email,
 			PASSWORD_EMAIL_SUBJECT,
-			render(passwordEmail(password))
+			render(passwordEmail(password)),
+			`Ваш временный пароль в WinWidget: ${password}. Он действует 10 минут. Прежний пароль заменится после входа с временным паролем. Если вы не запрашивали восстановление, проигнорируйте письмо.`,
+			'password_recovery',
+			attemptId
 		);
 	}
 
@@ -215,27 +253,129 @@ export class VerificationTransportService {
 	private async sendEmail(
 		to: string,
 		subject: string,
-		html: string
+		html: string,
+		text: string,
+		operation: 'verification' | 'password_recovery',
+		requestedAttemptId?: string
 	): Promise<void> {
-		if (!this.mailer) {
-			throw new InternalServerErrorException(
-				'Email verification transport is not configured'
+		const attemptId =
+			requestedAttemptId && /^[0-9a-f-]{36}$/i.test(requestedAttemptId)
+				? requestedAttemptId
+				: randomUUID();
+		const started = Date.now();
+		const metadata = {
+			event: 'identity_email_delivery',
+			operation,
+			attemptId
+		};
+		if (!this.smtpConfigured) {
+			this.logger.warn(
+				JSON.stringify({
+					...metadata,
+					outcome: 'FAILED',
+					category: 'CONFIGURATION'
+				})
 			);
+			throw new EmailDeliveryException('FAILED', attemptId);
 		}
-		await this.mailer.sendMail({
-			from: MAIL_FROM,
-			to,
-			subject,
-			html,
-			attachments: [
-				{
-					filename: 'winwidget-logo.png',
-					path: EMAIL_LOGO_PATH,
-					cid: EMAIL_LOGO_CID,
-					contentDisposition: 'inline'
+		const host = this.config.get<string>('SMTP_SERVER')!.trim();
+		const development =
+			this.config.get<string>('MODE')?.trim().toLowerCase() ===
+			'development';
+		const port = development ? 2525 : 465;
+		const signal = AbortSignal.timeout(EMAIL_DELIVERY_TIMEOUT_MS);
+		let socket: Socket | undefined;
+		let abort: (() => void) | undefined;
+		const options: SMTPTransport.Options = {
+			host,
+			port,
+			secure: !development,
+			auth: {
+				user: this.config.get<string>('SMTP_LOGIN')!.trim(),
+				pass: this.config.get<string>('SMTP_PASSWORD')!.trim()
+			},
+			connectionTimeout: timeout(
+				this.config,
+				'SMTP_CONNECTION_TIMEOUT_MS',
+				5_000
+			),
+			greetingTimeout: timeout(
+				this.config,
+				'SMTP_GREETING_TIMEOUT_MS',
+				5_000
+			),
+			socketTimeout: timeout(
+				this.config,
+				'SMTP_SOCKET_TIMEOUT_MS',
+				15_000
+			),
+			// Abort the actual socket as well as the awaiting request: a timeout
+			// must not leave a background SMTP send after the delivery lease ends.
+			getSocket: (_options, callback) => {
+				if (signal.aborted) {
+					callback(new Error('Email delivery deadline exceeded'), null);
+					return;
 				}
-			]
-		});
+				socket = connect({ host, port, signal });
+				let handedOff = false;
+				socket.once('connect', () => {
+					handedOff = true;
+					callback(null, { connection: socket });
+				});
+				socket.once('error', error => {
+					if (!handedOff) callback(error, null);
+				});
+			}
+		};
+		const mailer = nodemailer.createTransport(options);
+		try {
+			await Promise.race([
+				mailer.sendMail({
+					from: MAIL_FROM,
+					to,
+					subject,
+					html,
+					text,
+					messageId: `<${attemptId}@winwidget.ru>`,
+					attachments: [
+						{
+							filename: 'winwidget-logo.png',
+							path: EMAIL_LOGO_PATH,
+							cid: EMAIL_LOGO_CID,
+							contentDisposition: 'inline'
+						}
+					]
+				}),
+				new Promise<never>((_, reject) => {
+					abort = () =>
+						reject(new Error('Email delivery deadline exceeded'));
+					signal.addEventListener('abort', abort, { once: true });
+					if (signal.aborted) abort();
+				})
+			]);
+			// ACCEPTED means SMTP accepted the message, never inbox delivery.
+			this.logger.log(
+				JSON.stringify({
+					...metadata,
+					outcome: 'ACCEPTED',
+					durationMs: Date.now() - started
+				})
+			);
+		} catch (error) {
+			const failure = emailFailure(error);
+			this.logger.warn(
+				JSON.stringify({
+					...metadata,
+					...failure,
+					durationMs: Date.now() - started
+				})
+			);
+			throw new EmailDeliveryException(failure.outcome, attemptId);
+		} finally {
+			if (abort) signal.removeEventListener('abort', abort);
+			socket?.destroy();
+			mailer.close();
+		}
 	}
 
 	private async sendSms(to: string, text: string): Promise<void> {
@@ -281,6 +421,59 @@ export class VerificationTransportService {
 			);
 		}
 	}
+}
+
+function emailFailure(error: unknown): {
+	outcome: 'FAILED' | 'UNKNOWN';
+	category: string;
+	smtpCode?: number;
+} {
+	const details = error as {
+		code?: unknown;
+		responseCode?: unknown;
+	} | null;
+	const knownCodes = [
+		'EDNS',
+		'ENOTFOUND',
+		'ECONNREFUSED',
+		'EAUTH',
+		'EENVELOPE',
+		'EMESSAGE',
+		'ESTREAM',
+		'ENOENT',
+		'EFILE',
+		'ESOCKET',
+		'ECONNECTION',
+		'ETIMEDOUT',
+		'ETLS',
+		'EPROTOCOL',
+		'ABORT_ERR'
+	];
+	const category =
+		typeof details?.code === 'string' && knownCodes.includes(details.code)
+			? details.code
+			: 'UNKNOWN';
+	const smtpCode =
+		typeof details?.responseCode === 'number' &&
+		Number.isInteger(details.responseCode) &&
+		details.responseCode >= 400 &&
+		details.responseCode <= 599
+			? details.responseCode
+			: undefined;
+	// Socket loss/timeout can follow acceptance of DATA. CONN in a Nodemailer
+	// error is not evidence that the failure happened before message submission.
+	const rejected =
+		smtpCode !== undefined ||
+		[
+			'EDNS',
+			'ENOTFOUND',
+			'ECONNREFUSED',
+			'EAUTH',
+			'EENVELOPE',
+			'ENOENT',
+			'EFILE'
+		].includes(category);
+	return { outcome: rejected ? 'FAILED' : 'UNKNOWN', category, smtpCode };
 }
 
 function timeout(

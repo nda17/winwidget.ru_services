@@ -205,6 +205,10 @@ export class IdentityHttpExceptionFilter implements ExceptionFilter {
 				error?: string;
 				statusCode?: number;
 				code?: string;
+				deliveryStatus?: unknown;
+				deliveryAttemptId?: unknown;
+				expiresAt?: unknown;
+				resendAvailableAt?: unknown;
 			};
 
 			if (Array.isArray(payload.message)) {
@@ -220,11 +224,38 @@ export class IdentityHttpExceptionFilter implements ExceptionFilter {
 				? ERROR_MAP[payload.message]
 				: undefined;
 
+			const delivery: Record<string, string> = {};
+			if (
+				payload.deliveryStatus === 'FAILED' ||
+				payload.deliveryStatus === 'UNKNOWN'
+			) {
+				delivery.deliveryStatus = payload.deliveryStatus;
+			}
+			if (
+				typeof payload.deliveryAttemptId === 'string' &&
+				/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+					payload.deliveryAttemptId
+				)
+			) {
+				delivery.deliveryAttemptId = payload.deliveryAttemptId;
+			}
+			for (const key of ['expiresAt', 'resendAvailableAt'] as const) {
+				const value = payload[key];
+				if (
+					typeof value === 'string' &&
+					/^\d{4}-\d{2}-\d{2}T/.test(value) &&
+					Number.isFinite(Date.parse(value))
+				) {
+					delivery[key] = new Date(value).toISOString();
+				}
+			}
+
 			return response.status(status).json({
 				statusCode: status,
 				message: mapped?.message || payload.message || 'Ошибка запроса.',
 				error: payload.error || exception.name,
-				code: payload.code || mapped?.code || 'http_error'
+				code: payload.code || mapped?.code || 'http_error',
+				...delivery
 			});
 		}
 

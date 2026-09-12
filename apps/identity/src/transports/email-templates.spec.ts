@@ -44,5 +44,7 @@ describe('Identity verification email parity', () => {
 		expect(html).toContain('class="ww-button"');
 		expect(html).toContain('href="https://winwidget.ru/login"');
 		expect(html).toContain('Перейти ко входу');
+		expect(html).toContain('Он действует 10 минут.');
+		expect(html).toContain('Прежний пароль заменится только после входа');
 	});
 });

@@ -44,6 +44,8 @@ import {
 	RestorePasswordDto
 } from './auth.dto';
 import { RefreshTokenService } from './refresh-token.service';
+import { EmailVerificationService } from './email-verification.service';
+import { EmailPasswordRecoveryService } from './email-password-recovery.service';
 
 const USER_INCLUDE = {
 	authIdentities: true,
@@ -75,7 +77,15 @@ export class AuthService {
 		private readonly events: IdentityEventsService,
 		private readonly transport: VerificationTransportService,
 		private readonly owners: OwnerClientsService,
-		private readonly workspaces: WorkspaceProvisioningService
+		private readonly workspaces: WorkspaceProvisioningService,
+		private readonly emailVerification: EmailVerificationService = new EmailVerificationService(
+			prisma,
+			transport
+		),
+		private readonly emailRecovery: EmailPasswordRecoveryService = new EmailPasswordRecoveryService(
+			prisma,
+			transport
+		)
 	) {}
 
 	async login(dto: AuthDto, request?: Request) {
@@ -93,47 +103,11 @@ export class AuthService {
 		if (await this.users.findByIdentity(AuthIdentityType.EMAIL, email)) {
 			throw new BadRequestException('User already exists');
 		}
-		const existing = await this.prisma.verificationChallenge.findUnique({
-			where: {
-				type_purpose_value: {
-					type: VerificationChallengeType.EMAIL,
-					purpose: VerificationChallengePurpose.REGISTER,
-					value: email
-				}
-			}
-		});
-		if (existing) this.ensureResend(existing, 60);
-		const code = verificationCode();
-		const now = new Date();
-		const expiresAt = new Date(now.getTime() + 10 * 60_000);
-		const resendAvailableAt = new Date(now.getTime() + 60_000);
-		await this.prisma.verificationChallenge.upsert({
-			where: {
-				type_purpose_value: {
-					type: VerificationChallengeType.EMAIL,
-					purpose: VerificationChallengePurpose.REGISTER,
-					value: email
-				}
-			},
-			create: {
-				type: VerificationChallengeType.EMAIL,
-				purpose: VerificationChallengePurpose.REGISTER,
-				value: email,
-				passwordHash: await hash(dto.password, PASSWORD_SALT_ROUNDS),
-				codeHash: await hash(code, PASSWORD_SALT_ROUNDS),
-				expiresAt,
-				lastSentAt: now
-			},
-			update: {
-				passwordHash: await hash(dto.password, PASSWORD_SALT_ROUNDS),
-				codeHash: await hash(code, PASSWORD_SALT_ROUNDS),
-				attempts: 0,
-				expiresAt,
-				lastSentAt: now
-			}
-		});
-		await this.transport.emailCode(email, code);
-		return { email, expiresAt, resendAvailableAt };
+		const { value, ...timing } = await this.emailVerification.issue(
+			{ purpose: 'REGISTER', value: email },
+			await hash(dto.password, PASSWORD_SALT_ROUNDS)
+		);
+		return { email: value, ...timing };
 	}
 
 	async resendEmailCode(dto: ResendEmailCodeDto) {
@@ -145,29 +119,11 @@ export class AuthService {
 			);
 			throw new BadRequestException('User already exists');
 		}
-		const challenge = await this.registrationChallenge(
-			VerificationChallengeType.EMAIL,
-			email
-		);
-		if (!challenge?.passwordHash) {
-			throw new UnauthorizedException('Email verification code not found');
-		}
-		this.ensureResend(challenge, 60);
-		const code = verificationCode();
-		const now = new Date();
-		const expiresAt = new Date(now.getTime() + 10 * 60_000);
-		const resendAvailableAt = new Date(now.getTime() + 60_000);
-		await this.prisma.verificationChallenge.update({
-			where: { id: challenge.id },
-			data: {
-				codeHash: await hash(code, PASSWORD_SALT_ROUNDS),
-				attempts: 0,
-				expiresAt,
-				lastSentAt: now
-			}
+		const { value, ...timing } = await this.emailVerification.issue({
+			purpose: 'REGISTER',
+			value: email
 		});
-		await this.transport.emailCode(email, code);
-		return { email, expiresAt, resendAvailableAt };
+		return { email: value, ...timing };
 	}
 
 	async registerByEmail(dto: EmailRegisterDto, request?: Request) {
@@ -175,12 +131,12 @@ export class AuthService {
 		if (await this.users.findByIdentity(AuthIdentityType.EMAIL, email)) {
 			throw new BadRequestException('User already exists');
 		}
-		const challenge = await this.validateRegistrationChallenge(
-			VerificationChallengeType.EMAIL,
-			email,
-			dto.code,
-			true
+		const verified = await this.emailVerification.validate(
+			{ purpose: 'REGISTER', value: email },
+			dto.code
 		);
+		if (!verified.passwordHash)
+			throw new UnauthorizedException('Email verification code not found');
 		const user = await this.prisma.$transaction(async transaction => {
 			if (
 				await transaction.authIdentity.findUnique({
@@ -191,22 +147,10 @@ export class AuthService {
 			) {
 				throw new BadRequestException('User already exists');
 			}
-			const consumed = await transaction.verificationChallenge.deleteMany({
-				where: {
-					id: challenge.id,
-					codeHash: challenge.codeHash,
-					attempts: challenge.attempts,
-					expiresAt: { gt: new Date() }
-				}
-			});
-			if (consumed.count !== 1) {
-				throw new UnauthorizedException(
-					'Email verification code not found'
-				);
-			}
+			await this.emailVerification.consume(transaction, verified);
 			const created = await transaction.user.create({
 				data: {
-					password: challenge.passwordHash!,
+					password: verified.passwordHash!,
 					authIdentities: {
 						create: {
 							type: AuthIdentityType.EMAIL,
@@ -271,8 +215,7 @@ export class AuthService {
 			throw new BadRequestException('Phone already exists');
 		}
 		const passwordHash = await hash(dto.password, PASSWORD_SALT_ROUNDS);
-		const challenge = await this.validateRegistrationChallenge(
-			VerificationChallengeType.PHONE,
+		const challenge = await this.validatePhoneRegistrationChallenge(
 			phone,
 			dto.code
 		);
@@ -475,6 +418,9 @@ export class AuthService {
 			throw new UnauthorizedException('Phone not verified');
 		}
 		const password = this.strongPassword();
+		if (email) {
+			return this.emailRecovery.issue(user.id, email, password);
+		}
 		await this.prisma.$transaction(async transaction => {
 			await transaction.user.update({
 				where: { id: user.id },
@@ -486,8 +432,7 @@ export class AuthService {
 			});
 			await this.events.emitUserChanged(transaction, user.id);
 		});
-		if (email) await this.transport.newPassword(email, password);
-		else await this.transport.smsPassword(phone!, password);
+		await this.transport.smsPassword(phone!, password);
 	}
 
 	async sessions(userId: string, currentSessionId: string) {
@@ -561,11 +506,12 @@ export class AuthService {
 		password: string,
 		request?: Request
 	) {
-		const candidate = await this.requirePasswordLogin(
-			await this.users.findByIdentity(type, value),
-			type,
-			password
-		);
+		const { user: candidate, recovery: candidateRecovery } =
+			await this.requirePasswordLogin(
+				await this.users.findByIdentity(type, value),
+				type,
+				password
+			);
 		this.ensureActive(candidate);
 		await this.owners.ensureTrial(candidate.id, candidate.createdAt);
 
@@ -579,7 +525,7 @@ export class AuthService {
 			await transaction.$queryRaw(
 				Prisma.sql`SELECT id FROM identity.users WHERE id = ${candidate.id} FOR UPDATE`
 			);
-			const current = await this.requirePasswordLogin(
+			const { user: current, recovery } = await this.requirePasswordLogin(
 				await transaction.user.findFirst({
 					where: {
 						id: candidate.id,
@@ -589,9 +535,15 @@ export class AuthService {
 				}),
 				type,
 				password,
-				candidate.password
+				candidate.password,
+				transaction,
+				candidateRecovery?.id
 			);
 			this.ensureActive(current);
+			if (recovery) {
+				await this.emailRecovery.activate(transaction, current, recovery);
+				await this.events.emitUserChanged(transaction, current.id);
+			}
 			await transaction.userSession.create({
 				data: {
 					id: sessionId,
@@ -616,8 +568,13 @@ export class AuthService {
 		user: Awaited<ReturnType<UsersService['findById']>>,
 		type: AuthIdentityType,
 		password: string,
-		expectedPasswordHash?: string
-	): Promise<IdentityUser> {
+		expectedPasswordHash?: string,
+		transaction?: Prisma.TransactionClient,
+		recoveryId?: string
+	): Promise<{
+		user: IdentityUser;
+		recovery: Awaited<ReturnType<EmailPasswordRecoveryService['match']>>;
+	}> {
 		if (!user) {
 			throw new UnauthorizedException('Email or password invalid');
 		}
@@ -631,14 +588,25 @@ export class AuthService {
 			throw new UnauthorizedException('Phone not verified');
 		}
 		if (
-			!user.password ||
-			(expectedPasswordHash !== undefined &&
-				user.password !== expectedPasswordHash) ||
-			!(await compare(password, user.password))
+			expectedPasswordHash !== undefined &&
+			user.password !== expectedPasswordHash
 		) {
 			throw new UnauthorizedException('Email or password invalid');
 		}
-		return user;
+		if (user.password && (await compare(password, user.password)))
+			return { user, recovery: null };
+		const recovery =
+			type === AuthIdentityType.EMAIL
+				? await this.emailRecovery.match(
+						user,
+						password,
+						transaction,
+						recoveryId
+					)
+				: null;
+		if (!recovery)
+			throw new UnauthorizedException('Email or password invalid');
+		return { user, recovery };
 	}
 
 	private ensureActive(user: {
@@ -688,20 +656,14 @@ export class AuthService {
 		}
 	}
 
-	private async validateRegistrationChallenge(
-		type: VerificationChallengeType,
+	private async validatePhoneRegistrationChallenge(
 		value: string,
-		code: string,
-		requirePassword = false
+		code: string
 	): Promise<VerificationChallenge> {
-		const label =
-			type === VerificationChallengeType.EMAIL ? 'Email' : 'Phone';
+		const type = VerificationChallengeType.PHONE;
+		const label = 'Phone';
 		const challenge = await this.registrationChallenge(type, value);
-		if (
-			!challenge ||
-			challenge.expiresAt <= new Date() ||
-			(requirePassword && !challenge.passwordHash)
-		) {
+		if (!challenge || challenge.expiresAt <= new Date()) {
 			if (challenge) {
 				await this.deleteRegistrationChallenge(type, value);
 			}

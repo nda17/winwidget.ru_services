@@ -544,6 +544,49 @@ jobs:
             --mount "type=bind,src=$PWD/apps/identity/test/integration/login-otp-postgres18.integration.mjs,dst=/app/test/integration/login-otp-postgres18.integration.mjs,readonly" \
             --entrypoint node "$IDENTITY_OTP_IMAGE" \
             /app/test/integration/login-otp-postgres18.integration.mjs
+      - name: Prepare isolated least-privilege email delivery database
+        if: matrix.app == 'identity'
+        env:
+          POSTGRES_CONTAINER_ID: ${{ job.services.postgres.id }}
+          IDENTITY_DATABASE_URL: postgresql://identity_email_migration_ci:identity_email_migration_ci@127.0.0.1:5432/winwidget_identity_test_email_ci?schema=identity
+        run: |
+          docker exec -i "$POSTGRES_CONTAINER_ID" psql -U services_ci -d postgres -v ON_ERROR_STOP=1 <<'SQL'
+          CREATE ROLE identity_email_migration_ci LOGIN PASSWORD 'identity_email_migration_ci' NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
+          CREATE ROLE identity_email_runtime_ci LOGIN PASSWORD 'identity_email_runtime_ci' NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
+          CREATE DATABASE winwidget_identity_test_email_ci OWNER services_ci;
+          REVOKE ALL ON DATABASE winwidget_identity_test_email_ci FROM PUBLIC;
+          GRANT CONNECT ON DATABASE winwidget_identity_test_email_ci TO identity_email_migration_ci, identity_email_runtime_ci;
+          SQL
+          docker exec -i "$POSTGRES_CONTAINER_ID" psql -U services_ci -d winwidget_identity_test_email_ci -v ON_ERROR_STOP=1 <<'SQL'
+          REVOKE ALL ON SCHEMA public FROM PUBLIC;
+          CREATE SCHEMA identity AUTHORIZATION identity_email_migration_ci;
+          SQL
+          pnpm --dir apps/identity run prisma:migrate:deploy
+          docker exec -i "$POSTGRES_CONTAINER_ID" psql -U services_ci -d winwidget_identity_test_email_ci -v ON_ERROR_STOP=1 <<'SQL'
+          GRANT USAGE ON SCHEMA identity TO identity_email_runtime_ci;
+          GRANT SELECT ON identity.users, identity.auth_identities TO identity_email_runtime_ci;
+          GRANT UPDATE (id, password, updated_at) ON identity.users TO identity_email_runtime_ci;
+          GRANT SELECT, INSERT, UPDATE ON identity.user_sessions TO identity_email_runtime_ci;
+          GRANT SELECT, INSERT, UPDATE, DELETE ON identity.verification_challenges, identity.verification_email_attempts, identity.email_password_recoveries TO identity_email_runtime_ci;
+          SQL
+      - name: Prove email delivery failure, concurrency and password recovery on PostgreSQL 18
+        if: matrix.app == 'identity'
+        env:
+          IDENTITY_OTP_IMAGE: winwidget-identity:otp-ci-${{ github.sha }}
+          IDENTITY_INTEGRATION_ALLOW_MUTATION: 'true'
+          IDENTITY_TEST_DATABASE_URL: postgresql://identity_email_runtime_ci:identity_email_runtime_ci@127.0.0.1:5432/winwidget_identity_test_email_ci?schema=identity
+          IDENTITY_TEST_MIGRATION_DATABASE_URL: postgresql://identity_email_migration_ci:identity_email_migration_ci@127.0.0.1:5432/winwidget_identity_test_email_ci?schema=identity
+        run: |
+          docker run --rm --network host --read-only --cap-drop ALL \
+            --security-opt no-new-privileges --user 1001:1001 \
+            --memory 1g --memory-swap 1g --pids-limit 128 --ulimit core=0:0 \
+            --tmpfs /tmp:rw,noexec,nosuid,size=16m \
+            --env IDENTITY_INTEGRATION_ALLOW_MUTATION \
+            --env IDENTITY_TEST_DATABASE_URL \
+            --env IDENTITY_TEST_MIGRATION_DATABASE_URL \
+            --mount "type=bind,src=$PWD/apps/identity/test/integration/email-delivery-postgres18.integration.mjs,dst=/app/test/integration/email-delivery-postgres18.integration.mjs,readonly" \
+            --entrypoint node "$IDENTITY_OTP_IMAGE" \
+            /app/test/integration/email-delivery-postgres18.integration.mjs
 
   crm-database-access:
     name: CRM isolated PostgreSQL 18 access / ${{ matrix.app }}
@@ -1423,7 +1466,7 @@ jobs:
           done
 
   deploy-production:
-    name: Update Identity SMS templates
+    name: Deploy reliable Identity email delivery
     needs:
       - billing-crm-policy-integration
       - billing-wincrm-commerce-integration
@@ -1440,12 +1483,15 @@ jobs:
       - service-integration
       - widgets-integration
     if: github.event_name == 'push' && github.ref == 'refs/heads/prod'
-    uses: nda17/winwidget.ru_infra/.github/workflows/deploy-production.yml@cc06f3b3395ba8e97a02d3e09fd0481a46587ba4
+    uses: nda17/winwidget.ru_infra/.github/workflows/deploy-production.yml@7c99a8dfdd9c6d93616e06a238e7634b21146304
     with:
       services_revision: ${{ github.sha }}
-      release_scope: identity-api-runtime
-      expected_live_revision: '474d3ab9235002ca3c6c887dace6ccd927a7fdd2'
+      release_scope: identity-email-delivery
+      expected_live_revision: 'eb19be4366d30de1576420a5d52484178bbca9c8'
       expected_service_env_sha256: 'f0add6db0694e10a0c611d95856b3774b9b998f8924759ce84bc7b4bc5b946eb'
+      expected_identity_workers_revision: '774db6490808cbaff4ff96033c589205cb3935f7'
+      expected_operations_revision: '474d3ab9235002ca3c6c887dace6ccd927a7fdd2'
+      expected_operations_env_sha256: 'bf85df42cd5785af7129279732cb9b6d342a9f29efddc6614c3de2fa5a744660'
     secrets:
       BACKEND_PRODUCTION_SSH_HOST: ${{ secrets.PRODUCTION_SSH_HOST }}
       BACKEND_PRODUCTION_SSH_PORT: ${{ secrets.PRODUCTION_SSH_PORT }}

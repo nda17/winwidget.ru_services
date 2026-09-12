@@ -291,7 +291,16 @@ describe('public auth frozen contracts', () => {
 
 	it('returns registration and resend timing DTOs instead of booleans', async () => {
 		const first = service();
-		first.prisma.verificationChallenge.findUnique.mockResolvedValue(null);
+		const firstIssue = jest
+			.spyOn(first.auth['emailVerification'], 'issue')
+			.mockImplementation(async scope => {
+				await first.transport.emailCode(scope.value, '123456');
+				return {
+					value: scope.value,
+					expiresAt: new Date(),
+					resendAvailableAt: new Date()
+				};
+			});
 		const registered = await first.auth.register({
 			email: 'USER@Example.COM',
 			password: 'Secure1'
@@ -303,18 +312,19 @@ describe('public auth frozen contracts', () => {
 		});
 		expect(first.transport.emailCode).toHaveBeenCalledTimes(1);
 
+		expect(firstIssue).toHaveBeenCalledWith(
+			{ purpose: 'REGISTER', value: 'user@example.com' },
+			expect.any(String)
+		);
 		const second = service();
-		second.prisma.verificationChallenge.findUnique.mockResolvedValue({
-			id: 'challenge',
-			type: VerificationChallengeType.EMAIL,
-			purpose: VerificationChallengePurpose.REGISTER,
-			value: 'user@example.com',
-			passwordHash: 'hash',
-			codeHash: 'hash',
-			attempts: 0,
-			expiresAt: new Date(Date.now() + 60_000),
-			lastSentAt: new Date(Date.now() - 61_000)
-		});
+		jest
+			.spyOn(second.auth['emailVerification'], 'issue')
+			.mockImplementation(async scope => ({
+				value: scope.value,
+				expiresAt: new Date(),
+				resendAvailableAt: new Date()
+			}));
+
 		const resent = await second.auth.resendEmailCode({
 			email: 'USER@example.com'
 		});
@@ -407,6 +417,9 @@ describe('public auth frozen contracts', () => {
 				lastSentAt: new Date()
 			});
 			jest
+				.spyOn(value.auth['emailVerification'], 'consume')
+				.mockResolvedValue();
+			jest
 				.spyOn(value.auth, 'startSession')
 				.mockResolvedValue({ accessToken: 'access' } as never);
 
@@ -432,7 +445,64 @@ describe('public auth frozen contracts', () => {
 		);
 	});
 
-	it('atomically updates the password and revokes every active session on restore', async () => {
+	it('prepares email recovery without changing the active password or sessions', async () => {
+		const user = activeUser();
+		const value = service({
+			users: { findByIdentity: jest.fn().mockResolvedValue(user) }
+		});
+		const issue = jest
+			.spyOn(value.auth['emailRecovery'], 'issue')
+			.mockRejectedValue(new Error('synthetic delivery failure'));
+		await expect(
+			value.auth.restorePassword({ email: 'USER@example.com' })
+		).rejects.toThrow('synthetic delivery failure');
+		expect(issue).toHaveBeenCalledWith(
+			user.id,
+			'user@example.com',
+			expect.any(String)
+		);
+		expect(value.prisma.$transaction).not.toHaveBeenCalled();
+		expect(value.prisma.userSession.updateMany).not.toHaveBeenCalled();
+	});
+
+	it('activates a temporary email password after locking the user and before creating its session', async () => {
+		const user = { ...activeUser(), password: await hash('OldPass1', 4) };
+		const transaction = {
+			$queryRaw: jest.fn(),
+			user: { findFirst: jest.fn().mockResolvedValue(user) },
+			userSession: { create: jest.fn() }
+		};
+		const value = service({
+			users: { findByIdentity: jest.fn().mockResolvedValue(user) },
+			prisma: { $transaction: jest.fn(callback => callback(transaction)) }
+		});
+		const recovery = { id: 'recovery-id' } as never;
+		const match = jest
+			.spyOn(value.auth['emailRecovery'], 'match')
+			.mockResolvedValue(recovery);
+		const activate = jest
+			.spyOn(value.auth['emailRecovery'], 'activate')
+			.mockResolvedValue();
+		await value.auth.login({
+			email: 'user@example.com',
+			password: 'TempPass1'
+		});
+		expect(match).toHaveBeenLastCalledWith(
+			user,
+			'TempPass1',
+			transaction,
+			'recovery-id'
+		);
+		expect(activate).toHaveBeenCalledWith(transaction, user, recovery);
+		expect(transaction.$queryRaw.mock.invocationCallOrder[0]).toBeLessThan(
+			activate.mock.invocationCallOrder[0]
+		);
+		expect(activate.mock.invocationCallOrder[0]).toBeLessThan(
+			transaction.userSession.create.mock.invocationCallOrder[0]
+		);
+	});
+
+	it('atomically updates the password and revokes every active session on phone restore', async () => {
 		const userId = '00000000-0000-4000-8000-000000000002';
 		const transaction = {
 			user: { update: jest.fn() },
@@ -445,7 +515,7 @@ describe('public auth frozen contracts', () => {
 					id: userId,
 					status: UserStatus.ACTIVE,
 					deletedAt: null,
-					authIdentities: []
+					authIdentities: [{ type: 'PHONE', verifiedAt: new Date() }]
 				})
 			},
 			prisma: {
@@ -455,7 +525,7 @@ describe('public auth frozen contracts', () => {
 		});
 
 		await expect(
-			value.auth.restorePassword({ email: 'USER@example.com' })
+			value.auth.restorePassword({ phone: '+79990001122' })
 		).resolves.toBeUndefined();
 
 		expect(value.prisma.$transaction).toHaveBeenCalledTimes(1);

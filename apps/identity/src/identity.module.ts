@@ -11,6 +11,8 @@ import { AuthSettingsService } from './auth/auth-settings.service';
 import { AuthController } from './auth/auth.controller';
 import { IdentityAuthGuard } from './auth/auth.guard';
 import { AuthService } from './auth/auth.service';
+import { EmailVerificationService } from './auth/email-verification.service';
+import { EmailPasswordRecoveryService } from './auth/email-password-recovery.service';
 import { RecaptchaGuard } from './auth/recaptcha.guard';
 import { RefreshTokenService } from './auth/refresh-token.service';
 import { LoginOtpController } from './auth/login-otp.controller';
@@ -86,6 +88,8 @@ const API_PROVIDERS =
 				AuthRateLimitGuard,
 				AuthSettingsService,
 				AuthService,
+				EmailVerificationService,
+				EmailPasswordRecoveryService,
 				LoginOtpService,
 				IdentityAuthGuard,
 				IdentityInternalGuard,

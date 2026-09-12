@@ -23,6 +23,7 @@ model User {
   telegramNotificationChannel  TelegramNotificationChannel?
   verificationChallenges       VerificationChallenge[]
   loginOtpChallenges           LoginOtpChallenge[]
+  emailPasswordRecoveries       EmailPasswordRecovery[]
   sessions                     UserSession[]
   personalWorkspace            Workspace?                   @relation("PersonalWorkspaceOwner")
   workspaceMemberships         WorkspaceMember[]
@@ -170,6 +171,11 @@ model VerificationChallenge {
   lastSentAt        DateTime                     @default(now()) @map("last_sent_at")
   createdAt         DateTime                     @default(now()) @map("created_at")
   updatedAt         DateTime                     @updatedAt @map("updated_at")
+  emailDeliveryManaged Boolean                   @default(false) @map("email_delivery_managed")
+  emailResendAvailableAt DateTime?                @map("email_resend_available_at")
+  deliveryLeaseToken String?                      @map("delivery_lease_token") @db.Uuid
+  deliveryLeaseExpiresAt DateTime?                @map("delivery_lease_expires_at")
+  emailAttempts     VerificationEmailAttempt[]
   user              User?                        @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: Cascade)
 
   @@unique([userId, type, purpose])
@@ -177,6 +183,43 @@ model VerificationChallenge {
   @@index([telegramUserId])
   @@index([expiresAt])
   @@map("verification_challenges")
+  @@schema("identity")
+}
+
+model VerificationEmailAttempt {
+  id           String                @id @default(uuid()) @db.Uuid
+  challengeId  String                @map("challenge_id")
+  value        String
+  codeHash     String                @map("code_hash")
+  passwordHash String?               @map("password_hash")
+  outcome      String                @db.VarChar(16)
+  expiresAt    DateTime              @map("expires_at")
+  createdAt    DateTime              @default(now()) @map("created_at")
+  challenge    VerificationChallenge @relation(fields: [challengeId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  @@index([challengeId, createdAt])
+  @@index([expiresAt, id])
+  @@map("verification_email_attempts")
+  @@schema("identity")
+}
+
+model EmailPasswordRecovery {
+  id                 String   @id @default(uuid()) @db.Uuid
+  userId             String   @map("user_id")
+  authIdentityId     String   @map("auth_identity_id")
+  identityValue      String   @map("identity_value")
+  identityVerifiedAt DateTime? @map("identity_verified_at")
+  passwordHash       String   @map("password_hash")
+  basePasswordHash   String   @map("base_password_hash")
+  outcome            String   @db.VarChar(16)
+  expiresAt          DateTime @map("expires_at")
+  createdAt          DateTime @default(now()) @map("created_at")
+  consumedAt         DateTime? @map("consumed_at")
+  user               User     @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  @@index([userId, createdAt])
+  @@index([expiresAt])
+  @@map("email_password_recoveries")
   @@schema("identity")
 }
 
