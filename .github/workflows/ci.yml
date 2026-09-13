@@ -1483,7 +1483,7 @@ jobs:
       - service-integration
       - widgets-integration
     if: github.event_name == 'push' && github.ref == 'refs/heads/prod'
-    uses: nda17/winwidget.ru_infra/.github/workflows/deploy-production.yml@7c99a8dfdd9c6d93616e06a238e7634b21146304
+    uses: nda17/winwidget.ru_infra/.github/workflows/deploy-production.yml@e5a55e68d0b89f79a674d8be769ca45b8e1353d5
     with:
       services_revision: ${{ github.sha }}
       release_scope: identity-email-delivery
