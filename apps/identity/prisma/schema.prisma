@@ -23,7 +23,7 @@ model User {
   telegramNotificationChannel  TelegramNotificationChannel?
   verificationChallenges       VerificationChallenge[]
   loginOtpChallenges           LoginOtpChallenge[]
-  emailPasswordRecoveries       EmailPasswordRecovery[]
+  emailPasswordRecoveries      EmailPasswordRecovery[]
   sessions                     UserSession[]
   personalWorkspace            Workspace?                   @relation("PersonalWorkspaceOwner")
   workspaceMemberships         WorkspaceMember[]
@@ -154,29 +154,29 @@ model TelegramNotificationChannel {
 }
 
 model VerificationChallenge {
-  id                String                       @id @default(cuid())
-  userId            String?                      @map("user_id")
-  type              VerificationChallengeType
-  purpose           VerificationChallengePurpose
-  value             String
-  passwordHash      String?                      @map("password_hash")
-  codeHash          String                       @map("code_hash")
-  attempts          Int                          @default(0)
-  telegramUserId    String?                      @map("telegram_user_id")
-  telegramChatId    String?                      @map("telegram_chat_id")
-  telegramUsername  String?                      @map("telegram_username")
-  telegramFirstName String?                      @map("telegram_first_name")
-  telegramLastName  String?                      @map("telegram_last_name")
-  expiresAt         DateTime                     @map("expires_at")
-  lastSentAt        DateTime                     @default(now()) @map("last_sent_at")
-  createdAt         DateTime                     @default(now()) @map("created_at")
-  updatedAt         DateTime                     @updatedAt @map("updated_at")
-  emailDeliveryManaged Boolean                   @default(false) @map("email_delivery_managed")
-  emailResendAvailableAt DateTime?                @map("email_resend_available_at")
-  deliveryLeaseToken String?                      @map("delivery_lease_token") @db.Uuid
-  deliveryLeaseExpiresAt DateTime?                @map("delivery_lease_expires_at")
-  emailAttempts     VerificationEmailAttempt[]
-  user              User?                        @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  id                     String                       @id @default(cuid())
+  userId                 String?                      @map("user_id")
+  type                   VerificationChallengeType
+  purpose                VerificationChallengePurpose
+  value                  String
+  passwordHash           String?                      @map("password_hash")
+  codeHash               String                       @map("code_hash")
+  attempts               Int                          @default(0)
+  telegramUserId         String?                      @map("telegram_user_id")
+  telegramChatId         String?                      @map("telegram_chat_id")
+  telegramUsername       String?                      @map("telegram_username")
+  telegramFirstName      String?                      @map("telegram_first_name")
+  telegramLastName       String?                      @map("telegram_last_name")
+  expiresAt              DateTime                     @map("expires_at")
+  lastSentAt             DateTime                     @default(now()) @map("last_sent_at")
+  createdAt              DateTime                     @default(now()) @map("created_at")
+  updatedAt              DateTime                     @updatedAt @map("updated_at")
+  emailDeliveryManaged   Boolean                      @default(false) @map("email_delivery_managed")
+  emailResendAvailableAt DateTime?                    @map("email_resend_available_at")
+  deliveryLeaseToken     String?                      @map("delivery_lease_token") @db.Uuid
+  deliveryLeaseExpiresAt DateTime?                    @map("delivery_lease_expires_at")
+  emailAttempts          VerificationEmailAttempt[]
+  user                   User?                        @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: Cascade)
 
   @@unique([userId, type, purpose])
   @@unique([type, purpose, value])
@@ -204,18 +204,18 @@ model VerificationEmailAttempt {
 }
 
 model EmailPasswordRecovery {
-  id                 String   @id @default(uuid()) @db.Uuid
-  userId             String   @map("user_id")
-  authIdentityId     String   @map("auth_identity_id")
-  identityValue      String   @map("identity_value")
+  id                 String    @id @default(uuid()) @db.Uuid
+  userId             String    @map("user_id")
+  authIdentityId     String    @map("auth_identity_id")
+  identityValue      String    @map("identity_value")
   identityVerifiedAt DateTime? @map("identity_verified_at")
-  passwordHash       String   @map("password_hash")
-  basePasswordHash   String   @map("base_password_hash")
-  outcome            String   @db.VarChar(16)
-  expiresAt          DateTime @map("expires_at")
-  createdAt          DateTime @default(now()) @map("created_at")
+  passwordHash       String    @map("password_hash")
+  basePasswordHash   String    @map("base_password_hash")
+  outcome            String    @db.VarChar(16)
+  expiresAt          DateTime  @map("expires_at")
+  createdAt          DateTime  @default(now()) @map("created_at")
   consumedAt         DateTime? @map("consumed_at")
-  user               User     @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+  user               User      @relation(fields: [userId], references: [id], onDelete: Cascade, onUpdate: Cascade)
 
   @@index([userId, createdAt])
   @@index([expiresAt])

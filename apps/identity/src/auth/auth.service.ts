@@ -107,7 +107,11 @@ export class AuthService {
 			{ purpose: 'REGISTER', value: email },
 			await hash(dto.password, PASSWORD_SALT_ROUNDS)
 		);
-		return { email: value, ...timing };
+		return {
+			email: value,
+			expiresAt: timing.expiresAt,
+			resendAvailableAt: timing.resendAvailableAt
+		};
 	}
 
 	async resendEmailCode(dto: ResendEmailCodeDto) {
@@ -123,7 +127,11 @@ export class AuthService {
 			purpose: 'REGISTER',
 			value: email
 		});
-		return { email: value, ...timing };
+		return {
+			email: value,
+			expiresAt: timing.expiresAt,
+			resendAvailableAt: timing.resendAvailableAt
+		};
 	}
 
 	async registerByEmail(dto: EmailRegisterDto, request?: Request) {

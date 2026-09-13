@@ -672,11 +672,19 @@ Production-инцидент 06.09.2026 показал, что `process.exitCode 
 не открыт и Docker считает контейнер unhealthy. Одного порядка запуска
 Compose недостаточно при автоматическом старте контейнеров после reboot VPS.
 
-Проверить аналогичные entrypoints Identity, Platform, Reporting,
-Widgets и Gateway: наличие того же catch в коде — риск,
-но не доказательство текущего отказа этих healthy сервисов. Перед их
-выборочным выпуском воспроизвести зависшие handles, проверить successful
-startup/обычный graceful shutdown и отсутствие преждевременной обработки.
+13.09.2026 после обслуживания VPS тот же зависший bootstrap подтверждён
+у Identity worker/outbox, Platform outbox, Widgets и Reporting: после
+стартового тайм-аута процессы оставались живыми без готового HTTP listener.
+Мягкий перезапуск тех же контейнеров на прежних образах после готовности
+БД/RabbitMQ восстановил health; риск повторения при следующем reboot остаётся.
+Перед остановкой и после неё owner-only проверки не обнаружили активных
+receipts/outbox, RabbitMQ unacked/unconfirmed также были равны нулю.
+
+Проверить entrypoints Identity, Platform, Reporting, Widgets и Gateway;
+для остальных процессов наличие того же catch остаётся риском, а не
+доказательством текущего отказа. Перед выборочным исправлением воспроизвести
+зависшие handles, проверить successful startup/обычный graceful shutdown
+и отсутствие преждевременной обработки.
 Для каждого исправления доказать ограниченное по времени закрытие частично
 созданного context, гарантированный nonzero exit и автоматический restart
 после поздней готовности RabbitMQ на exact image.
