@@ -1471,7 +1471,7 @@ jobs:
           done
 
   deploy-production:
-    name: Deploy CRM live updates
+    name: Deploy CRM Sales runtime
     needs:
       - billing-crm-policy-integration
       - billing-wincrm-commerce-integration
@@ -1488,13 +1488,13 @@ jobs:
       - service-integration
       - widgets-integration
     if: github.event_name == 'push' && github.ref == 'refs/heads/prod'
-    uses: nda17/winwidget.ru_infra/.github/workflows/deploy-production.yml@fd79955486c2e2fd9a49054265e0181b448865f5
+    uses: nda17/winwidget.ru_infra/.github/workflows/deploy-production.yml@b66b2a0eb54339c4c70aff5250dfa0eb9ef992a7
     with:
       services_revision: ${{ github.sha }}
-      release_scope: crm-live-updates
-      expected_live_revision: '5c1636d938a34df72f757170c92e6f86767884cd'
+      release_scope: crm-sales-runtime
+      expected_live_revision: '9a40ceecf9374aa688ee8d029ea7ade38d92d2f5'
       expected_service_env_sha256: 'cab70688122306a71cb345c9c7031814048b47b70aca5ed677c9be01ab995e51'
-      expected_crm_upgrade_baseline_sha256: '41b173efa3966edee4c55f22868c7f57dd317a8e73e7c2a817513083267b1dde'
+      expected_crm_upgrade_baseline_sha256: 'c57dc56c3d260572fd28f9c97adec535d20a7eb080cbc7f0654c4ca6460b4071'
     secrets:
       BACKEND_PRODUCTION_SSH_HOST: ${{ secrets.PRODUCTION_SSH_HOST }}
       BACKEND_PRODUCTION_SSH_PORT: ${{ secrets.PRODUCTION_SSH_PORT }}

@@ -508,7 +508,7 @@ if (!servicesWorkflow.includes('node .github/scripts/test-crm-bootstrap-failure.
 	throw new Error('CRM bounded bootstrap process gate is missing');
 }
 const pinnedInfraRevision =
-	'fd79955486c2e2fd9a49054265e0181b448865f5';
+	'b66b2a0eb54339c4c70aff5250dfa0eb9ef992a7';
 for (const evidence of [
 	"cancel-in-progress: ${{ github.ref != 'refs/heads/prod' }}",
 	'operations-control-ledger:',
@@ -568,21 +568,21 @@ if (
 	infraReleaseReferences.length !== 1 ||
 	infraReleaseReferences.some(reference => reference[1] !== pinnedInfraRevision)
 ) {
-	throw new Error('CRM live release must use one exact reviewed infra SHA');
+	throw new Error('CRM Sales runtime release must use one exact reviewed infra SHA');
 }
-// Only the scoped CRM live transition may run after the current CI gates.
+// Only the scoped CRM Sales runtime update may run after the current CI gates.
 const deployment = servicesWorkflow.slice(servicesWorkflow.indexOf('  deploy-production:'));
 for (const line of [
- 'release_scope: crm-live-updates',
+ 'release_scope: crm-sales-runtime',
  'services_revision: ${{ github.sha }}',
- "expected_live_revision: '5c1636d938a34df72f757170c92e6f86767884cd'",
+ "expected_live_revision: '9a40ceecf9374aa688ee8d029ea7ade38d92d2f5'",
  "expected_service_env_sha256: 'cab70688122306a71cb345c9c7031814048b47b70aca5ed677c9be01ab995e51'",
- "expected_crm_upgrade_baseline_sha256: '41b173efa3966edee4c55f22868c7f57dd317a8e73e7c2a817513083267b1dde'"
-]) if (!deployment.includes(line)) throw new Error('CRM live release baseline or exact revision is missing');
+ "expected_crm_upgrade_baseline_sha256: 'c57dc56c3d260572fd28f9c97adec535d20a7eb080cbc7f0654c4ca6460b4071'"
+]) if (!deployment.includes(line)) throw new Error('CRM Sales runtime release baseline or exact revision is missing');
 if (/expected_identity_\w+:|expected_operations_\w+:|expected_support_\w+:|operations_runtime_revision:|operations_evidence_sha256:/.test(deployment))
- throw new Error('CRM live release cannot inherit foreign or destructive release authority');
+ throw new Error('CRM Sales runtime release cannot inherit foreign or destructive release authority');
 if (/release_scope: (?:crm-prepare|crm-databases|crm-runtime|all)\b/.test(servicesWorkflow))
- throw new Error('CRM live release cannot replay provisioning or a broad rollout');
+ throw new Error('CRM Sales runtime release cannot replay provisioning or a broad rollout');
 
 const rootReadme = readFileSync('README.md', 'utf8');
 if (
