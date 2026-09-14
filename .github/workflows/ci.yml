@@ -1488,13 +1488,13 @@ jobs:
       - service-integration
       - widgets-integration
     if: github.event_name == 'push' && github.ref == 'refs/heads/prod'
-    uses: nda17/winwidget.ru_infra/.github/workflows/deploy-production.yml@11221e6c252fff945210566869856c7edf21f44d
+    uses: nda17/winwidget.ru_infra/.github/workflows/deploy-production.yml@c5a735e6dcb7ddd037498d0eb8856dce27e516e0
     with:
       services_revision: ${{ github.sha }}
       release_scope: crm-live-updates
       expected_live_revision: '5c1636d938a34df72f757170c92e6f86767884cd'
       expected_service_env_sha256: 'cab70688122306a71cb345c9c7031814048b47b70aca5ed677c9be01ab995e51'
-      expected_crm_upgrade_baseline_sha256: '3d7b66e4cecd8db22369eca37aebbd43df3f15e3146a415ceebf9bd7250d885e'
+      expected_crm_upgrade_baseline_sha256: '41b173efa3966edee4c55f22868c7f57dd317a8e73e7c2a817513083267b1dde'
     secrets:
       BACKEND_PRODUCTION_SSH_HOST: ${{ secrets.PRODUCTION_SSH_HOST }}
       BACKEND_PRODUCTION_SSH_PORT: ${{ secrets.PRODUCTION_SSH_PORT }}

@@ -508,7 +508,7 @@ if (!servicesWorkflow.includes('node .github/scripts/test-crm-bootstrap-failure.
 	throw new Error('CRM bounded bootstrap process gate is missing');
 }
 const pinnedInfraRevision =
-	'11221e6c252fff945210566869856c7edf21f44d';
+	'c5a735e6dcb7ddd037498d0eb8856dce27e516e0';
 for (const evidence of [
 	"cancel-in-progress: ${{ github.ref != 'refs/heads/prod' }}",
 	'operations-control-ledger:',
@@ -577,7 +577,7 @@ for (const line of [
  'services_revision: ${{ github.sha }}',
  "expected_live_revision: '5c1636d938a34df72f757170c92e6f86767884cd'",
  "expected_service_env_sha256: 'cab70688122306a71cb345c9c7031814048b47b70aca5ed677c9be01ab995e51'",
- "expected_crm_upgrade_baseline_sha256: '3d7b66e4cecd8db22369eca37aebbd43df3f15e3146a415ceebf9bd7250d885e'"
+ "expected_crm_upgrade_baseline_sha256: '41b173efa3966edee4c55f22868c7f57dd317a8e73e7c2a817513083267b1dde'"
 ]) if (!deployment.includes(line)) throw new Error('CRM live release baseline or exact revision is missing');
 if (/expected_identity_\w+:|expected_operations_\w+:|expected_support_\w+:|operations_runtime_revision:|operations_evidence_sha256:/.test(deployment))
  throw new Error('CRM live release cannot inherit foreign or destructive release authority');
