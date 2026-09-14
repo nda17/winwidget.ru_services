@@ -45,5 +45,9 @@ export const DATABASE_RESTORE_ACL_CONTRACTS: Record<
 			'refresh_current_semantic_fingerprint(text)'
 		]
 	},
-	support: STANDARD(['enforce_service_identity_integrity()'])
+	support: STANDARD([
+		'enforce_service_identity_integrity()',
+		'notify_live_change()',
+		'notify_live_read()'
+	])
 };
