@@ -145,3 +145,9 @@ export class SupportNotificationSettingsDto extends SupportCommandDto {
 	telegramThreadId!: number | null;
 	@IsBoolean() clientEmailEnabled!: boolean;
 }
+
+export class SupportNotificationsQuery extends SupportListDto {
+	@ValidateIf((_object, value) => value !== undefined)
+	@IsIn(['true', 'false'])
+	unreadOnly?: string;
+}

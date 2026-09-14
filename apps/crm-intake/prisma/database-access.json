@@ -28,7 +28,9 @@
 		"widget_control_outbox": ["SELECT", "INSERT", "UPDATE"],
 		"widget_transfer_receipts": ["SELECT", "INSERT", "UPDATE"],
 		"widget_entry_snapshots": ["SELECT", "INSERT"],
-		"widget_transfer_outbox": ["SELECT", "INSERT", "UPDATE"]
+		"widget_transfer_outbox": ["SELECT", "INSERT", "UPDATE"],
+		"inbox_notifications": ["SELECT", "INSERT"],
+		"inbox_notification_reads": ["SELECT", "INSERT", "UPDATE"]
 	},
 	"sequences": {},
 	"types": [],
@@ -39,6 +41,8 @@
 		"widget_control_immutable",
 		"widget_control_integrity",
 		"widget_transfer_immutable",
-		"widget_transfer_integrity"
+		"widget_transfer_integrity",
+		"notify_live_change",
+		"record_inbox_notification"
 	]
 }

@@ -20,6 +20,7 @@ import {
 	SupportHistoryDto,
 	SupportMessageDto,
 	SupportNotificationSettingsDto,
+	SupportNotificationsQuery,
 	SupportStatusDto
 } from './support-web.dto';
 import { SupportWebIdentityClient } from './support-web-identity.client';
@@ -156,6 +157,47 @@ export class SupportConversationsService {
 					items: selected.map(row => this.messageDto(row)),
 					hasMore: rows.length > dto.limit,
 					lastSequence: conversation.lastSequence
+				};
+			},
+			{ isolationLevel: 'RepeatableRead' }
+		);
+	}
+	async listNotifications(
+		dto: SupportNotificationsQuery,
+		actor: SupportActor
+	) {
+		const joins = Prisma.sql`FROM support.web_messages m JOIN support.web_conversations c ON c.id=m.conversation_id
+   LEFT JOIN support.web_read_states r ON r.conversation_id=c.id AND r.reader_subject=${actor.subject}`;
+		const scope = Prisma.sql`c.author_subject=${actor.subject} AND m.sender_kind::text='OPERATOR'`;
+		const unread = Prisma.sql`m.sequence>COALESCE(r.through_sequence,0)`;
+		return this.prisma.$transaction(
+			async tx => {
+				const [counts] = await tx.$queryRaw<
+					{ total: bigint; unread: bigint }[]
+				>`SELECT count(*) AS total, count(*) FILTER(WHERE ${unread}) AS unread ${joins} WHERE ${scope}`;
+				const rows = await tx.$queryRaw<
+					{
+						id: string;
+						conversationId: string;
+						title: string;
+						sequence: number;
+						createdAt: Date;
+						readAt: Date | null;
+					}[]
+				>`SELECT m.id,c.id AS "conversationId",c.subject AS title,m.sequence,m.created_at AS "createdAt",CASE WHEN ${unread} THEN NULL ELSE r.updated_at END AS "readAt" ${joins} WHERE ${scope} ${dto.unreadOnly === 'true' ? Prisma.sql`AND ${unread}` : Prisma.empty} ORDER BY m.created_at DESC,m.id DESC LIMIT ${dto.limit} OFFSET ${(dto.page - 1) * dto.limit}`;
+				return {
+					schemaVersion: 1,
+					page: dto.page,
+					pageSize: dto.limit,
+					total: Number(
+						dto.unreadOnly === 'true' ? counts.unread : counts.total
+					),
+					unreadCount: Number(counts.unread),
+					items: rows.map(row => ({
+						...row,
+						createdAt: row.createdAt.toISOString(),
+						readAt: row.readAt?.toISOString() ?? null
+					}))
 				};
 			},
 			{ isolationLevel: 'RepeatableRead' }

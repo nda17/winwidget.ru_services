@@ -1,3 +1,5 @@
+import { LiveChangesService } from './live/live-changes.service';
+import { LiveChangesController } from './live/live-changes.controller';
 import { Module } from '@nestjs/common';
 import { SalesExportController } from './exports/export.controller';
 import { SalesExportService } from './exports/export.service';
@@ -43,6 +45,7 @@ import { TaskNotificationsService } from './task-notifications/task-notification
 		CrmSalesPrismaModule
 	],
 	controllers: [
+		LiveChangesController,
 		CrmSalesHealthController,
 		PipelineTemplateCatalogController,
 		PipelineTemplateInstallationController,
@@ -56,6 +59,7 @@ import { TaskNotificationsService } from './task-notifications/task-notification
 		IntakeOperationController
 	],
 	providers: [
+		LiveChangesService,
 		CrmSalesHealthService,
 		CrmSalesInternalGuard,
 		PipelineTemplateCatalogService,

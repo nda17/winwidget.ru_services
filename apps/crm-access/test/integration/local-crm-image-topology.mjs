@@ -110,6 +110,7 @@ const mutableTables = {
 		'crm_billing_operations'
 	],
 	'crm-intake': [
+		'inbox_notification_reads',
 		'inbox_entries',
 		'intake_sources',
 		'acceptances',
@@ -142,6 +143,7 @@ const mutableTables = {
 const appendOnlyTables = {
 	'crm-access': ['crm_team_command_receipts', 'crm_team_audit'],
 	'crm-intake': [
+		'inbox_notifications',
 		'intake_commands',
 		'intake_activities',
 		'inbound_receipts',

@@ -212,7 +212,7 @@
 			]
 		},
 		"support": {
-			"manifestSha256": "393231132822dbad4f14df1ad65d3375e4fa31d66e3fbda37aacc519c22e47c1",
+			"manifestSha256": "76f34ea4c0e3ff550a20e5243112dca0e33e1c19ab467b7fed382f7101dafda5",
 			"migrations": [
 				{
 					"name": "20260824010000_init_support",
@@ -229,6 +229,10 @@
 				{
 					"name": "20260909160000_add_web_support_chat",
 					"checksum": "cbd494aed27135389d38b89028035c439beaafe69f32ebae85d592f0a53f5a38"
+				},
+				{
+					"name": "20260914090000_add_live_changes",
+					"checksum": "ecae3c689cc12e1ee19193c63341aa58792efbec431361a180723d76f163993b"
 				}
 			]
 		},
@@ -270,7 +274,7 @@
 			]
 		},
 		"crm-intake": {
-			"manifestSha256": "be05aa9dae1dc37ec139f3deca44975d25d765568a711a7c18957401e08bb9be",
+			"manifestSha256": "1f9164f51d0b760e5a2d986d3fbc3ca2f57676abf4885b1719b8b9dcae73ab37",
 			"migrations": [
 				{
 					"name": "20260902010000_init_crm_intake",
@@ -307,11 +311,15 @@
 				{
 					"name": "20260908150000_add_intake_sla",
 					"checksum": "589b0303e2153e90d5a2edf6dc9655a1a4d96f59ade4f7057d17419bcd7b3234"
+				},
+				{
+					"name": "20260914090000_add_live_changes",
+					"checksum": "edb584ca0138d0dbb4bdf05a69e56792e2455484ff60ba5a971601e510edb468"
 				}
 			]
 		},
 		"crm-customers": {
-			"manifestSha256": "7dd82cb9ce3c8956fbac6469207b87cc36e85addc0feacef853d550e3d88722b",
+			"manifestSha256": "6b2f5532dcfea7ec6a40fea01f13415fa5715359b85c19f03df77c26ca1e76cd",
 			"migrations": [
 				{
 					"name": "20260902011000_init_crm_customers",
@@ -336,11 +344,15 @@
 				{
 					"name": "20260907223000_add_contact_call_preferences",
 					"checksum": "6ec838976adc8aa583b29a7732fe9cbddabb60d63ab7efd3b67c7d78968e0fec"
+				},
+				{
+					"name": "20260914090000_add_live_changes",
+					"checksum": "7754cb433fc589ed2d99924633d425be6c5286447160e51d10162e84205b9cef"
 				}
 			]
 		},
 		"crm-sales": {
-			"manifestSha256": "69a0cb6be857019f95a0c7bb20f97a282670e27637b0bc2f2ed4fdb297c5fa3e",
+			"manifestSha256": "b2ce00491a59131d4d99d298449cae796a16bd5d6291ff42ba7c8d21ad54bbdc",
 			"migrations": [
 				{
 					"name": "20260902012000_init_crm_sales",
@@ -401,6 +413,10 @@
 				{
 					"name": "20260908140000_add_task_notification_center",
 					"checksum": "799490bcf980d282ef48041934b8728dc6554d0db267455051b145fb0b7eef8a"
+				},
+				{
+					"name": "20260914090000_add_live_changes",
+					"checksum": "1b7ae7654138f12deea3bf6d3c919ec5faf9e97b57f71e16b4ee56582b729ceb"
 				}
 			]
 		}

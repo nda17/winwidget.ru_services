@@ -1,3 +1,7 @@
+import { InboxNotificationsController } from './notifications/inbox-notifications.controller';
+import { InboxNotificationsService } from './notifications/inbox-notifications.service';
+import { LiveChangesService } from './live/live-changes.service';
+import { LiveChangesController } from './live/live-changes.controller';
 import { Module } from '@nestjs/common';
 import { IntakeExportController } from './exports/export.controller';
 import { IntakeExportService } from './exports/export.service';
@@ -89,6 +93,8 @@ const controlPublisher =
 		...(api
 			? [
 					IntakeController,
+					InboxNotificationsController,
+					LiveChangesController,
 					IntakeExportController,
 					IntakeIngestionController,
 					AcceptanceController,
@@ -131,6 +137,8 @@ const controlPublisher =
 		...(api
 			? [
 					IntakeService,
+					InboxNotificationsService,
+					LiveChangesService,
 					WidgetTransferService,
 					IntakeExportService,
 					IntakeCsvImportService,

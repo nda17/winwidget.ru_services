@@ -28,6 +28,9 @@ const migrator = new PrismaClient({
 	datasources: { db: { url: migrationUrl } }
 });
 const service = new IntakeService(runtime);
+const { InboxNotificationsService } =
+	await import('../../dist/src/notifications/inbox-notifications.service.js');
+const notifications = new InboxNotificationsService(runtime);
 const workspaceIds = [randomUUID(), randomUUID(), randomUUID()];
 const context = access(workspaceIds[0]);
 const token = randomBytes(32).toString('base64url');
@@ -89,6 +92,76 @@ try {
 		email: 'ANNA@EXAMPLE.TEST'
 	});
 	const first = await service.createManual(context, create);
+	const notificationQuery = {
+		workspaceId: context.workspaceId,
+		page: 1,
+		pageSize: 10
+	};
+	const firstNotifications = await notifications.list(
+		context,
+		notificationQuery
+	);
+	assert.equal(firstNotifications.unreadCount, 1);
+	assert.equal(firstNotifications.items[0].entryId, first.entry.id);
+	const notificationId = firstNotifications.items[0].id;
+	assert.equal(
+		(
+			await notifications.list(
+				{ ...context, subject: 'other', dataScope: 'OWN' },
+				notificationQuery
+			)
+		).total,
+		0
+	);
+	assert.equal(
+		(
+			await notifications.list(access(workspaceIds[1]), {
+				...notificationQuery,
+				workspaceId: workspaceIds[1]
+			})
+		).total,
+		0
+	);
+	await assert.rejects(
+		notifications.setRead(
+			{ ...context, subject: 'other', dataScope: 'OWN' },
+			notificationId,
+			{ schemaVersion: 1, workspaceId: context.workspaceId, read: true }
+		),
+		http(404)
+	);
+	await notifications.setRead(
+		{ ...context, state: 'READ_ONLY' },
+		notificationId,
+		{ schemaVersion: 1, workspaceId: context.workspaceId, read: true }
+	);
+	assert.equal(
+		(await notifications.list(context, notificationQuery)).unreadCount,
+		0
+	);
+	assert.equal(
+		(
+			await notifications.list(
+				{ ...context, subject: 'colleague' },
+				notificationQuery
+			)
+		).unreadCount,
+		1
+	);
+	await notifications.setRead(context, notificationId, {
+		schemaVersion: 1,
+		workspaceId: context.workspaceId,
+		read: false
+	});
+	assert.equal(
+		(
+			await notifications.list(context, {
+				...notificationQuery,
+				unreadOnly: 'true'
+			})
+		).total,
+		1
+	);
 	assert.equal(first.entry.status, 'NEW');
 	assert.equal(first.entry.origin, 'MANUAL');
 	assert.equal(first.entry.contactId, null);

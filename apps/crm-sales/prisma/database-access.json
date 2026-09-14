@@ -37,6 +37,7 @@
 		"reject_reminder_command_mutation",
 		"wake_task_reminders",
 		"track_task_assignment",
-		"record_task_notifications"
+		"record_task_notifications",
+		"notify_live_change"
 	]
 }

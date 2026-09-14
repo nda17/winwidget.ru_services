@@ -212,7 +212,7 @@
 			]
 		},
 		"support": {
-			"manifestSha256": "393231132822dbad4f14df1ad65d3375e4fa31d66e3fbda37aacc519c22e47c1",
+			"manifestSha256": "76f34ea4c0e3ff550a20e5243112dca0e33e1c19ab467b7fed382f7101dafda5",
 			"migrations": [
 				{
 					"name": "20260824010000_init_support",
@@ -229,6 +229,10 @@
 				{
 					"name": "20260909160000_add_web_support_chat",
 					"checksum": "cbd494aed27135389d38b89028035c439beaafe69f32ebae85d592f0a53f5a38"
+				},
+				{
+					"name": "20260914090000_add_live_changes",
+					"checksum": "ecae3c689cc12e1ee19193c63341aa58792efbec431361a180723d76f163993b"
 				}
 			]
 		}

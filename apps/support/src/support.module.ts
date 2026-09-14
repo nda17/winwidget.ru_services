@@ -1,3 +1,5 @@
+import { LiveChangesService } from './live/live-changes.service';
+import { LiveChangesController } from './live/live-changes.controller';
 import { Module, OnApplicationShutdown } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { IdentityIntrospectionClient } from './auth/identity-introspection.client';
@@ -49,6 +51,7 @@ const API_CONTROLLERS =
 	PROCESS_ROLE === 'api'
 		? [
 				SupportWebController,
+				LiveChangesController,
 				SupportWebAdminController,
 				SupportNotificationsController,
 				SupportWebhookController,
@@ -65,6 +68,7 @@ const API_PROVIDERS =
 				SupportWebIdentityClient,
 				SupportWebRateGuard,
 				SupportConversationsService,
+				LiveChangesService,
 				SupportAttachmentsService,
 				SupportAttachmentStorageService,
 				SupportNotificationsService,

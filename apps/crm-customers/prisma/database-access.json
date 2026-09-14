@@ -14,5 +14,5 @@
 	},
 	"sequences": {},
 	"types": [],
-	"routines": []
+	"routines": ["notify_live_change"]
 }

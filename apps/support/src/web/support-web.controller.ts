@@ -41,6 +41,7 @@ import {
 	SupportListDto,
 	SupportMessageDto,
 	SupportNotificationSettingsDto,
+	SupportNotificationsQuery,
 	SupportReadDto,
 	SupportStatusDto,
 	SupportUploadDto
@@ -140,6 +141,14 @@ export class SupportWebController {
 		@CurrentSupportActor() actor: SupportActor
 	) {
 		return this.conversations.read(id, dto.throughSequence, actor);
+	}
+	@Get('notifications')
+	@Header('Cache-Control', 'no-store')
+	notifications(
+		@Query() dto: SupportNotificationsQuery,
+		@CurrentSupportActor() actor: SupportActor
+	) {
+		return this.conversations.listNotifications(dto, actor);
 	}
 	@Get('unread-count')
 	@Header('Cache-Control', 'no-store')

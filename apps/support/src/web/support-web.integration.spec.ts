@@ -308,6 +308,26 @@ integration('Support web PostgreSQL transaction integration', () => {
 			true
 		);
 		expect(reply.message.senderName).toBe('Специалист поддержки');
+		const query = { page: 1, limit: 10 };
+		const feed = await service.listNotifications(query, actor);
+		expect(feed.items.map(item => item.id)).toContain(reply.message.id);
+		expect(
+			(await service.listNotifications(query, other)).items
+		).toHaveLength(0);
+		const unreadBefore = feed.unreadCount;
+		await service.read(id, reply.message.sequence, actor);
+		expect(
+			(await service.listNotifications(query, actor)).unreadCount
+		).toBe(unreadBefore - 1);
+		expect(
+			(
+				await service.listNotifications(
+					{ ...query, unreadOnly: 'true' },
+					actor
+				)
+			).items.map(item => item.id)
+		).not.toContain(reply.message.id);
+
 		expect(
 			await prisma.supportMessage.findUniqueOrThrow({
 				where: { id: reply.message.id }
@@ -329,7 +349,7 @@ integration('Support web PostgreSQL transaction integration', () => {
 				'support-client-email'
 			)
 		).rejects.toThrow('Identity unavailable');
-		expect((await service.detail(id, actor)).unreadCount).toBe(1);
+		expect((await service.detail(id, actor)).unreadCount).toBe(0);
 		expect(
 			(await service.history(id, { limit: 50 }, actor)).items.at(-1)?.id
 		).toBe(reply.message.id);

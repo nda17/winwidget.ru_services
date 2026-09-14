@@ -1,3 +1,5 @@
+import { LiveChangesService } from './live/live-changes.service';
+import { LiveChangesController } from './live/live-changes.controller';
 import { Module } from '@nestjs/common';
 import { CustomersExportController } from './exports/export.controller';
 import { CustomersExportService } from './exports/export.service';
@@ -26,6 +28,7 @@ import {
 		CrmCustomersPrismaModule
 	],
 	controllers: [
+		LiveChangesController,
 		CrmCustomersHealthController,
 		CustomersController,
 		CompaniesV2Controller,
@@ -35,6 +38,7 @@ import {
 		ContactIntakeOperationController
 	],
 	providers: [
+		LiveChangesService,
 		CrmCustomersHealthService,
 		CustomersAuthorizationClient,
 		CustomersService,
