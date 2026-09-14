@@ -251,3 +251,73 @@ describe('additive deal list without-next-action filter', () => {
 		}
 	);
 });
+
+describe('deal report drill-down and ordering', () => {
+	it.each(['OWN', 'TEAM', 'ALL'] as const)(
+		'retains %s access scope alongside assignee, creation period and overdue task filters',
+		async dataScope => {
+			const { service, count, findMany } = harness();
+			const scoped = { ...access, dataScope, teamIds: [teamId] };
+			const cutoff = '2026-09-14T12:00:00.000Z';
+			await service.deals(scoped, {
+				...query,
+				assignedToSubject: 'other',
+				createdFrom: '2026-09-01T00:00:00.000Z',
+				createdTo: '2026-09-08T00:00:00.000Z',
+				overdue: 'true',
+				overdueBefore: cutoff,
+				sort: 'amount_desc'
+			});
+			const where = count.mock.calls[0][0].where as {
+				AND: Prisma.DealWhereInput[];
+			};
+			expect(where.AND[0]).toEqual(salesScope(scoped));
+			expect(where.AND[1]).toMatchObject({
+				assignedToSubject: 'other',
+				createdAt: {
+					gte: new Date('2026-09-01T00:00:00.000Z'),
+					lt: new Date('2026-09-08T00:00:00.000Z')
+				}
+			});
+			expect(where.AND[2]).toEqual({
+				status: 'OPEN',
+				tasks: {
+					some: {
+						status: { in: ['OPEN', 'IN_PROGRESS'] },
+						dueAt: { lt: new Date(cutoff) }
+					}
+				}
+			});
+			expect(findMany.mock.calls[0][0]).toMatchObject({
+				where,
+				skip: 20,
+				take: 20,
+				orderBy: [{ amountMinor: 'desc' }, { id: 'desc' }]
+			});
+		}
+	);
+	it('orders the next-action deadline in PostgreSQL with a stable tie-break before pagination', async () => {
+		const { service, findMany } = harness();
+		await service.deals(access, { ...query, sort: 'next_action_asc' });
+		expect(findMany.mock.calls[0][0].orderBy).toEqual([
+			{ nextAction: { dueAt: 'asc' } },
+			{ id: 'asc' }
+		]);
+	});
+	it('rejects invalid drilldown cutoff and period rather than showing unfiltered deals', async () => {
+		const { service, count } = harness();
+		await expect(
+			service.deals(access, {
+				...query,
+				overdueBefore: '2026-02-30T12:00:00.000Z'
+			})
+		).rejects.toBeInstanceOf(BadRequestException);
+		await expect(
+			service.deals(access, {
+				...query,
+				createdFrom: '2026-09-01T00:00:00.000Z'
+			})
+		).rejects.toBeInstanceOf(BadRequestException);
+		expect(count).not.toHaveBeenCalled();
+	});
+});

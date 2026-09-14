@@ -21,6 +21,7 @@ import {
 	CompleteTaskDto,
 	CreateDealDto,
 	DealListQuery,
+	SalesAnalyticsQuery,
 	SalesListQuery,
 	TransitionDealDto,
 	VersionedSalesCommand,
@@ -77,10 +78,10 @@ export class SalesController {
 	@Get('analytics')
 	@SalesPermission('sales:analytics')
 	analytics(
-		@Query() _query: WorkspaceQuery,
+		@Query() query: SalesAnalyticsQuery,
 		@Req() request: SalesRequest
 	) {
-		return this.service.analytics(request.salesAccess);
+		return this.service.analytics(request.salesAccess, query);
 	}
 
 	@Post('deals')

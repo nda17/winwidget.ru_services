@@ -19,6 +19,22 @@ import {
 export class WorkspaceQuery {
 	@IsUUID('4') workspaceId!: string;
 }
+export class SalesPeriodQuery extends WorkspaceQuery {
+	@ValidateIf((_object, value) => value !== undefined)
+	@IsString()
+	@Matches(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/)
+	createdFrom?: string;
+	@ValidateIf((_object, value) => value !== undefined)
+	@IsString()
+	@Matches(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/)
+	createdTo?: string;
+}
+export class SalesAnalyticsQuery extends SalesPeriodQuery {
+	@ValidateIf((_object, value) => value !== undefined)
+	@IsIn(['true'])
+	details?: 'true';
+	@Type(() => Number) @IsInt() @Min(1) @Max(1000000) assigneePage = 1;
+}
 export class SalesListQuery extends WorkspaceQuery {
 	@Type(() => Number) @IsInt() @Min(1) @Max(1000000) page = 1;
 	@Type(() => Number) @IsInt() @Min(1) @Max(100) pageSize = 20;
@@ -35,6 +51,32 @@ export class DealListQuery extends SalesListQuery {
 	@ValidateIf((_object, value) => value !== undefined)
 	@IsIn(['true', 'false'])
 	withoutNextAction?: 'true' | 'false';
+	@ValidateIf((_object, value) => value !== undefined)
+	@IsString()
+	@Matches(/^[^\s\x00-\x1f\x7f]{1,256}$/)
+	assignedToSubject?: string;
+	@ValidateIf((_object, value) => value !== undefined)
+	@IsIn(['true', 'false'])
+	overdue?: 'true' | 'false';
+	@ValidateIf((_object, value) => value !== undefined)
+	@IsString()
+	@Matches(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/)
+	overdueBefore?: string;
+	@ValidateIf((_object, value) => value !== undefined)
+	@IsString()
+	@Matches(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/)
+	createdFrom?: string;
+	@ValidateIf((_object, value) => value !== undefined)
+	@IsString()
+	@Matches(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/)
+	createdTo?: string;
+	@ValidateIf((_object, value) => value !== undefined)
+	@IsIn(['created_desc', 'updated_desc', 'amount_desc', 'next_action_asc'])
+	sort?:
+		| 'created_desc'
+		| 'updated_desc'
+		| 'amount_desc'
+		| 'next_action_asc';
 }
 export class NextTaskDto {
 	@IsString() @MinLength(1) @MaxLength(200) @Matches(/\S/) title!: string;

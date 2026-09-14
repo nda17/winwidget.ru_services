@@ -174,7 +174,8 @@ Read-only позволяет чтение; `ANALYST` получает тольк
 - `GET /pipelines` — установленные воронки и этапы workspace;
 - `GET /deals`, `GET /tasks` — серверная пагинация `page` (от 1),
   `pageSize` (1–100), bounded `search`; сделки поддерживают `pipelineId`,
-  `stageId`, `status`;
+  `stageId`, `status`, `assignedToSubject`, `withoutNextAction=true`,
+  `overdue=true`, `createdFrom`/`createdTo` и `sort`;
 - `GET /deals/:id`, `GET /deals/:id/timeline` — карточка и история;
 - `GET /analytics` — число и сумма сделок по статусам без клиентской PII;
 - `POST /deals` — ручная сделка с доступным контактом и первым действием;
@@ -183,6 +184,41 @@ Read-only позволяет чтение; `ANALYST` получает тольк
 - `POST /tasks/:id/complete` — результат текущего действия и обязательное
   следующее; `expectedVersion` относится к задаче;
 - `POST /deals/:id/archive` — мягкое архивирование с отменой активных задач сделки.
+
+Для списка сделок и аналитики `createdFrom`/`createdTo` — парные canonical
+UTC ISO instants, начало включительно, конец исключительно. Фильтр относится
+к **созданию** сделки; допустим период до 366 дней. `sort` принимает
+`created_desc` (по умолчанию), `updated_desc`, `amount_desc`, `next_action_asc`;
+порядок дополняется стабильным `id`. Следующее действие сортируется по сроку
+по возрастанию, отсутствие действия — в конце (PostgreSQL ASC).
+`withoutNextAction=true` выбирает открытые сделки без каких-либо задач
+OPEN/IN_PROGRESS. `overdue=true` выбирает открытые сделки, у которых есть хотя бы
+одна такая задача со сроком строго раньше `overdueBefore` (canonical UTC ISO;
+по умолчанию серверное now). Счётчики и все фильтры применяются до пагинации,
+через AND с workspace/OWN/TEAM/ALL scope. Они не меняют сохранённые назначения.
+
+`GET /analytics` без `details` сохраняет точный прежний response
+`{schemaVersion:1,currency:'RUB',items}`. Только явный `details=true` добавляет
+`overview: {dateBasis:'CREATED_AT',period,previous,asOf,attention,assignees}`.
+`items` — число/сумма сделок, созданных в выбранном периоде, по **текущему**
+статусу; `previous` — такой же срез за непосредственно предшествующий период
+той же длительности. Без дат `period`/`previous` равны null. Это не историческая
+конверсия этапов, не отчёт по дате закрытия и не подтверждённая выручка.
+`attention: {open,overdue,withoutNextAction}` считает текущие открытые сделки
+независимо от периода. `asOf` фиксирует границу просрочки; drill-down передаёт
+её в `overdueBefore`. Изменения сделок после отчёта могут изменить список.
+Все агрегаты одного расширенного отчёта читаются в REPEATABLE READ snapshot.
+
+`assignees` — серверная страница ответственных по видимым неархивным сделкам:
+`assigneePage` от 1, фиксированный `pageSize:20`, `hasMore`, `items`.
+Каждая строка содержит `assignedToSubject`, статусные `items` за период и
+текущие `open`/`overdue`/`withoutNextAction`. Нет загрузки всего каталога или
+всех сделок в браузер. Имена текущих доступных сотрудников frontend получает
+одним bounded запросом Access assignee-labels; Sales не читает чужие таблицы.
+Для ANALYST и доступа без `sales:read` `assignees:null`, доступны только
+обезличенные агрегаты; переходов к карточкам и списка сотрудников нет.
+Архивные сделки исключены из всех частей отчёта. Сбой расчёта/доступа не
+подменяется нулевыми показателями. Миграции, workers и RabbitMQ не добавляются.
 
 Изменяющие DTO включают `schemaVersion: 1`, UUIDv4 `commandId`, совпадающий
 с `Idempotency-Key`, и `workspaceId`; изменение существующей сделки требует

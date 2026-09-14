@@ -19,6 +19,7 @@ import type {
 	CreateDealDto,
 	DealListQuery,
 	NextTaskDto,
+	SalesAnalyticsQuery,
 	SalesCommandDto,
 	SalesListQuery,
 	TransitionDealDto,
@@ -83,6 +84,81 @@ function dealDto(deal: DealWithNextAction) {
 		nextTask: deal.nextAction ? taskDto(deal.nextAction) : null
 	};
 }
+function canonicalInstant(value: string): Date {
+	const date = new Date(value);
+	if (!Number.isFinite(date.getTime()) || date.toISOString() !== value)
+		throw new BadRequestException('Некорректная дата отчёта');
+	return date;
+}
+export function salesCreatedPeriod(query: {
+	createdFrom?: string;
+	createdTo?: string;
+}) {
+	if (query.createdFrom === undefined && query.createdTo === undefined)
+		return null;
+	if (!query.createdFrom || !query.createdTo)
+		throw new BadRequestException('Укажите начало и конец периода');
+	const from = canonicalInstant(query.createdFrom);
+	const to = canonicalInstant(query.createdTo);
+	const duration = to.getTime() - from.getTime();
+	if (
+		duration <= 0 ||
+		duration > 366 * 86400000 ||
+		from.getTime() - duration < 0
+	)
+		throw new BadRequestException(
+			'Период должен быть от 1 мс до 366 дней'
+		);
+	return { createdFrom: from.toISOString(), createdTo: to.toISOString() };
+}
+function periodWhere(
+	period: ReturnType<typeof salesCreatedPeriod>
+): Prisma.DealWhereInput {
+	return period
+		? {
+				createdAt: {
+					gte: new Date(period.createdFrom),
+					lt: new Date(period.createdTo)
+				}
+			}
+		: {};
+}
+function attentionWhere(
+	kind: 'open' | 'overdue' | 'withoutNextAction',
+	asOf: Date
+): Prisma.DealWhereInput {
+	return {
+		status: 'OPEN',
+		...(kind === 'overdue'
+			? {
+					tasks: {
+						some: {
+							status: { in: [...activeTaskStatuses] },
+							dueAt: { lt: asOf }
+						}
+					}
+				}
+			: {}),
+		...(kind === 'withoutNextAction'
+			? { tasks: { none: { status: { in: [...activeTaskStatuses] } } } }
+			: {})
+	};
+}
+type AnalyticsGroup = {
+	status: string;
+	_count: { id: number };
+	_sum: { amountMinor: number | null };
+};
+function analyticsItems(rows: AnalyticsGroup[]) {
+	return (['OPEN', 'WON', 'LOST'] as const).map(status => {
+		const row = rows.find(item => item.status === status);
+		return {
+			status,
+			count: row?._count.id || 0,
+			amountMinor: row?._sum.amountMinor || 0
+		};
+	});
+}
 function canonical(value: unknown): string {
 	if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
 	if (value && typeof value === 'object')
@@ -129,6 +205,10 @@ export class SalesService {
 
 	async deals(access: SalesAccess, query: DealListQuery) {
 		this.permission(access, 'sales:read');
+		const period = salesCreatedPeriod(query);
+		const asOf = query.overdueBefore
+			? canonicalInstant(query.overdueBefore)
+			: new Date();
 		const where: Prisma.DealWhereInput = {
 			AND: [
 				salesScope(access),
@@ -137,6 +217,10 @@ export class SalesService {
 					pipelineId: query.pipelineId,
 					stageId: query.stageId,
 					status: query.status,
+					...(query.assignedToSubject
+						? { assignedToSubject: query.assignedToSubject }
+						: {}),
+					...periodWhere(period),
 					...(query.search
 						? {
 								OR: [
@@ -156,6 +240,9 @@ export class SalesService {
 							}
 						: {})
 				},
+				...(query.overdue === 'true'
+					? [attentionWhere('overdue', asOf)]
+					: []),
 				...(query.withoutNextAction === 'true'
 					? [
 							{
@@ -175,7 +262,14 @@ export class SalesService {
 				where,
 				skip: (query.page - 1) * query.pageSize,
 				take: query.pageSize,
-				orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+				orderBy:
+					query.sort === 'next_action_asc'
+						? [{ nextAction: { dueAt: 'asc' } }, { id: 'asc' }]
+						: query.sort === 'amount_desc'
+							? [{ amountMinor: 'desc' }, { id: 'desc' }]
+							: query.sort === 'updated_desc'
+								? [{ updatedAt: 'desc' }, { id: 'desc' }]
+								: [{ createdAt: 'desc' }, { id: 'desc' }],
 				include: includeNextAction
 			})
 		]);
@@ -263,26 +357,160 @@ export class SalesService {
 		};
 	}
 
-	async analytics(access: SalesAccess) {
+	async analytics(access: SalesAccess, query?: SalesAnalyticsQuery) {
 		this.permission(access, 'sales:analytics');
-		const rows = await this.prisma.deal.groupBy({
-			by: ['status'],
-			where: { AND: [salesScope(access), { archivedAt: null }] },
-			_count: { id: true },
-			_sum: { amountMinor: true }
-		});
-		return {
-			schemaVersion: 1 as const,
-			currency: 'RUB' as const,
-			items: ['OPEN', 'WON', 'LOST'].map(status => {
-				const row = rows.find(item => item.status === status);
-				return {
-					status,
-					count: row?._count.id || 0,
-					amountMinor: row?._sum.amountMinor || 0
-				};
-			})
+		const period = salesCreatedPeriod(query || {});
+		const base: Prisma.DealWhereInput = {
+			AND: [salesScope(access), { archivedAt: null }]
 		};
+		const aggregate = (
+			transaction: Pick<Prisma.TransactionClient, 'deal'>,
+			where: Prisma.DealWhereInput
+		) =>
+			transaction.deal.groupBy({
+				by: ['status'],
+				where,
+				_count: { id: true },
+				_sum: { amountMinor: true }
+			});
+		// Old callers validate exact response keys. Only an explicit opt-in expands the report.
+		if (query?.details !== 'true') {
+			const rows = await aggregate(
+				this.prisma,
+				period ? { AND: [base, periodWhere(period)] } : base
+			);
+			return {
+				schemaVersion: 1 as const,
+				currency: 'RUB' as const,
+				items: analyticsItems(rows)
+			};
+		}
+		const asOf = new Date();
+		const previousPeriod = period
+			? {
+					createdFrom: new Date(
+						2 * Date.parse(period.createdFrom) -
+							Date.parse(period.createdTo)
+					).toISOString(),
+					createdTo: period.createdFrom
+				}
+			: null;
+		const assigneePage = query.assigneePage || 1;
+		const pageSize = 20;
+		const canReadDeals =
+			access.role !== 'ANALYST' &&
+			access.permissions.includes('sales:read');
+		return this.prisma.$transaction(
+			async transaction => {
+				const [
+					rows,
+					previousRows,
+					open,
+					overdue,
+					withoutNextAction,
+					employees
+				] = await Promise.all([
+					aggregate(transaction, { AND: [base, periodWhere(period)] }),
+					previousPeriod
+						? aggregate(transaction, {
+								AND: [base, periodWhere(previousPeriod)]
+							})
+						: Promise.resolve(null),
+					transaction.deal.count({
+						where: { AND: [base, attentionWhere('open', asOf)] }
+					}),
+					transaction.deal.count({
+						where: { AND: [base, attentionWhere('overdue', asOf)] }
+					}),
+					transaction.deal.count({
+						where: {
+							AND: [base, attentionWhere('withoutNextAction', asOf)]
+						}
+					}),
+					canReadDeals
+						? transaction.deal.groupBy({
+								by: ['assignedToSubject'],
+								where: base,
+								orderBy: { assignedToSubject: 'asc' },
+								skip: (assigneePage - 1) * pageSize,
+								take: pageSize + 1
+							})
+						: Promise.resolve([])
+				]);
+				const subjects = employees
+					.slice(0, pageSize)
+					.map(row => row.assignedToSubject);
+				const employeeBase: Prisma.DealWhereInput = {
+					AND: [base, { assignedToSubject: { in: subjects } }]
+				};
+				const [employeeRows, ...workload] = subjects.length
+					? await Promise.all([
+							transaction.deal.groupBy({
+								by: ['assignedToSubject', 'status'],
+								where: { AND: [employeeBase, periodWhere(period)] },
+								_count: { id: true },
+								_sum: { amountMinor: true }
+							}),
+							...(['open', 'overdue', 'withoutNextAction'] as const).map(
+								kind =>
+									transaction.deal.groupBy({
+										by: ['assignedToSubject'],
+										where: {
+											AND: [employeeBase, attentionWhere(kind, asOf)]
+										},
+										_count: { id: true }
+									})
+							)
+						])
+					: [[], [], [], []];
+				return {
+					schemaVersion: 1 as const,
+					currency: 'RUB' as const,
+					items: analyticsItems(rows),
+					overview: {
+						dateBasis: 'CREATED_AT' as const,
+						period,
+						previous:
+							previousPeriod && previousRows
+								? {
+										period: previousPeriod,
+										items: analyticsItems(previousRows)
+									}
+								: null,
+						asOf: asOf.toISOString(),
+						attention: { open, overdue, withoutNextAction },
+						assignees: canReadDeals
+							? {
+									page: assigneePage,
+									pageSize,
+									hasMore: employees.length > pageSize,
+									items: subjects.map(assignedToSubject => ({
+										assignedToSubject,
+										items: analyticsItems(
+											employeeRows.filter(
+												row => row.assignedToSubject === assignedToSubject
+											)
+										),
+										open:
+											workload[0]?.find(
+												row => row.assignedToSubject === assignedToSubject
+											)?._count.id || 0,
+										overdue:
+											workload[1]?.find(
+												row => row.assignedToSubject === assignedToSubject
+											)?._count.id || 0,
+										withoutNextAction:
+											workload[2]?.find(
+												row => row.assignedToSubject === assignedToSubject
+											)?._count.id || 0
+									}))
+								}
+							: null
+					}
+				};
+			},
+			{ isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead }
+		);
 	}
 
 	async create(
