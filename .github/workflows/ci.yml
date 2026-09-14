@@ -1471,7 +1471,7 @@ jobs:
           done
 
   deploy-production:
-    name: Deploy reliable Identity email delivery
+    name: Deploy CRM live updates
     needs:
       - billing-crm-policy-integration
       - billing-wincrm-commerce-integration
@@ -1488,15 +1488,13 @@ jobs:
       - service-integration
       - widgets-integration
     if: github.event_name == 'push' && github.ref == 'refs/heads/prod'
-    uses: nda17/winwidget.ru_infra/.github/workflows/deploy-production.yml@e5a55e68d0b89f79a674d8be769ca45b8e1353d5
+    uses: nda17/winwidget.ru_infra/.github/workflows/deploy-production.yml@d8fd6f0040bab12c70f98785de0dd6efea380891
     with:
       services_revision: ${{ github.sha }}
-      release_scope: identity-email-delivery
-      expected_live_revision: 'eb19be4366d30de1576420a5d52484178bbca9c8'
-      expected_service_env_sha256: 'f0add6db0694e10a0c611d95856b3774b9b998f8924759ce84bc7b4bc5b946eb'
-      expected_identity_workers_revision: '774db6490808cbaff4ff96033c589205cb3935f7'
-      expected_operations_revision: '474d3ab9235002ca3c6c887dace6ccd927a7fdd2'
-      expected_operations_env_sha256: 'bf85df42cd5785af7129279732cb9b6d342a9f29efddc6614c3de2fa5a744660'
+      release_scope: crm-live-updates
+      expected_live_revision: '5c1636d938a34df72f757170c92e6f86767884cd'
+      expected_service_env_sha256: 'cab70688122306a71cb345c9c7031814048b47b70aca5ed677c9be01ab995e51'
+      expected_crm_upgrade_baseline_sha256: '3d7b66e4cecd8db22369eca37aebbd43df3f15e3146a415ceebf9bd7250d885e'
     secrets:
       BACKEND_PRODUCTION_SSH_HOST: ${{ secrets.PRODUCTION_SSH_HOST }}
       BACKEND_PRODUCTION_SSH_PORT: ${{ secrets.PRODUCTION_SSH_PORT }}

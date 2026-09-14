@@ -508,7 +508,7 @@ if (!servicesWorkflow.includes('node .github/scripts/test-crm-bootstrap-failure.
 	throw new Error('CRM bounded bootstrap process gate is missing');
 }
 const pinnedInfraRevision =
-	'e5a55e68d0b89f79a674d8be769ca45b8e1353d5';
+	'd8fd6f0040bab12c70f98785de0dd6efea380891';
 for (const evidence of [
 	"cancel-in-progress: ${{ github.ref != 'refs/heads/prod' }}",
 	'operations-control-ledger:',
@@ -568,25 +568,21 @@ if (
 	infraReleaseReferences.length !== 1 ||
 	infraReleaseReferences.some(reference => reference[1] !== pinnedInfraRevision)
 ) {
-	throw new Error('Identity email release must use one exact reviewed infra SHA');
+	throw new Error('CRM live release must use one exact reviewed infra SHA');
 }
-// Release the reviewed email migration with matching Identity and Operations images.
-for (const [job, scope] of [['deploy-production', 'identity-email-delivery']]) {
-	const block = servicesWorkflow.match(new RegExp('^  ' + job + ':\\n([\\s\\S]*?)(?=^  [a-z][a-z0-9-]*:|$(?![\\s\\S]))', 'm'))?.[1];
-	if (!block || !block.includes('release_scope: ' + scope) ||
-		!block.includes('services_revision: ${{ github.sha }}') ||
-		!block.includes("expected_live_revision: 'eb19be4366d30de1576420a5d52484178bbca9c8'") ||
-		!block.includes("expected_service_env_sha256: 'f0add6db0694e10a0c611d95856b3774b9b998f8924759ce84bc7b4bc5b946eb'") ||
-		!block.includes("expected_identity_workers_revision: '774db6490808cbaff4ff96033c589205cb3935f7'") ||
-		!block.includes("expected_operations_revision: '474d3ab9235002ca3c6c887dace6ccd927a7fdd2'") ||
-		!block.includes("expected_operations_env_sha256: 'bf85df42cd5785af7129279732cb9b6d342a9f29efddc6614c3de2fa5a744660'") ||
-		/expected_crm_\w+_baseline_sha256:|expected_support_\w+:|expected_operations_(?:api_revision|backup_baseline_sha256):|operations_runtime_revision:|operations_evidence_sha256:/.test(block)) {
-		throw new Error('Identity email release must pin its approved API/workers and Operations baselines with unchanged owner envs');
-	}
-}
-if (/release_scope: (?:crm-prepare|crm-databases|crm-runtime|all)\b/.test(servicesWorkflow)) {
-	throw new Error('Initial CRM provisioning and broad rollout must not replay for Identity email release');
-}
+// Only the scoped CRM live transition may run after the current CI gates.
+const deployment = servicesWorkflow.slice(servicesWorkflow.indexOf('  deploy-production:'));
+for (const line of [
+ 'release_scope: crm-live-updates',
+ 'services_revision: ${{ github.sha }}',
+ "expected_live_revision: '5c1636d938a34df72f757170c92e6f86767884cd'",
+ "expected_service_env_sha256: 'cab70688122306a71cb345c9c7031814048b47b70aca5ed677c9be01ab995e51'",
+ "expected_crm_upgrade_baseline_sha256: '3d7b66e4cecd8db22369eca37aebbd43df3f15e3146a415ceebf9bd7250d885e'"
+]) if (!deployment.includes(line)) throw new Error('CRM live release baseline or exact revision is missing');
+if (/expected_identity_\w+:|expected_operations_\w+:|expected_support_\w+:|operations_runtime_revision:|operations_evidence_sha256:/.test(deployment))
+ throw new Error('CRM live release cannot inherit foreign or destructive release authority');
+if (/release_scope: (?:crm-prepare|crm-databases|crm-runtime|all)\b/.test(servicesWorkflow))
+ throw new Error('CRM live release cannot replay provisioning or a broad rollout');
 
 const rootReadme = readFileSync('README.md', 'utf8');
 if (
