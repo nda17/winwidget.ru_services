@@ -136,7 +136,11 @@ const TARGETS = [
 		backupRole: 'winwidget_support_backup',
 		acl: {
 			profile: 'standard',
-			routines: ['enforce_service_identity_integrity()'],
+			routines: [
+				'enforce_service_identity_integrity()',
+				'notify_live_change()',
+				'notify_live_read()'
+			],
 			runtimeRoutines: []
 		}
 	}
